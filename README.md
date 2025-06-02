@@ -21,8 +21,30 @@ It is designed to support complex medical imaging workflows, flexible model arch
 
 ## 🚀 Installation
 
-```bash
-git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
+### From PyPI (recommended)
+
+Install KonfAI from PyPI:
+
+```
+pip install konfai
+```
+
+This will install the command-line tools:
+
+```
+konfai --help
+konfai-cluster --help
+```
+
+---
+
+### From GitHub (development mode)
+
+Clone the repository and install in editable mode:
+
+```
+git clone https://github.com/vboussot/KonfAI.git
+cd KonfAI
 pip install -e .
 ```
 
