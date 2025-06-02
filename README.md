@@ -11,7 +11,7 @@ It is designed to support complex medical imaging workflows, flexible model arch
 ## 🔧 Key Features
 
 - 🔀 Full training/prediction/evaluation orchestration via YAML configuration file
-- 🧩 Modular plugin-like structure (datasets, models, losses, schedulers)
+- 🧩 Modular plugin-like structure (transforms, augmentations, models, losses, schedulers)
 - 🔄 Dynamic criterion scheduling per head / target
 - 🧠 Multi-branch / multi-output model support
 - 🖥️ Cluster-ready
