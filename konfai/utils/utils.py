@@ -112,9 +112,9 @@ class State(Enum):
     TRAIN = "TRAIN"
     RESUME = "RESUME"
     TRANSFER_LEARNING = "TRANSFER_LEARNING"
-    FINE_TUNNING = "FINE_TUNNING"
+    FINE_TUNING = "FINE_TUNING"
     PREDICTION = "PREDICTION"
-    METRIC = "METRIC"
+    EVALUATION = "EVALUATION"
     
     def __str__(self) -> str:
         return self.value
@@ -374,7 +374,7 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     api_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
     api_args.add_argument("-model", "--MODEL", type=str, default="", help="URL Model")
     api_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
-    api_args.add_argument("-metrics_dir", "--METRICS_DIRECTORY", type=str, default="./Metrics/", help="Metrics location")
+    api_args.add_argument("-evaluation_dir", "--EVALUATIONS_DIRECTORY", type=str, default="./Evaluations/", help="Evaluations location")
     api_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
     api_args.add_argument("-setups_dir", "--SETUPS_DIRECTORY", type=str, default="./Setups/", help="Setups location")
     api_args.add_argument('-log', action='store_true', help='Save log')
@@ -388,7 +388,7 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     os.environ["DL_API_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
     os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
-    os.environ["DL_API_METRICS_DIRECTORY"] = config["METRICS_DIRECTORY"]
+    os.environ["DL_API_EVALUATIONS_DIRECTORY"] = config["EVALUATIONs_DIRECTORY"]
     os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
     
     os.environ["DL_API_STATE"] = str(config["type"])
@@ -407,8 +407,8 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     if config["config"] == "None":
         if config["type"] is State.PREDICTION:
              os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Prediction.yml"
-        elif config["type"] is State.METRIC:
-            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Metric.yml"
+        elif config["type"] is State.EVALUATION:
+            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Evaluation.yml"
         else:
             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
     else:
@@ -420,10 +420,10 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
         from KonfAI.konfai.predictor import Predictor
         os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
         return Predictor(config=CONFIG_FILE())    
-    elif config["type"] is State.METRIC:
-        from KonfAI.konfai.metric import Metric
-        os.environ["DEEP_LEARNING_API_ROOT"] = "Metric"
-        return Metric(config=CONFIG_FILE())
+    elif config["type"] is State.EVALUATION:
+        from KonfAI.konfai.evaluator import Evaluator
+        os.environ["DEEP_LEARNING_API_ROOT"] = "Evaluator"
+        return Evaluator(config=CONFIG_FILE())
     else:
         from KonfAI.konfai.trainer import Trainer
         os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
