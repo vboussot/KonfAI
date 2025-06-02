@@ -1,10 +1,10 @@
 
 # 🧠 KonfAI
-<img src="logo.png" alt="KonfAI Logo" width="150" align="right"/>
+<img src="logo.png" alt="KonfAI Logo" width="200" align="right"/>
 
 **KonfAI** is a modular and highly configurable deep learning framework built on PyTorch, driven entirely by YAML configuration files.
 
-It is designed to support complex medical imaging workflows, flexible model architectures, customizable training loops, and advanced loss scheduling — without hardcoding anything.
+It is designed to support complex medical imaging workflows, flexible model architectures, customizable training loops, and advanced loss scheduling, without hardcoding anything.
 
 ---
 
@@ -22,7 +22,7 @@ It is designed to support complex medical imaging workflows, flexible model arch
 ## 🚀 Installation
 
 ```bash
-pip install -e .[full]
+pip install -e .
 ```
 
 ---
