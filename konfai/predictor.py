@@ -6,14 +6,14 @@ import torch
 import tqdm
 import os
 
-from KonfAI.konfai import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, DEEP_LEARNING_API_ROOT
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
-from KonfAI.konfai.utils.dataset import Dataset, Attribute
-from KonfAI.konfai.data.dataset import DataPrediction, DatasetIter
-from KonfAI.konfai.data.HDF5 import Accumulator, PathCombine
-from KonfAI.konfai.network.network import ModelLoader, Network, NetState, CPU_Model
-from KonfAI.konfai.data.transform import Transform, TransformLoader
+from konfai import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, DEEP_LEARNING_API_ROOT
+from konfai.utils.config import config
+from konfai.utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
+from konfai.utils.dataset import Dataset, Attribute
+from konfai.data.dataset import DataPrediction, DatasetIter
+from konfai.data.HDF5 import Accumulator, PathCombine
+from konfai.network.network import ModelLoader, Network, NetState, CPU_Model
+from konfai.data.transform import Transform, TransformLoader
 
 from torch.utils.tensorboard.writer import SummaryWriter
 from typing import Union
@@ -195,7 +195,7 @@ class OutDatasetLoader():
         self.name_class = name_class
 
     def getOutDataset(self, layer_name: str) -> OutDataset:
-        return getattr(importlib.import_module("KonfAI.konfai.predictor"), self.name_class)(config = None, DL_args = "Predictor.outsDataset.{}".format(layer_name))
+        return getattr(importlib.import_module("konfai.predictor"), self.name_class)(config = None, DL_args = "Predictor.outsDataset.{}".format(layer_name))
 
 class _Predictor():
 

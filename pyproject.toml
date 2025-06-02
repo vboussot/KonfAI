@@ -1,8 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "konfai"
-version = "1.0.0"
+version = "1.0.1"
 description = "Modular and configurable Deep Learning framework with YAML and PyTorch"
-authors = [{ name = "Valentin Boussot", email = "boussot.v@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+
+authors = [
+  { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
+]
+
 dependencies = [
   "torch",
   "tqdm",
@@ -16,27 +27,17 @@ dependencies = [
   "pynvml"
 ]
 
-readme = "README.md"
-license = { text = "Apache-2.0" }
+[project.urls]
+Homepage = "https://github.com/vboussot/KonfAI"
+Repository = "https://github.com/vboussot/KonfAI"
+Issues = "https://github.com/vboussot/KonfAI/issues"
+License = "https://www.apache.org/licenses/LICENSE-2.0"
 
 [project.scripts]
 konfai = "konfai.main:main"
 konfai-cluster = "konfai.main:cluster"
 
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project.optional-dependencies]
-
-vtk = [
-  "vtk"
-]
-
-lpips = [
-  "lpips"
-]
-
-cluster = [
-  "submitit"
-]
+vtk = ["vtk"]
+lpips = ["lpips"]
+cluster = ["submitit"]

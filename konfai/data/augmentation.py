@@ -6,10 +6,10 @@ import SimpleITK as sitk
 import torch.nn.functional as F
 from typing import Union
 import os
-from KonfAI.konfai import DEEP_LEARNING_API_ROOT
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import _getModule
-from KonfAI.konfai.utils.dataset import Attribute, data_to_image
+from konfai import DEEP_LEARNING_API_ROOT
+from konfai.utils.config import config
+from konfai.utils.utils import _getModule
+from konfai.utils.dataset import Attribute, data_to_image
 
 
 def _translate2DMatrix(t: torch.Tensor) -> torch.Tensor:

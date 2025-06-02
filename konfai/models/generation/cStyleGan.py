@@ -1,8 +1,10 @@
 import importlib
 import torch
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.data.HDF5 import ModelPatch    
+
+from konfai.network import network, blocks
+from konfai.utils.config import config
+from konfai.data.HDF5 import ModelPatch    
+
 class MappingNetwork(network.ModuleArgsDict):
     def __init__(self, z_dim: int, c_dim: int, w_dim: int, num_layers: int, embed_features: int, layer_features: int):
         super().__init__()

@@ -12,13 +12,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from torch.cuda import device_count
 
-from KonfAI.konfai import DL_API_STATE, DEEP_LEARNING_API_ROOT
-from KonfAI.konfai.data.HDF5 import DatasetPatch, DatasetManager
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, State
-from KonfAI.konfai.utils.dataset import Dataset, Attribute
-from KonfAI.konfai.data.transform import TransformLoader, Transform
-from KonfAI.konfai.data.augmentation import DataAugmentationsList
+from konfai import DL_API_STATE, DEEP_LEARNING_API_ROOT
+from konfai.data.HDF5 import DatasetPatch, DatasetManager
+from konfai.utils.config import config
+from konfai.utils.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, State
+from konfai.utils.dataset import Dataset, Attribute
+from konfai.data.transform import TransformLoader, Transform
+from konfai.data.augmentation import DataAugmentationsList
 
 class GroupTransform:
 

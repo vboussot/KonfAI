@@ -7,10 +7,10 @@ import json
 import shutil
 import builtins
 import importlib
-from KonfAI.konfai import EVALUATIONS_DIRECTORY, PREDICTIONS_DIRECTORY, DEEP_LEARNING_API_ROOT, CONFIG_FILE
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import _getModule, DistributedObject, synchronize_data
-from KonfAI.konfai.data.dataset import DataMetric
+from konfai import EVALUATIONS_DIRECTORY, PREDICTIONS_DIRECTORY, DEEP_LEARNING_API_ROOT, CONFIG_FILE
+from konfai.utils.config import config
+from konfai.utils.utils import _getModule, DistributedObject, synchronize_data
+from konfai.data.dataset import DataMetric
 
 class CriterionsAttr():
 

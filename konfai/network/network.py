@@ -13,11 +13,11 @@ from torch.utils.checkpoint import checkpoint
 from typing import Union
 from enum import Enum
 
-from KonfAI.konfai import DEEP_LEARNING_API_ROOT
-from KonfAI.konfai.metric.schedulers import Scheduler
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import State, _getModule, getDevice, getGPUMemory
-from KonfAI.konfai.data.HDF5 import Accumulator, ModelPatch
+from konfai import DEEP_LEARNING_API_ROOT
+from konfai.metric.schedulers import Scheduler
+from konfai.utils.config import config
+from konfai.utils.utils import State, _getModule, getDevice, getGPUMemory
+from konfai.data.HDF5 import Accumulator, ModelPatch
 
 class NetState(Enum):
     TRAIN = 0,
@@ -71,7 +71,7 @@ class SchedulersLoader():
         shedulers : dict[Scheduler, int] = {}
         for name, step in self.params.items():
             if name:    
-                shedulers[getattr(importlib.import_module("KonfAI.konfai.metric.schedulers"), name)(config = None, DL_args = key)] = step.nb_step
+                shedulers[getattr(importlib.import_module("konfai.metric.schedulers"), name)(config = None, DL_args = key)] = step.nb_step
         return shedulers
     
 class CriterionsAttr():

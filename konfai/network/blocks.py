@@ -6,8 +6,9 @@ from scipy.interpolate import interp1d
 import numpy as np
 import ast
 from typing import Union
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.network import network
+
+from konfai.utils.config import config
+from konfai.network import network
 
 class NormMode(Enum):
     NONE = 0,

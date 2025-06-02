@@ -2,7 +2,6 @@ import argparse
 import os
 from torch.cuda import device_count
 import torch.multiprocessing as mp
-import submitit
 from konfai.utils.utils import setupAPI, TensorBoard, Log
 
 def main():
@@ -36,7 +35,7 @@ def cluster():
 
         n_gpu = len(config["gpu"].split(","))
         distributedObject.setup(n_gpu*int(config["num_nodes"]))
-
+        import submitit
         executor = submitit.AutoExecutor(folder="./Cluster/")
         executor.update_parameters(name=config["name"], mem_gb=config["memory"], gpus_per_node=n_gpu, tasks_per_node=n_gpu//distributedObject.size, cpus_per_task=config["num_workers"], nodes=config["num_nodes"], timeout_min=config["time_limit"])
         with TensorBoard(distributedObject.name):

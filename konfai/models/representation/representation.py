@@ -1,7 +1,7 @@
 import torch
 
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
+from konfai.network import network, blocks
+from konfai.utils.config import config
 
 class ConvBlock(torch.nn.Module):
     

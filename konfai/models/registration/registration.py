@@ -2,9 +2,9 @@ import torch
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.models.segmentation import UNet
+from konfai.network import network, blocks
+from konfai.utils.config import config
+from konfai.models.segmentation import UNet
 
 class VoxelMorph(network.Network):
                 

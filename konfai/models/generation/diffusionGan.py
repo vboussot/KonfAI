@@ -3,12 +3,12 @@ from typing import Union
 import torch
 import numpy as np
 
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.data.HDF5 import ModelPatch, Attribute
-from KonfAI.konfai.data import augmentation
-from KonfAI.konfai.models.segmentation import UNet, NestedUNet
-from KonfAI.konfai.models.generation.ddpm import DDPM
+from konfai.network import network, blocks
+from konfai.utils.config import config
+from konfai.data.HDF5 import ModelPatch, Attribute
+from konfai.data import augmentation
+from konfai.models.segmentation import UNet, NestedUNet
+from konfai.models.generation.ddpm import DDPM
 
 class Discriminator(network.Network):
         

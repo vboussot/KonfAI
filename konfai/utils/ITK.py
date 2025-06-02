@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import scipy
 import torch.nn.functional as F
-from KonfAI.konfai.utils.utils import _resample
+from konfai.utils.utils import _resample
 
 def _openTransform(transform_files: dict[Union[str, sitk.Transform], bool], image: sitk.Image= None) -> list[sitk.Transform]:
     transforms: list[sitk.Transform] = []

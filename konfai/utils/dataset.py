@@ -11,7 +11,7 @@ from lxml import etree
 import csv
 import matplotlib.pyplot as pyplot
 import pandas as pd
-from KonfAI.konfai import DATE
+from konfai import DATE
 
 class Plot():
 

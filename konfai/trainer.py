@@ -12,11 +12,11 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from torch.optim.swa_utils import AveragedModel
 import torch.distributed as dist
 
-from KonfAI.konfai import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE, DL_API_STATE
-from KonfAI.konfai.data.dataset import DataTrain
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import State, DataLog, DistributedObject, description
-from KonfAI.konfai.network.network import Network, ModelLoader, NetState, CPU_Model
+from konfai import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE, DL_API_STATE
+from konfai.data.dataset import DataTrain
+from konfai.utils.config import config
+from konfai.utils.utils import State, DataLog, DistributedObject, description
+from konfai.network.network import Network, ModelLoader, NetState, CPU_Model
 
 
 class _Trainer():
