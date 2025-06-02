@@ -7,7 +7,7 @@ import json
 import shutil
 import builtins
 import importlib
-from KonfAI.konfai import METRICS_DIRECTORY, PREDICTIONS_DIRECTORY, DEEP_LEARNING_API_ROOT, CONFIG_FILE
+from KonfAI.konfai import EVALUATIONS_DIRECTORY, PREDICTIONS_DIRECTORY, DEEP_LEARNING_API_ROOT, CONFIG_FILE
 from KonfAI.konfai.utils.config import config
 from KonfAI.konfai.utils.utils import _getModule, DistributedObject, synchronize_data
 from KonfAI.konfai.data.dataset import DataMetric
@@ -83,9 +83,9 @@ class Statistics():
         with open(self.filename, "w") as f:
             f.write(json.dumps(result, indent=4))
             
-class Metric(DistributedObject):
+class Evaluator(DistributedObject):
 
-    @config("Metric")
+    @config("Evaluator")
     def __init__(self, train_name: str = "default:name", metrics: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()}, dataset : DataMetric = DataMetric(),) -> None:
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)

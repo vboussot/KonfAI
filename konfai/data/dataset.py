@@ -295,7 +295,7 @@ class Data(ABC):
             return [[] for _ in range(world_size)]
         
         maps = []
-        if DL_API_STATE() == str(State.PREDICTION) or DL_API_STATE() == str(State.METRIC):
+        if DL_API_STATE() == str(State.PREDICTION) or DL_API_STATE() == str(State.EVALUATION):
             np_map = np.asarray(map)
             unique_index = np.unique(np_map[:, 0])
             offset = int(np.ceil(len(unique_index)/world_size))
