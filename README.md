@@ -22,7 +22,7 @@ It is designed to support complex medical imaging workflows, flexible model arch
 ## 🚀 Installation
 
 ```bash
-pip install -e .[full]
+pip install -e .
 ```
 
 ---
