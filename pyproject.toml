@@ -1,0 +1,42 @@
+[project]
+name = "konfai"
+version = "1.0.0"
+description = "Modular and configurable Deep Learning framework with YAML and PyTorch"
+authors = [{ name = "Valentin Boussot", email = "boussot.v@gmail.com" }]
+dependencies = [
+  "torch",
+  "tqdm",
+  "numpy",
+  "ruamel.yaml",
+  "psutil",
+  "tensorboard",
+  "SimpleITK",
+  "lxml",
+  "h5py",
+  "pynvml"
+]
+
+readme = "README.md"
+license = { text = "MIT" }
+
+[project.scripts]
+konfai = "konfai.main:main"
+konfai-cluster = "konfai.main:cluster"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project.optional-dependencies]
+
+vtk = [
+  "vtk"
+]
+
+lpips = [
+  "lpips"
+]
+
+cluster = [
+  "submitit"
+]
