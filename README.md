@@ -31,5 +31,7 @@ pip install -e .
 ## 🧪 Usage
 
 ```bash
-konfai train --config path/to/config.yaml
+konfai TRAIN --gpu 0
+konfai PREDICTION --gpu 0
+konfai EVALUATION
 ```
