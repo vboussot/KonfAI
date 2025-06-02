@@ -1,6 +1,6 @@
 
 # 🧠 KonfAI
-<img src="Logo.png" alt="KonfAI Logo" width="150" align="right"/>
+<img src="logo.png" alt="KonfAI Logo" width="150" align="right"/>
 
 **KonfAI** is a modular and highly configurable deep learning framework built on PyTorch, driven entirely by YAML configuration files.
 
