@@ -38,7 +38,7 @@ konfai-cluster --help
 
 ---
 
-### From GitHub (development mode)
+### From GitHub
 
 Clone the repository and install in editable mode:
 
