@@ -40,7 +40,7 @@ konfai-cluster --help
 
 ### From GitHub
 
-Clone the repository and install in editable mode:
+Clone the repository and install:
 
 ```
 git clone https://github.com/vboussot/KonfAI.git
