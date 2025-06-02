@@ -6,9 +6,9 @@ from abc import ABC, abstractmethod
 import torch.nn.functional as F
 from typing import Any, Union
 
-from KonfAI.konfai.utils.utils import _getModule, NeedDevice, _resample_affine, _affine_matrix
-from KonfAI.konfai.utils.dataset import Dataset, Attribute, data_to_image, image_to_data
-from KonfAI.konfai.utils.config import config
+from konfai.utils.utils import _getModule, NeedDevice, _resample_affine, _affine_matrix
+from konfai.utils.dataset import Dataset, Attribute, data_to_image, image_to_data
+from konfai.utils.config import config
 
 class Transform(NeedDevice, ABC):
     

@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Union
 import torch
 
-from KonfAI.konfai import CONFIG_FILE
+from konfai import CONFIG_FILE
 
 yaml = ruamel.yaml.YAML()
 

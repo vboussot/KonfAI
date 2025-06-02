@@ -9,11 +9,11 @@ from typing import Union
 import itertools
 import copy 
 from functools import partial
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import get_patch_slices_from_shape
-from KonfAI.konfai.utils.dataset import Dataset, Attribute
-from KonfAI.konfai.data.transform import Transform, Save
-from KonfAI.konfai.data.augmentation import DataAugmentationsList
+from konfai.utils.config import config
+from konfai.utils.utils import get_patch_slices_from_shape
+from konfai.utils.dataset import Dataset, Attribute
+from konfai.data.transform import Transform, Save
+from konfai.data.augmentation import DataAugmentationsList
 
 
 class PathCombine(ABC):

@@ -15,11 +15,11 @@ from skimage.metrics import structural_similarity
 import copy
 from abc import abstractmethod
 
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.utils.utils import _getModule
-from KonfAI.konfai.data.HDF5 import ModelPatch
-from KonfAI.konfai.network.blocks import LatentDistribution
-from KonfAI.konfai.network.network import ModelLoader, Network
+from konfai.utils.config import config
+from konfai.utils.utils import _getModule
+from konfai.data.HDF5 import ModelPatch
+from konfai.network.blocks import LatentDistribution
+from konfai.network.network import ModelLoader, Network
 
 modelsRegister = {}
 

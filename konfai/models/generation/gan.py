@@ -1,9 +1,9 @@
 from functools import partial
 import torch
 
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.data.HDF5 import ModelPatch
+from konfai.network import network, blocks
+from konfai.utils.config import config
+from konfai.data.HDF5 import ModelPatch
 
 class Discriminator(network.Network):
 

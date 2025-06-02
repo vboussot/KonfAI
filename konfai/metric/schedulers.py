@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from abc import abstractmethod
-from KonfAI.konfai.utils.config import config
+from konfai.utils.config import config
 
 class Scheduler():
 

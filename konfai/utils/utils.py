@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Union
 
-from KonfAI.konfai import CONFIG_FILE, STATISTICS_DIRECTORY, PREDICTIONS_DIRECTORY, DL_API_STATE, CUDA_VISIBLE_DEVICES
+from konfai import CONFIG_FILE, STATISTICS_DIRECTORY, PREDICTIONS_DIRECTORY, DL_API_STATE, CUDA_VISIBLE_DEVICES
 import torch.distributed as dist
 import argparse
 import subprocess
@@ -35,7 +35,7 @@ def _getModule(classpath : str, type : str) -> tuple[str, str]:
         module = ".".join(classpath.split("_")[:-1])
         name = classpath.split("_")[-1] 
     else:
-        module = "KonfAI."+type
+        module = ""+type
         name = classpath
     return module, name
 
@@ -388,7 +388,7 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     os.environ["DL_API_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
     os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
-    os.environ["DL_API_EVALUATIONS_DIRECTORY"] = config["EVALUATIONs_DIRECTORY"]
+    os.environ["DL_API_EVALUATIONS_DIRECTORY"] = config["EVALUATIONS_DIRECTORY"]
     os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
     
     os.environ["DL_API_STATE"] = str(config["type"])
@@ -417,19 +417,18 @@ def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     
     if config["type"] is State.PREDICTION:    
-        from KonfAI.konfai.predictor import Predictor
+        from konfai.predictor import Predictor
         os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
         return Predictor(config=CONFIG_FILE())    
     elif config["type"] is State.EVALUATION:
-        from KonfAI.konfai.evaluator import Evaluator
+        from konfai.evaluator import Evaluator
         os.environ["DEEP_LEARNING_API_ROOT"] = "Evaluator"
         return Evaluator(config=CONFIG_FILE())
     else:
-        from KonfAI.konfai.trainer import Trainer
+        from konfai.trainer import Trainer
         os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
         return Trainer(config=CONFIG_FILE())
 
-import submitit
 
 def setupGPU(world_size: int, port: int, rank: Union[int, None] = None) -> tuple[int , int]:
     try:
@@ -437,6 +436,7 @@ def setupGPU(world_size: int, port: int, rank: Union[int, None] = None) -> tuple
     except:
         host_name = "localhost"
     if rank is None:
+        import submitit
         job_env = submitit.JobEnvironment()
         global_rank = job_env.global_rank
         local_rank = job_env.local_rank

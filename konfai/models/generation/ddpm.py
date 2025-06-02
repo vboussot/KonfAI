@@ -6,11 +6,11 @@ import torch
 import tqdm
 import numpy as np
 
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.data.HDF5 import ModelPatch
-from KonfAI.konfai.utils.utils import gpuInfo
-from KonfAI.konfai.metric.measure import Criterion
+from konfai.network import network, blocks
+from konfai.utils.config import config
+from konfai.data.HDF5 import ModelPatch
+from konfai.utils.utils import gpuInfo
+from konfai.metric.measure import Criterion
 
 def cosine_beta_schedule(timesteps, s=0.008):
     steps = timesteps + 1

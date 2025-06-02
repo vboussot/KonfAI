@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
-from KonfAI.konfai.network import network, blocks
-from KonfAI.konfai.utils.config import config
-from KonfAI.konfai.data.HDF5 import ModelPatch
+from konfai.network import network, blocks
+from konfai.utils.config import config
+from konfai.data.HDF5 import ModelPatch
 
 """
 "convnext_tiny_1k": "https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth", depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]
