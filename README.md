@@ -22,6 +22,7 @@ It is designed to support complex medical imaging workflows, flexible model arch
 ## 🚀 Installation
 
 ```bash
+git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
 pip install -e .
 ```
 
