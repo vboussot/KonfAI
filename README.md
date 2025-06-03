@@ -1,3 +1,5 @@
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vboussot/KonfAI/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/konfai)](https://pypi.org/project/konfai/)
 
 # 🧠 KonfAI
 <img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="200" align="right"/>
@@ -21,7 +23,7 @@ It is designed to support complex medical imaging workflows, flexible model arch
 
 ## 🚀 Installation
 
-### From PyPI (recommended)
+### From PyPI
 
 Install KonfAI from PyPI:
 
