@@ -1,6 +1,6 @@
 
 # 🧠 KonfAI
-<img src="logo.png" alt="KonfAI Logo" width="200" align="right"/>
+<img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="200" align="right"/>
 
 **KonfAI** is a modular and highly configurable deep learning framework built on PyTorch, driven entirely by YAML configuration files.
 
@@ -21,8 +21,30 @@ It is designed to support complex medical imaging workflows, flexible model arch
 
 ## 🚀 Installation
 
-```bash
-git clone https://github.com/vboussot/KonfAI.git && cd KonfAI
+### From PyPI (recommended)
+
+Install KonfAI from PyPI:
+
+```
+pip install konfai
+```
+
+This will install the command-line tools:
+
+```
+konfai --help
+konfai-cluster --help
+```
+
+---
+
+### From GitHub
+
+Clone the repository and install:
+
+```
+git clone https://github.com/vboussot/KonfAI.git
+cd KonfAI
 pip install -e .
 ```
 
