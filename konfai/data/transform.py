@@ -36,7 +36,7 @@ class TransformLoader:
         pass
     
     def getTransform(self, classpath : str, DL_args : str) -> Transform:
-        module, name = _getModule(classpath, "transform")
+        module, name = _getModule(classpath, "data.transform")
         return config("{}.{}".format(DL_args, classpath))(getattr(importlib.import_module(module), name))(config = None)
 
 class Clip(Transform):

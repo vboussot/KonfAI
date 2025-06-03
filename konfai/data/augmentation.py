@@ -58,7 +58,7 @@ class DataAugmentationsList():
 
     def load(self, key: str):
         for augmentation, prob in self.dataAugmentationsLoader.items():
-            module, name = _getModule(augmentation, "augmentation")
+            module, name = _getModule(augmentation, "data.augmentation")
             dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="{}.Dataset.augmentations.{}.dataAugmentations".format(DEEP_LEARNING_API_ROOT(), key))
             dataAugmentation.load(prob.prob)
             self.dataAugmentations.append(dataAugmentation)

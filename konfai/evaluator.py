@@ -27,7 +27,7 @@ class CriterionsLoader():
     def getCriterions(self, output_group : str, target_group : str) -> dict[torch.nn.Module, CriterionsAttr]:
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
-            module, name = _getModule(module_classpath, "measure")
+            module, name = _getModule(module_classpath, "metric.measure")
             criterions[config("{}.metrics.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
@@ -90,7 +90,7 @@ class Evaluator(DistributedObject):
         if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
             exit(0)
         super().__init__(train_name)
-        self.metric_path = METRICS_DIRECTORY()+self.name+"/"
+        self.metric_path = EVALUATIONS_DIRECTORY()+self.name+"/"
         self.predict_path = PREDICTIONS_DIRECTORY()+self.name+"/"
         self.metricsLoader = metrics
         self.dataset = dataset
@@ -142,5 +142,3 @@ class Evaluator(DistributedObject):
             outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)
             if global_rank == 0:
                 self.statistics_validation.write(outputs)
-
-#	69.8936 ± 13.2773 (107)	28.6021 (117)	0.8641 (118)

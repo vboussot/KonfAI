@@ -35,7 +35,7 @@ def _getModule(classpath : str, type : str) -> tuple[str, str]:
         module = ".".join(classpath.split("_")[:-1])
         name = classpath.split("_")[-1] 
     else:
-        module = ""+type
+        module = "konfai."+type
         name = classpath
     return module, name
 

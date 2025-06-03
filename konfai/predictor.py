@@ -55,7 +55,7 @@ class OutDataset(Dataset, NeedDevice, ABC):
                     transform_type.append(transform)
 
         if self._patchCombine is not None:
-            module, name = _getModule(self._patchCombine, "HDF5")
+            module, name = _getModule(self._patchCombine, "data.HDF5")
             self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(DEEP_LEARNING_API_ROOT(), name_layer))
     
     def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
