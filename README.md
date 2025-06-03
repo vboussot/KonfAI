@@ -2,7 +2,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/konfai)](https://pypi.org/project/konfai/)
 
 # 🧠 KonfAI
-<img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="200" align="right"/>
+<img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="250" align="right"/>
 
 **KonfAI** is a modular and highly configurable deep learning framework built on PyTorch, driven entirely by YAML configuration files.
 
