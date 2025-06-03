@@ -96,7 +96,7 @@ class CriterionsLoader():
     def getCriterions(self, model_classname : str, output_group : str, target_group : str) -> dict[torch.nn.Module, CriterionsAttr]:
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
-            module, name = _getModule(module_classpath, "measure")
+            module, name = _getModule(module_classpath, "metric.measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
             criterionsAttr.sheduler = criterionsAttr.l.getShedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), model_classname, output_group, target_group, module_classpath))
             criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr

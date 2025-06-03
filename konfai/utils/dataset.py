@@ -9,8 +9,6 @@ import os
 
 from lxml import etree
 import csv
-import matplotlib.pyplot as pyplot
-import pandas as pd
 from konfai import DATE
 
 class Plot():
@@ -175,6 +173,8 @@ class Plot():
         return results
     
     def plot(self, ids = [], patients = [], labels = [], colors = None):
+
+        import matplotlib.pyplot as pyplot
         results = self._extract(ids=ids, patients=patients)
 
         attrs = {k: v for k, v in results.items() if k.startswith("attrib:")}
@@ -204,7 +204,7 @@ class Plot():
 
         for label in labels:
             series = series+[label]*max
-
+        import pandas as pd
         df = pd.DataFrame(dict([(k,pd.Series(v)) for k, v in norms.items()]))
         df['Categories'] = pd.Series(series)
         
@@ -234,6 +234,7 @@ class Plot():
         return self
     
     def show(self):
+        import matplotlib.pyplot as pyplot
         pyplot.show()
 
 class Attribute(dict[str, Any]):

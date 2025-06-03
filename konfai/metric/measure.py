@@ -244,7 +244,7 @@ class PerceptualLoss(Criterion):
         def getLoss(self) -> dict[torch.nn.Module, float]:
             result: dict[torch.nn.Module, float] = {}
             for loss, l in self.losses.items():
-                module, name = _getModule(loss, "measure")
+                module, name = _getModule(loss, "metric.measure")
                 result[config(self.DL_args)(getattr(importlib.import_module(module), name))(config=None)] = l   
             return result
         
