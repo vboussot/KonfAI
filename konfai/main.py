@@ -4,6 +4,9 @@ from torch.cuda import device_count
 import torch.multiprocessing as mp
 from konfai.utils.utils import setupAPI, TensorBoard, Log
 
+import sys
+sys.path.insert(0, os.getcwd())
+
 def main():
     parser = argparse.ArgumentParser(description="KonfAI", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     with setupAPI(parser) as distributedObject:

@@ -22,6 +22,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 import importlib
+import copy
+from collections import defaultdict
 
 class OutDataset(Dataset, NeedDevice, ABC):
 
@@ -152,7 +154,7 @@ class OutSameAsGroupDataset(OutDataset):
         if self.redution == "mean":
             result = torch.mean(result.float(), dim=0).to(dtype)
         elif self.redution == "median":
-            result, _ = torch.median(result.float(), dim=0).to(dtype)
+            result, _ = torch.median(result.float(), dim=0)
         else:
             raise NameError("Reduction method does not exist (mean, median)")
         for transform in self.final_transforms:
@@ -199,19 +201,19 @@ class OutDatasetLoader():
 
 class _Predictor():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, predict_path: str, data_log: Union[list[str], None], outsDataset: dict[str, OutDataset], model: DDP, dataloader_prediction: DataLoader) -> None:
+    def __init__(self, world_size: int, global_rank: int, local_rank: int, predict_path: str, data_log: Union[list[str], None], outsDataset: dict[str, OutDataset], modelComposite: DDP, dataloader_prediction: DataLoader) -> None:
         self.world_size = world_size        
         self.global_rank = global_rank
         self.local_rank = local_rank
 
-        self.model = model
+        self.modelComposite = modelComposite
         self.dataloader_prediction = dataloader_prediction
         self.outsDataset = outsDataset
 
         
         self.it = 0
 
-        self.device = self.model.device
+        self.device = self.modelComposite.device
         self.dataset: DatasetIter = self.dataloader_prediction.dataset
         patch_size, overlap = self.dataset.getPatchConfig()
         for outDataset in self.outsDataset.values():
@@ -220,7 +222,7 @@ class _Predictor():
         if data_log is not None:
             for data in data_log:
                 self.data_log[data.split("/")[0].replace(":", ".")] = (DataLog.__getitem__(data.split("/")[1]).value[0], int(data.split("/")[2]))
-        self.tb = SummaryWriter(log_dir = predict_path+"Metric/") if len([network for network in self.model.module.getNetworks().values() if network.measure is not None]) or len(self.data_log) else None
+        self.tb = SummaryWriter(log_dir = predict_path+"Metric/") if len([network for network in self.modelComposite.module.getNetworks().values() if network.measure is not None]) or len(self.data_log) else None
         
     def __enter__(self):
         return self
@@ -234,15 +236,15 @@ class _Predictor():
     
     @torch.no_grad()
     def run(self):
-        self.model.eval()  
-        self.model.module.setState(NetState.PREDICTION)
-        desc = lambda : "Prediction : {}".format(description(self.model))
+        self.modelComposite.eval()  
+        self.modelComposite.module.setState(NetState.PREDICTION)
+        desc = lambda : "Prediction : {}".format(description(self.modelComposite))
         self.dataloader_prediction.dataset.load()
         with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=False, desc = desc(), total=len(self.dataloader_prediction), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
             dist.barrier()
             for it, data_dict in batch_iter:
                 input = self.getInput(data_dict)
-                for name, output in self.model(input, list(self.outsDataset.keys())):
+                for name, output in self.modelComposite(input, list(self.outsDataset.keys())):
                     self._predict_log(data_dict)
                     outDataset = self.outsDataset[name]
                     for i, (index, patch_augmentation, patch_index) in enumerate([(int(index), int(patch_augmentation), int(patch_index)) for index, patch_augmentation, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2], list(data_dict.values())[0][3])]):
@@ -254,7 +256,7 @@ class _Predictor():
                 self.it += 1
 
     def _predict_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
-        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank, {"" : self.model.module}, 1)
+        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank, {"" : self.modelComposite.module}, 1)
         
         if self.global_rank == 0:
             images_log = []
@@ -265,20 +267,56 @@ class _Predictor():
                     else:
                         images_log.append(name.replace(":", "."))
 
-            for name, network in self.model.module.getNetworks().items():
+            for name, network in self.modelComposite.module.getNetworks().items():
                 if network.measure is not None:
                     self.tb.add_scalars("Prediction/{}/Loss".format(name), {k : v[1] for k, v in measures["{}{}".format(name, "")][0].items()}, self.it)
                     self.tb.add_scalars("Prediction/{}/Metric".format(name), {k : v[1] for k, v in measures["{}{}".format(name, "")][1].items()}, self.it)
                 if len(images_log):
                     for name, layer, _ in self.model.module.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                         self.data_log[name][0](self.tb, "Prediction/{}".format(name), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)
+
+class ModelComposite(Network):
+
+    def __init__(self, model: Network, nb_models: int, method: str):
+        super().__init__(model.in_channels, model.optimizer, model.schedulers, model.outputsCriterionsLoader, model.patch, model.nb_batch_per_step, model.init_type, model.init_gain, model.dim)
+        self.method = method
+        for i in range(nb_models):
+            self.add_module("Model_{}".format(i), copy.deepcopy(model), in_branch=[0], out_branch=["output_{}".format(i)])
+
+    def load(self, state_dicts : list[dict[str, dict[str, torch.Tensor]]]):
+        for i, state_dict in enumerate(state_dicts):
+            self["Model_{}".format(i)].load(state_dict, init=False)
+            self["Model_{}".format(i)].setName("{}_{}".format(self["Model_{}".format(i)].getName(), i))
+            
+    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_layers: list[str] = []) -> list[tuple[str, torch.Tensor]]:
+        result = {}
+        for name, module in self.items():
+            result[name] = module(data_dict, output_layers)
         
+        aggregated = defaultdict(list)
+        for module_outputs in result.values():
+            for key, tensor in module_outputs:
+                aggregated[key].append(tensor)
+
+        final_outputs = []
+        for key, tensors in aggregated.items():
+            stacked = torch.stack(tensors, dim=0)
+            if self.method == 'mean':
+                agg = torch.mean(stacked, dim=0)
+            elif self.method == 'median':
+                agg = torch.median(stacked, dim=0).values
+            final_outputs.append((key, agg))
+
+        return final_outputs
+    
+
 class Predictor(DistributedObject):
 
     @config("Predictor")
     def __init__(self, 
                     model: ModelLoader = ModelLoader(),
                     dataset: DataPrediction = DataPrediction(),
+                    combine: str = "mean",
                     train_name: str = "name",
                     manual_seed : Union[int, None] = None,
                     gpu_checkpoints: Union[list[str], None] = None,
@@ -289,6 +327,7 @@ class Predictor(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
+        self.combine = combine
 
         self.model = model.getModel(train=False)
         self.it = 0
@@ -305,28 +344,31 @@ class Predictor(DistributedObject):
         
         self.gpu_checkpoints = gpu_checkpoints
 
-    def _load(self) -> dict[str, dict[str, torch.Tensor]]:
-        if MODEL().startswith("https://"):
-            try:
-                state_dict = {MODEL().split(":")[1]: torch.hub.load_state_dict_from_url(url=MODEL().split(":")[0], map_location="cpu", check_hash=True)}
-            except:
-                raise Exception("Model : {} does not exist !".format(MODEL())) 
-        else:
-            if MODEL() != "":
-                path = ""
-                name = MODEL() 
+    def _load(self) -> list[dict[str, dict[str, torch.Tensor]]]:
+        model_paths = MODEL().split(":")
+        state_dicts = []
+        for model_path in model_paths:
+            if model_path.startswith("https://"):
+                try:
+                    state_dicts.append(torch.hub.load_state_dict_from_url(url=model_path, map_location="cpu", check_hash=True))
+                except:
+                    raise Exception("Model : {} does not exist !".format(model_path)) 
             else:
-                if self.name.endswith(".pt"):
-                    path = MODELS_DIRECTORY()+"/".join(self.name.split("/")[:-1])+"/StateDict/"
-                    name = self.name.split("/")[-1]
+                if model_path != "":
+                    path = ""
+                    name = model_path
                 else:
-                    path = MODELS_DIRECTORY()+self.name+"/StateDict/"
-                    name = sorted(os.listdir(path))[-1]
-            if os.path.exists(path+name):
-                state_dict = torch.load(path+name, weights_only=False)
-            else:
-                raise Exception("Model : {} does not exist !".format(path+name))
-        return state_dict
+                    if self.name.endswith(".pt"):
+                        path = MODELS_DIRECTORY()+"/".join(self.name.split("/")[:-1])+"/StateDict/"
+                        name = self.name.split("/")[-1]
+                    else:
+                        path = MODELS_DIRECTORY()+self.name+"/StateDict/"
+                        name = sorted(os.listdir(path))[-1]
+                if os.path.exists(path+name):
+                    state_dicts.append(torch.load(path+name, weights_only=False))
+                else:
+                    raise Exception("Model : {} does not exist !".format(path+name))
+        return state_dicts
     
     def setup(self, world_size: int):
         for dataset_filename in self.datasets_filename:
@@ -345,11 +387,11 @@ class Predictor(DistributedObject):
         self.model.init(autocast=False, state = State.PREDICTION)
         self.model.init_outputsGroup()
         self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
-        self.model.load(self._load(), init=False)
-        
-        if len(list(self.outsDataset.keys())) == 0 and len([network for network in self.model.getNetworks().values() if network.measure is not None]) == 0:
-            exit(0)
+        self.modelComposite = ModelComposite(self.model, len(MODEL().split(":")), self.combine)
+        self.modelComposite.load(self._load())
 
+        if len(list(self.outsDataset.keys())) == 0 and len([network for network in self.modelComposite.getNetworks().values() if network.measure is not None]) == 0:
+            exit(0)
         
         self.size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
         self.dataloader = self.dataset.getData(world_size//self.size)
@@ -358,9 +400,9 @@ class Predictor(DistributedObject):
            
            
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
-        model = Network.to(self.model, local_rank*self.size)
-        model = DDP(model, static_graph=True) if torch.cuda.is_available() else CPU_Model(model)
-        with _Predictor(world_size, global_rank, local_rank, self.predict_path, self.images_log, self.outsDataset, model, *dataloaders) as p:
+        modelComposite = Network.to(self.modelComposite, local_rank*self.size)
+        modelComposite = DDP(modelComposite, static_graph=True) if torch.cuda.is_available() else CPU_Model(modelComposite)
+        with _Predictor(world_size, global_rank, local_rank, self.predict_path, self.images_log, self.outsDataset, modelComposite, *dataloaders) as p:
             p.run()
 
         
