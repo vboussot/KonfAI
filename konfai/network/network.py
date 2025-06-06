@@ -509,10 +509,10 @@ class Network(ModuleArgsDict, ABC):
         results[name_function(self)] = function(self, *args, **kwargs)
         return results
     
-    def _function_network(t : bool = False):
+    def _function_network():
         def _function_network_d(function : Callable):
             def new_function(self : Self, *args, **kwargs) -> dict[str, object]:
-                return self._apply_network(lambda network: network._getName() if t else network.getName(), [], self.getName(), function, *args, **kwargs)
+                return self._apply_network(lambda network: network.getName(), [], self.getName(), function, *args, **kwargs)
             return new_function
         return _function_network_d
 
@@ -547,7 +547,7 @@ class Network(ModuleArgsDict, ABC):
         self._it = 0
         self.outputsGroup : list[OutputsGroup]= []
 
-    @_function_network(True)
+    @_function_network()
     def state_dict(self) -> dict[str, OrderedDict]:
         destination = OrderedDict()
         destination._metadata = OrderedDict()
@@ -618,13 +618,13 @@ class Network(ModuleArgsDict, ABC):
                 module.apply(fn)
         fn(self)
         
-    @_function_network(True)
+    @_function_network()
     def load(self, state_dict : dict[str, dict[str, torch.Tensor]], init: bool = True, ema : bool =False):
         if init:
             self.apply(partial(ModuleArgsDict.init_func, init_type=self.init_type, init_gain=self.init_gain))
         name = "Model" + ("_EMA" if ema else "")
         if name in state_dict:
-            model_state_dict_tmp = {k.split(".")[-1] : v for k, v in state_dict[name].items()}[self._getName()]
+            model_state_dict_tmp = {k.split(".")[-1] : v for k, v in state_dict[name].items()}[self.getName()]
             map = self.getMap()
             model_state_dict : OrderedDict[str, torch.Tensor] = OrderedDict()
             
@@ -806,8 +806,6 @@ class Network(ModuleArgsDict, ABC):
 
             if not len(layers_name):
                 break
-    
-
 
     def init_outputsGroup(self):
         metric_tmp = {network.measure : network.measure.outputsCriterions.keys() for network in self.getNetworks().values() if network.measure}
@@ -906,14 +904,11 @@ class Network(ModuleArgsDict, ABC):
         return module
                 
     def getName(self) -> str:
-        return self.__class__.__name__
+        return self.name
     
     def setName(self, name: str) -> Self:
         self.name = name
         return self
-    
-    def _getName(self) -> str:
-        return self.name
     
     def setState(self, state: NetState):
         for module in self.modules():
