@@ -12,8 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from torch.cuda import device_count
 
-from konfai import DL_API_STATE, DEEP_LEARNING_API_ROOT
-from konfai.data.HDF5 import DatasetPatch, DatasetManager
+from konfai import KONFAI_STATE, KONFAI_ROOT
+from konfai.data.patching import DatasetPatch, DatasetManager
 from konfai.utils.config import config
 from konfai.utils.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, State
 from konfai.utils.dataset import Dataset, Attribute
@@ -36,7 +36,7 @@ class GroupTransform:
         if self._pre_transforms is not None:
             if isinstance(self._pre_transforms, dict):
                 for classpath, transform in self._pre_transforms.items():
-                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(DEEP_LEARNING_API_ROOT(), group_src, group_dest))
+                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(KONFAI_ROOT(), group_src, group_dest))
                     transform.setDatasets(datasets)
                     self.pre_transforms.append(transform)
             else:
@@ -47,7 +47,7 @@ class GroupTransform:
         if self._post_transforms is not None:
             if isinstance(self._post_transforms, dict):
                 for classpath, transform in self._post_transforms.items():
-                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(DEEP_LEARNING_API_ROOT(), group_src, group_dest))
+                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(KONFAI_ROOT(), group_src, group_dest))
                     transform.setDatasets(datasets)
                     self.post_transforms.append(transform)
             else:
@@ -64,7 +64,7 @@ class GroupTransform:
 class Group(dict[str, GroupTransform]):
 
     @config()
-    def __init__(self, groups_dest: dict[str, GroupTransform] = {"default": GroupTransform()}):
+    def __init__(self, groups_dest: dict[str, GroupTransform] = {"default:group_dest": GroupTransform()}):
         super().__init__(groups_dest)
 
 class CustomSampler(Sampler[int]):
@@ -127,7 +127,7 @@ class DatasetIter(data.Dataset):
                     total=len(indexs),
                     desc="Caching : init | {} | {}".format(memoryForecast(memory_init, 0, self.nb_dataset), cpuInfo()),
                     leave=False,
-                    disable=self.rank != 0 and "DL_API_CLUSTER" not in os.environ
+                    disable=self.rank != 0 and "KONFAI_CLUSTER" not in os.environ
                 )
 
                 def process(index):
@@ -135,7 +135,7 @@ class DatasetIter(data.Dataset):
                     with memory_lock:
                         pbar.set_description("Caching : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, index, self.nb_dataset), cpuInfo()))
                         pbar.update(1)
-                with ThreadPoolExecutor(max_workers=os.cpu_count()//device_count()) as executor:
+                with ThreadPoolExecutor(max_workers=os.cpu_count()//(device_count() if device_count() > 0 else 1)) as executor:
                     futures = [executor.submit(process, index) for index in indexs]
                     for _ in as_completed(futures):
                         pass
@@ -295,7 +295,7 @@ class Data(ABC):
             return [[] for _ in range(world_size)]
         
         maps = []
-        if DL_API_STATE() == str(State.PREDICTION) or DL_API_STATE() == str(State.EVALUATION):
+        if KONFAI_STATE() == str(State.PREDICTION) or KONFAI_STATE() == str(State.EVALUATION):
             np_map = np.asarray(map)
             unique_index = np.unique(np_map[:, 0])
             offset = int(np.ceil(len(unique_index)/world_size))
@@ -314,7 +314,11 @@ class Data(ABC):
     def getData(self, world_size: int) -> list[list[DataLoader]]:
         datasets: dict[str, list[(str, bool)]] = {}
         for dataset_filename in self.dataset_filenames:
-            if len(dataset_filename.split(":")) == 2:
+            if len(dataset_filename.split(":")) == 1:
+                filename = dataset_filename
+                format = "mha"
+                append = True
+            elif len(dataset_filename.split(":")) == 2:
                 filename, format = dataset_filename.split(":")
                 append = True
             else:
@@ -331,8 +335,9 @@ class Data(ABC):
                     else:
                         datasets[group] = [(filename, append)]
         for group_src in self.groups_src:
-            assert group_src in datasets, "Error group source {} not found".format(group_src)
-
+            if group_src not in datasets:
+                raise ValueError("[DatasetManager] Error: group source {} not found. Available groups: {}".format(group_src, list(datasets.keys())))
+                
             for group_dest in self.groups_src[group_src]:
                 self.groups_src[group_src][group_dest].load(group_src, group_dest, [self.datasets[filename] for filename, _ in datasets[group_src]])
         for key, dataAugmentations in self.dataAugmentationsList.items():
@@ -422,8 +427,8 @@ class Data(ABC):
 class DataTrain(Data):
 
     @config("Dataset")
-    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
-                        groups_src : dict[str, Group] = {"default" : Group()},
+    def __init__(self,  dataset_filenames : list[str] = ["default:./Dataset"], 
+                        groups_src : dict[str, Group] = {"default:group_src" : Group()},
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
                         inlineAugmentations: bool = False,
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
@@ -437,7 +442,7 @@ class DataTrain(Data):
 class DataPrediction(Data):
 
     @config("Dataset")
-    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
+    def __init__(self,  dataset_filenames : list[str] = ["default:./Dataset"], 
                         groups_src : dict[str, Group] = {"default" : Group()},
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
                         inlineAugmentations: bool = False,
@@ -452,19 +457,10 @@ class DataPrediction(Data):
 class DataMetric(Data):
 
     @config("Dataset")
-    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
+    def __init__(self,  dataset_filenames : list[str] = ["default:./Dataset"], 
                         groups_src : dict[str, Group] = {"default" : Group()},
                         subset : Union[PredictionSubset, dict[str, PredictionSubset]] = PredictionSubset(),
                         validation: Union[str, None] = None,
                         num_workers : int = 4) -> None:
 
         super().__init__(dataset_filenames=dataset_filenames, groups_src=groups_src, patch=None, use_cache=False, subset=subset, num_workers=num_workers, batch_size=1, train_size=1 if validation is None else validation)
-
-class DataHyperparameter(Data):
-
-    @config("Dataset")
-    def __init__(self,  dataset_filenames : list[str] = ["default:Dataset.h5"], 
-                        groups_src : dict[str, Group] = {"default" : Group()},
-                        patch : Union[DatasetPatch, None] = DatasetPatch()) -> None:
-
-        super().__init__(dataset_filenames, groups_src, patch, False, PredictionSubset(), 0, False, 1)

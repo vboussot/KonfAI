@@ -1,5 +1,4 @@
 import torch
-import torch.optim.adamw
 from torch.utils.data import DataLoader
 import tqdm
 import numpy as np
@@ -12,12 +11,11 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from torch.optim.swa_utils import AveragedModel
 import torch.distributed as dist
 
-from konfai import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE, DL_API_STATE
-from konfai.data.dataset import DataTrain
+from konfai import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE, KONFAI_STATE
+from konfai.data.data_manager import DataTrain
 from konfai.utils.config import config
 from konfai.utils.utils import State, DataLog, DistributedObject, description
 from konfai.network.network import Network, ModelLoader, NetState, CPU_Model
-
 
 class _Trainer():
 
@@ -72,7 +70,7 @@ class _Trainer():
             self.modelEMA.module.setState(NetState.TRAIN)
 
         desc = lambda : "Training : {}".format(description(self.model, self.modelEMA))
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = desc(), total=len(self.dataloader_training), leave=False, disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = desc(), total=len(self.dataloader_training), leave=False, disable=self.global_rank != 0 and "KONFAI_CLUSTER" not in os.environ) as batch_iter:
             for _, data_dict in batch_iter:
                 with torch.amp.autocast('cuda', enabled=self.autocast):
                     input = self.getInput(data_dict)
@@ -103,7 +101,7 @@ class _Trainer():
         desc = lambda : "Validation : {}".format(description(self.model, self.modelEMA))
         data_dict = None
         self.dataloader_validation.dataset.load()
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = desc(), total=len(self.dataloader_validation), leave=False, disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = desc(), total=len(self.dataloader_validation), leave=False, disable=self.global_rank != 0 and "KONFAI_CLUSTER" not in os.environ) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
                 self.model(input)
@@ -120,33 +118,45 @@ class _Trainer():
         return self._validation_log(data_dict)
 
     def checkpoint_save(self, loss: float) -> None:
-        if self.global_rank == 0:
-            path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
-            last_loss = None
-            if os.path.exists(path) and os.listdir(path):
-                name = sorted(os.listdir(path))[-1]
-                state_dict = torch.load(path+name, weights_only=False)
-                last_loss = state_dict["loss"]
-                if self.save_checkpoint_mode == "BEST":
-                    if last_loss >= loss:
-                        os.remove(path+name)
+        if self.global_rank != 0:
+            return
 
-            if self.save_checkpoint_mode != "BEST" or (last_loss is None or last_loss >= loss):
-                name = DATE()+".pt"
-                if not os.path.exists(path):
-                    os.makedirs(path)
-                
-                save_dict = {
-                    "epoch": self.epoch,
-                    "it": self.it,
-                    "loss": loss,
-                    "Model": self.model.module.state_dict()}
+        path = CHECKPOINTS_DIRECTORY()+self.train_name+"/"
+        os.makedirs(path, exist_ok=True)
 
-                if self.modelEMA is not None:
-                    save_dict.update({"Model_EMA" : self.modelEMA.module.state_dict()})
+        name = DATE() + ".pt"
+        save_path = os.path.join(path, name)
 
-                save_dict.update({'{}_optimizer_state_dict'.format(name): network.optimizer.state_dict() for name, network in self.model.module.getNetworks().items() if network.optimizer is not None})
-                torch.save(save_dict, path+name)
+        save_dict = {
+        "epoch": self.epoch,
+        "it": self.it,
+        "loss": loss,
+        "Model": self.model.module.state_dict()
+        }
+
+        if self.modelEMA is not None:
+            save_dict["Model_EMA"] = self.modelEMA.module.state_dict()
+        
+        save_dict.update({'{}_optimizer_state_dict'.format(name): network.optimizer.state_dict() for name, network in self.model.module.getNetworks().items() if network.optimizer is not None})
+        torch.save(save_dict, save_path)
+
+        if self.save_checkpoint_mode == "BEST":
+            all_checkpoints = sorted([
+                os.path.join(path, f)
+                for f in os.listdir(path) if f.endswith(".pt")
+            ])
+            best_ckpt = None
+            best_loss = float('inf')
+
+            for f in all_checkpoints:
+                d = torch.load(f, weights_only=False)
+                if d.get("loss", float("inf")) < best_loss:
+                    best_loss = d["loss"]
+                    best_ckpt = f
+
+            for f in all_checkpoints:
+                if f != best_ckpt and f != save_path:
+                    os.remove(f)
 
     @torch.no_grad()
     def _log(self, type_log: str, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> float:
@@ -154,7 +164,7 @@ class _Trainer():
         if self.modelEMA is not None:
             models["_EMA"] = self.modelEMA.module
         
-        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank*self.size+self.size-1, models, self.it_validation if type_log == "Trainning" else len(self.dataloader_validation))
+        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank*self.size+self.size-1, models, self.it_validation if type_log == "Training" else len(self.dataloader_validation))
         
         if self.global_rank == 0:
             images_log = []
@@ -178,7 +188,7 @@ class _Trainer():
                         for name, layer, _ in model.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
                             self.data_log[name][0](self.tb, "{}/{}{}".format(type_log, name, label), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)
                         
-            if type_log == "Trainning":
+            if type_log == "Training":
                 for name, network in self.model.module.getNetworks().items():
                     if network.optimizer is not None:
                         self.tb.add_scalar("{}/{}/Learning Rate".format(type_log, name), network.optimizer.param_groups[0]['lr'], self.it)
@@ -193,7 +203,7 @@ class _Trainer():
     
     @torch.no_grad()
     def _train_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> float:
-        return self._log("Trainning", data_dict)
+        return self._log("Training", data_dict)
 
     @torch.no_grad()
     def _validation_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> float:
@@ -205,7 +215,7 @@ class Trainer(DistributedObject):
     def __init__(   self,
                     model : ModelLoader = ModelLoader(),
                     dataset : DataTrain = DataTrain(),
-                    train_name : str = "default:name",
+                    train_name : str = "default:TRAIN_01",
                     manual_seed : Union[int, None] = None,
                     epochs: int = 100,
                     it_validation : Union[int, None] = None,
@@ -215,7 +225,7 @@ class Trainer(DistributedObject):
                     ema_decay : float = 0,
                     data_log: Union[list[str], None] = None,
                     save_checkpoint_mode: str= "BEST") -> None:
-        if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
+        if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             exit(0)
         super().__init__(train_name)
         self.manual_seed = manual_seed        
@@ -292,9 +302,9 @@ class Trainer(DistributedObject):
         return (1-self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
     
     def setup(self, world_size: int):
-        state = State._member_map_[DL_API_STATE()]
-        if state != State.RESUME and os.path.exists(STATISTICS_DIRECTORY()+self.name+"/"):
-            if os.environ["DL_API_OVERWRITE"] != "True":
+        state = State._member_map_[KONFAI_STATE()]
+        if state != State.RESUME and os.path.exists(CHECKPOINTS_DIRECTORY()+self.name+"/"):
+            if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = input("The model {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.name))
                 if accept != "yes":
                     return

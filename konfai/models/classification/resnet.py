@@ -3,7 +3,7 @@ from typing import Type
 import torch
 from konfai.network import network, blocks
 from konfai.utils.config import config
-from konfai.data.HDF5 import ModelPatch
+from konfai.data.patching import ModelPatch
 
 """
 'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth', dim = 2, in_channels = 3, depths=[2, 2, 2, 2], widths = [64, 64, 128, 256, 512],  num_classes=1000, useBottleneck=False

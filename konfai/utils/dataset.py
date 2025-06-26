@@ -750,7 +750,7 @@ class Dataset():
         else:
             with Dataset.File(self.filename, True, self.format) as file:
                 names = file.getNames(groups)
-        return [name for i, name in enumerate(names) if index is None or i in index]
+        return [name for i, name in enumerate(sorted(names)) if index is None or i in index]
     
     def getInfos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
         if self.is_directory:

@@ -130,7 +130,7 @@ class Standardize(Transform):
         
 class TensorCast(Transform):
 
-    def __init__(self, dtype : str = "default:float32,int64,int16") -> None:
+    def __init__(self, dtype : str = "float32") -> None:
         self.dtype : torch.dtype = getattr(torch, dtype)
 
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -142,7 +142,7 @@ class TensorCast(Transform):
 
 class Padding(Transform):
 
-    def __init__(self, padding : list[int] = [0,0,0,0,0,0], mode : str = "default:constant,reflect,replicate,circular") -> None:
+    def __init__(self, padding : list[int] = [0,0,0,0,0,0], mode : str = "constant") -> None:
         self.padding = padding
         self.mode = mode
 
@@ -332,7 +332,7 @@ class ResampleTransform(Transform):
 
 class Mask(Transform):
 
-    def __init__(self, path : str = "default:./default.mha", value_outside: int = 0) -> None:
+    def __init__(self, path : str = "./default.mha", value_outside: int = 0) -> None:
         self.path = path
         self.value_outside = value_outside
         

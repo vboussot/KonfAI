@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Union
 
-from konfai import CONFIG_FILE, STATISTICS_DIRECTORY, PREDICTIONS_DIRECTORY, DL_API_STATE, CUDA_VISIBLE_DEVICES
+from konfai import CONFIG_FILE, EVALUATIONS_DIRECTORY, STATISTICS_DIRECTORY, PREDICTIONS_DIRECTORY, KONFAI_STATE, CUDA_VISIBLE_DEVICES
 import torch.distributed as dist
 import argparse
 import subprocess
@@ -35,8 +35,8 @@ def _getModule(classpath : str, type : str) -> tuple[str, str]:
         module = ".".join(classpath.split("_")[:-1])
         name = classpath.split("_")[-1] 
     else:
-        module = "konfai."+type
-        name = classpath
+        module = "konfai."+type+("." if len(classpath.split(".")) > 2 else "")+".".join(classpath.split(".")[:-1])
+        name = classpath.split(".")[-1]
     return module, name
 
 def cpuInfo() -> str:
@@ -236,36 +236,51 @@ class DataLog(Enum):
     VIDEO   = lambda tb, name, layer, it : tb.add_video(name, _logVideoFormat(layer), it),
     AUDIO   = lambda tb, name, layer, it : tb.add_audio(name, _logImageFormat(layer), it)
 
-class Log():
-
+class Log:
     def __init__(self, name: str) -> None:
-        path = PREDICTIONS_DIRECTORY() if DL_API_STATE() == "PREDICTION" else STATISTICS_DIRECTORY()
-        if not os.path.exists("{}{}".format(path, name)):
-            os.makedirs("{}{}".format(path, name))
-        self.file = open("{}{}/log.txt".format(path, name), 'w')
+        if KONFAI_STATE() == "PREDICTION":
+            path = PREDICTIONS_DIRECTORY()
+        elif KONFAI_STATE() == "EVALUATION":
+            path = EVALUATIONS_DIRECTORY()
+        else:
+            path = STATISTICS_DIRECTORY()
+        
+        self.verbose = os.environ.get("KONFAI_VERBOSE", "True") == "True"
+        self.log_path = os.path.join(path, name)
+        os.makedirs(self.log_path, exist_ok=True)
+        
+        self.file = open(os.path.join(self.log_path, "log.txt"), "w", buffering=1) 
         self.stdout_bak = sys.stdout
         self.stderr_bak = sys.stderr
-        self.verbose = os.environ["DEEP_LEARNING_VERBOSE"] == "True"
 
     def __enter__(self):
         self.file.__enter__()
         sys.stdout = self
         sys.stderr = self
         return self
-    
-    def __exit__(self, type, value, traceback):
-        self.file.__exit__(type, value, traceback)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.file.__exit__(exc_type, exc_val, exc_tb)
         sys.stdout = self.stdout_bak
         sys.stderr = self.stderr_bak
-         
+
     def write(self, msg):
-        if msg.strip() != "":
-            self.file.write(msg)
-            if self.verbose:
-                print(msg, file=sys.__stdout__)
+        if not msg:
+            return
+        self.file.write(msg)
+        self.file.flush()
+        if self.verbose:
+            sys.__stdout__.write(msg)
+            sys.__stdout__.flush()
 
     def flush(self):
-        pass
+        self.file.flush()
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        return sys.__stdout__.fileno()
     
 class TensorBoard():
     
@@ -274,8 +289,8 @@ class TensorBoard():
         self.name = name
 
     def __enter__(self):
-        if "DEEP_LEARNING_TENSORBOARD_PORT" in os.environ:
-            command = ["tensorboard", "--logdir", PREDICTIONS_DIRECTORY() if DL_API_STATE() == "PREDICTION" else STATISTICS_DIRECTORY() + self.name + "/", "--port", os.environ["DEEP_LEARNING_TENSORBOARD_PORT"], "--bind_all"]
+        if "KONFAI_TENSORBOARD_PORT" in os.environ:
+            command = ["tensorboard", "--logdir", PREDICTIONS_DIRECTORY() if KONFAI_STATE() == "PREDICTION" else STATISTICS_DIRECTORY() + self.name + "/", "--port", os.environ["KONFAI_TENSORBOARD_PORT"], "--bind_all"]
             self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -285,7 +300,7 @@ class TensorBoard():
                 IP = '127.0.0.1'
             finally:
                 s.close()
-            print("Tensorboard : http://{}:{}/".format(IP, os.environ["DEEP_LEARNING_TENSORBOARD_PORT"]))
+            print("Tensorboard : http://{}:{}/".format(IP, os.environ["KONFAI_TENSORBOARD_PORT"]))
         return self
     
     def __exit__(self, type, value, traceback):
@@ -361,72 +376,72 @@ class DistributedObject():
                 pynvml.nvmlShutdown()
             cleanup()
 
-def setupAPI(parser: argparse.ArgumentParser) -> DistributedObject:
-    # API arguments
-    api_args = parser.add_argument_group('API arguments')
-    api_args.add_argument("type", type=State, choices=list(State))
-    api_args.add_argument('-y', action='store_true', help="Accept overwrite")
-    api_args.add_argument('-tb', action='store_true', help='Start TensorBoard')
-    api_args.add_argument("-c", "--config", type=str, default="None", help="Configuration file location")
-    api_args.add_argument("-g", "--gpu", type=str, default=os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else "", help="List of GPU")
-    api_args.add_argument('--num-workers', '--num_workers', default=4, type=int, help='No. of workers per DataLoader & GPU')
-    api_args.add_argument("-models_dir", "--MODELS_DIRECTORY", type=str, default="./Models/", help="Models location")
-    api_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
-    api_args.add_argument("-model", "--MODEL", type=str, default="", help="URL Model")
-    api_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
-    api_args.add_argument("-evaluation_dir", "--EVALUATIONS_DIRECTORY", type=str, default="./Evaluations/", help="Evaluations location")
-    api_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
-    api_args.add_argument("-setups_dir", "--SETUPS_DIRECTORY", type=str, default="./Setups/", help="Setups location")
-    api_args.add_argument('-log', action='store_true', help='Save log')
-    api_args.add_argument('-quiet', action='store_false', help='')
+def setup(parser: argparse.ArgumentParser) -> DistributedObject:
+    # KONFAI arguments
+    KONFAI_args = parser.add_argument_group('KONFAI arguments')
+    KONFAI_args.add_argument("type", type=State, choices=list(State))
+    KONFAI_args.add_argument('-y', action='store_true', help="Accept overwrite")
+    KONFAI_args.add_argument('-tb', action='store_true', help='Start TensorBoard')
+    KONFAI_args.add_argument("-c", "--config", type=str, default="None", help="Configuration file location")
+    KONFAI_args.add_argument("-g", "--gpu", type=str, default=os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else "", help="List of GPU")
+    KONFAI_args.add_argument('--num-workers', '--num_workers', default=4, type=int, help='No. of workers per DataLoader & GPU')
+    KONFAI_args.add_argument("-models_dir", "--MODELS_DIRECTORY", type=str, default="./Models/", help="Models location")
+    KONFAI_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
+    KONFAI_args.add_argument("-model", "--MODEL", type=str, default="", help="URL Model")
+    KONFAI_args.add_argument("-predictions_dir", "--PREDICTIONS_DIRECTORY", type=str, default="./Predictions/", help="Predictions location")
+    KONFAI_args.add_argument("-evaluation_dir", "--EVALUATIONS_DIRECTORY", type=str, default="./Evaluations/", help="Evaluations location")
+    KONFAI_args.add_argument("-statistics_dir", "--STATISTICS_DIRECTORY", type=str, default="./Statistics/", help="Statistics location")
+    KONFAI_args.add_argument("-setups_dir", "--SETUPS_DIRECTORY", type=str, default="./Setups/", help="Setups location")
+    KONFAI_args.add_argument('-log', action='store_true', help='Save log')
+    KONFAI_args.add_argument('-quiet', action='store_false', help='')
     
     
     args = parser.parse_args()
     config = vars(args)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = config["gpu"]
-    os.environ["DL_API_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
-    os.environ["DL_API_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
-    os.environ["DL_API_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
-    os.environ["DL_API_EVALUATIONS_DIRECTORY"] = config["EVALUATIONS_DIRECTORY"]
-    os.environ["DL_API_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
+    os.environ["KONFAI_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
+    os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
+    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
+    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = config["EVALUATIONS_DIRECTORY"]
+    os.environ["KONFAI_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
     
-    os.environ["DL_API_STATE"] = str(config["type"])
+    os.environ["KONFAI_STATE"] = str(config["type"])
     
-    os.environ["DL_API_MODEL"] = config["MODEL"]
+    os.environ["KONFAI_MODEL"] = config["MODEL"]
 
-    os.environ["DL_API_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
+    os.environ["KONFAI_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
 
-    os.environ["DL_API_OVERWRITE"] = "{}".format(config["y"])
-    os.environ["DEEP_LEANING_API_CONFIG_MODE"] = "Done"
+    os.environ["KONFAI_OVERWRITE"] = "{}".format(config["y"])
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
     if config["tb"]:
-        os.environ["DEEP_LEARNING_TENSORBOARD_PORT"] = str(find_free_port())
+        os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
 
-    os.environ["DEEP_LEARNING_VERBOSE"] = str(config["quiet"])
+    os.environ["KONFAI_VERBOSE"] = str(config["quiet"])
 
     if config["config"] == "None":
         if config["type"] is State.PREDICTION:
-             os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Prediction.yml"
+             os.environ["KONFAI_CONFIG_FILE"] = "Prediction.yml"
         elif config["type"] is State.EVALUATION:
-            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Evaluation.yml"
+            os.environ["KONFAI_CONFIG_FILE"] = "Evaluation.yml"
         else:
-            os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = "Config.yml"
+            os.environ["KONFAI_CONFIG_FILE"] = "Config.yml"
     else:
-        os.environ["DEEP_LEARNING_API_CONFIG_FILE"] = config["config"]
+        os.environ["KONFAI_CONFIG_FILE"] = config["config"]
     torch.autograd.set_detect_anomaly(True)
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     
     if config["type"] is State.PREDICTION:    
         from konfai.predictor import Predictor
-        os.environ["DEEP_LEARNING_API_ROOT"] = "Predictor"
+        os.environ["KONFAI_ROOT"] = "Predictor"
         return Predictor(config=CONFIG_FILE())    
     elif config["type"] is State.EVALUATION:
         from konfai.evaluator import Evaluator
-        os.environ["DEEP_LEARNING_API_ROOT"] = "Evaluator"
+        os.environ["KONFAI_ROOT"] = "Evaluator"
         return Evaluator(config=CONFIG_FILE())
     else:
         from konfai.trainer import Trainer
-        os.environ["DEEP_LEARNING_API_ROOT"] = "Trainer"
+        os.environ["KONFAI_ROOT"] = "Trainer"
         return Trainer(config=CONFIG_FILE())
 
 

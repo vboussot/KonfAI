@@ -6,12 +6,12 @@ import torch
 import tqdm
 import os
 
-from konfai import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, DEEP_LEARNING_API_ROOT
+from konfai import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, KONFAI_ROOT
 from konfai.utils.config import config
 from konfai.utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
 from konfai.utils.dataset import Dataset, Attribute
-from konfai.data.dataset import DataPrediction, DatasetIter
-from konfai.data.HDF5 import Accumulator, PathCombine
+from konfai.data.data_manager import DataPrediction, DatasetIter
+from konfai.data.patching import Accumulator, PathCombine
 from konfai.network.network import ModelLoader, Network, NetState, CPU_Model
 from konfai.data.transform import Transform, TransformLoader
 
@@ -52,13 +52,13 @@ class OutDataset(Dataset, NeedDevice, ABC):
             
             if _transform_type is not None:
                 for classpath, transform in _transform_type.items():
-                    transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.{}".format(DEEP_LEARNING_API_ROOT(), name_layer, name))
+                    transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.{}".format(KONFAI_ROOT(), name_layer, name))
                     transform.setDatasets(datasets)
                     transform_type.append(transform)
 
         if self._patchCombine is not None:
-            module, name = _getModule(self._patchCombine, "data.HDF5")
-            self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(DEEP_LEARNING_API_ROOT(), name_layer))
+            module, name = _getModule(self._patchCombine, "data.patching")
+            self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(KONFAI_ROOT(), name_layer))
     
     def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
         if patchSize is not None and overlap is not None:
@@ -94,7 +94,7 @@ class OutDataset(Dataset, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset:h5", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean", inverse_transform: bool = True) -> None:
+    def __init__(self, dataset_filename: str = "./Dataset:mha", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean", inverse_transform: bool = True) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, final_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split(":")
         self.redution = redution
@@ -240,7 +240,7 @@ class _Predictor():
         self.modelComposite.module.setState(NetState.PREDICTION)
         desc = lambda : "Prediction : {}".format(description(self.modelComposite))
         self.dataloader_prediction.dataset.load()
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=False, desc = desc(), total=len(self.dataloader_prediction), disable=self.global_rank != 0 and "DL_API_CLUSTER" not in os.environ) as batch_iter:
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=False, desc = desc(), total=len(self.dataloader_prediction), disable=self.global_rank != 0 and "KONFAI_CLUSTER" not in os.environ) as batch_iter:
             dist.barrier()
             for it, data_dict in batch_iter:
                 input = self.getInput(data_dict)
@@ -322,7 +322,7 @@ class Predictor(DistributedObject):
                     gpu_checkpoints: Union[list[str], None] = None,
                     outsDataset: Union[dict[str, OutDatasetLoader], None] = {"default:Default" : OutDatasetLoader()},
                     images_log: list[str] = []) -> None:
-        if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
+        if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             exit(0)
         super().__init__(train_name)
         self.manual_seed = manual_seed
@@ -374,7 +374,7 @@ class Predictor(DistributedObject):
         for dataset_filename in self.datasets_filename:
             path = self.predict_path +dataset_filename
             if os.path.exists(path):
-                if os.environ["DL_API_OVERWRITE"] != "True":
+                if os.environ["KONFAI_OVERWRITE"] != "True":
                     accept = builtins.input("The prediction {} already exists ! Do you want to overwrite it (yes,no) : ".format(path))
                     if accept != "yes":
                         return
