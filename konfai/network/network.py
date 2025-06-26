@@ -13,11 +13,11 @@ from torch.utils.checkpoint import checkpoint
 from typing import Union
 from enum import Enum
 
-from konfai import DEEP_LEARNING_API_ROOT
+from konfai import KONFAI_ROOT
 from konfai.metric.schedulers import Scheduler
 from konfai.utils.config import config
 from konfai.utils.utils import State, _getModule, getDevice, getGPUMemory
-from konfai.data.HDF5 import Accumulator, ModelPatch
+from konfai.data.patching import Accumulator, ModelPatch
 
 class NetState(Enum):
     TRAIN = 0,
@@ -40,7 +40,7 @@ class OptimizerLoader():
     
     def getOptimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
         torch.optim.AdamW
-        return config("{}.Model.{}.Optimizer".format(DEEP_LEARNING_API_ROOT(), key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
+        return config("{}.Model.{}.Optimizer".format(KONFAI_ROOT(), key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
         
 class SchedulerStep():
     
@@ -98,8 +98,8 @@ class CriterionsLoader():
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "metric.measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
-            criterionsAttr.sheduler = criterionsAttr.l.getShedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), model_classname, output_group, target_group, module_classpath))
-            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
+            criterionsAttr.sheduler = criterionsAttr.l.getShedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath))
+            criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
 class TargetCriterionsLoader():
@@ -753,14 +753,14 @@ class Network(ModuleArgsDict, ABC):
         output_layer_accumulator : dict[str, Accumulator] = {}
         output_layer_patch_indexed : dict[str, Patch_Indexed] = {}
         it = 0
-        debug = "DL_API_DEBUG" in os.environ
+        debug = "KONFAI_DEBUG" in os.environ
         for (nameTmp, output_layer) in self.named_forward(*inputs):
             name = nameTmp.replace(";accu;", "")
             if debug:
-                if "DL_API_DEBUG_LAST_LAYER" in os.environ:
-                    os.environ["DL_API_DEBUG_LAST_LAYER"] = "{}|{}:{}:{}".format(os.environ["DL_API_DEBUG_LAST_LAYER"], name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
+                if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
+                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = "{}|{}:{}:{}".format(os.environ["KONFAI_DEBUG_LAST_LAYER"], name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
                 else:
-                    os.environ["DL_API_DEBUG_LAST_LAYER"] = "{}:{}:{}".format(name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
+                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = "{}:{}:{}".format(name, getGPUMemory(output_layer.device), str(output_layer.device).replace("cuda:", ""))
             it += 1
             if name in layers_name or nameTmp in layers_name:
                 if ";accu;" in nameTmp:
@@ -918,12 +918,12 @@ class Network(ModuleArgsDict, ABC):
 class ModelLoader():
 
     @config("Model")
-    def __init__(self, classpath : str = "default:segmentation.UNet") -> None:
-        self.module, self.name = _getModule(classpath.split(".")[-1] if len(classpath.split(".")) > 1 else classpath, ".".join(classpath.split(".")[:-1]) if len(classpath.split(".")) > 1 else "")
+    def __init__(self, classpath : str = "default:segmentation.UNet.UNet") -> None:
+        self.module, self.name = _getModule(classpath, "models")
         
     def getModel(self, train : bool = True, DL_args: Union[str, None] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
         if not DL_args:
-            DL_args="{}.Model".format(DEEP_LEARNING_API_ROOT())
+            DL_args="{}.Model".format(KONFAI_ROOT())
         model = partial(getattr(importlib.import_module(self.module), self.name), config = None, DL_args=DL_args)
         if not train: 
             model = partial(model, DL_without = DL_without)

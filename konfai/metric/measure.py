@@ -17,7 +17,7 @@ from abc import abstractmethod
 
 from konfai.utils.config import config
 from konfai.utils.utils import _getModule
-from konfai.data.HDF5 import ModelPatch
+from konfai.data.patching import ModelPatch
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
 
@@ -92,7 +92,7 @@ class PSNR(MaskedLoss):
         return psnr 
 
     def __init__(self, dynamic_range: Union[float, None] = None) -> None:
-        dynamic_range = dynamic_range if dynamic_range else 1024+3000
+        dynamic_range = dynamic_range if dynamic_range else 1024+3071
         super().__init__(partial(PSNR._loss, dynamic_range), False)
     
 class SSIM(MaskedLoss):
@@ -143,8 +143,11 @@ class Dice(Criterion):
         target = self.flatten(target)
         return (2.*(input * target).sum() + self.smooth)/(input.sum() + target.sum() + self.smooth)
 
+
     def forward(self, output: torch.Tensor, *targets : list[torch.Tensor]) -> torch.Tensor:
         target = targets[0]
+        if output.shape[1] == 1:
+            output = F.one_hot(output.type(torch.int64), num_classes=torch.max(output).item()+1).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
         target = F.one_hot(target.type(torch.int64), num_classes=output.shape[1]).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float().squeeze(2)
         return 1-torch.mean(self.dice_per_channel(output, target))
 
@@ -239,7 +242,7 @@ class PerceptualLoss(Criterion):
         @config(None)
         def __init__(self, losses: dict[str, float] = {"Gram": 1, "torch_nn_L1Loss": 1}) -> None:
             self.losses = losses
-            self.DL_args = os.environ['DEEP_LEARNING_API_CONFIG_PATH'] if "DEEP_LEARNING_API_CONFIG_PATH" in os.environ else ""
+            self.DL_args = os.environ['KONFAI_CONFIG_PATH'] if "KONFAI_CONFIG_PATH" in os.environ else ""
 
         def getLoss(self) -> dict[torch.nn.Module, float]:
             result: dict[torch.nn.Module, float] = {}
@@ -252,7 +255,7 @@ class PerceptualLoss(Criterion):
         super().__init__()
         self.path_model = path_model
         if self.path_model not in modelsRegister:
-            self.model = modelLoader.getModel(train=False, DL_args=os.environ['DEEP_LEARNING_API_CONFIG_PATH'].split("PerceptualLoss")[0]+"PerceptualLoss.Model", DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain", "outputsCriterions", "drop_p"])
+            self.model = modelLoader.getModel(train=False, DL_args=os.environ['KONFAI_CONFIG_PATH'].split("PerceptualLoss")[0]+"PerceptualLoss.Model", DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain", "outputsCriterions", "drop_p"])
             if path_model.startswith("https"):
                 state_dict = torch.hub.load_state_dict_from_url(path_model)
                 state_dict = {"Model": {self.model.getName() : state_dict["model"]}}

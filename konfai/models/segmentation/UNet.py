@@ -3,7 +3,7 @@ from typing import Union
 
 from konfai.network import network, blocks
 from konfai.utils.config import config
-from konfai.data.HDF5 import ModelPatch
+from konfai.data.patching import ModelPatch
 
 class UNetHead(network.ModuleArgsDict):
 

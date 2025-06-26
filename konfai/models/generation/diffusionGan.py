@@ -5,7 +5,7 @@ import numpy as np
 
 from konfai.network import network, blocks
 from konfai.utils.config import config
-from konfai.data.HDF5 import ModelPatch, Attribute
+from konfai.data.patching import ModelPatch, Attribute
 from konfai.data import augmentation
 from konfai.models.segmentation import UNet, NestedUNet
 from konfai.models.generation.ddpm import DDPM

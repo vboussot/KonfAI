@@ -7,10 +7,10 @@ import json
 import shutil
 import builtins
 import importlib
-from konfai import EVALUATIONS_DIRECTORY, PREDICTIONS_DIRECTORY, DEEP_LEARNING_API_ROOT, CONFIG_FILE
+from konfai import EVALUATIONS_DIRECTORY, PREDICTIONS_DIRECTORY, KONFAI_ROOT, CONFIG_FILE
 from konfai.utils.config import config
 from konfai.utils.utils import _getModule, DistributedObject, synchronize_data
-from konfai.data.dataset import DataMetric
+from konfai.data.data_manager import DataMetric
 
 class CriterionsAttr():
 
@@ -28,7 +28,7 @@ class CriterionsLoader():
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "metric.measure")
-            criterions[config("{}.metrics.{}.targetsCriterions.{}.criterionsLoader.{}".format(DEEP_LEARNING_API_ROOT(), output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
+            criterions[config("{}.metrics.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
 class TargetCriterionsLoader():
@@ -86,8 +86,8 @@ class Statistics():
 class Evaluator(DistributedObject):
 
     @config("Evaluator")
-    def __init__(self, train_name: str = "default:name", metrics: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()}, dataset : DataMetric = DataMetric(),) -> None:
-        if os.environ["DEEP_LEANING_API_CONFIG_MODE"] != "Done":
+    def __init__(self, train_name: str = "default:TRAIN_01", metrics: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()}, dataset : DataMetric = DataMetric(),) -> None:
+        if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             exit(0)
         super().__init__(train_name)
         self.metric_path = EVALUATIONS_DIRECTORY()+self.name+"/"
@@ -111,7 +111,7 @@ class Evaluator(DistributedObject):
     
     def setup(self, world_size: int):
         if os.path.exists(self.metric_path):
-            if os.environ["DL_API_OVERWRITE"] != "True":
+            if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = builtins.input("The metric {} already exists ! Do you want to overwrite it (yes,no) : ".format(self.name))
                 if accept != "yes":
                     return

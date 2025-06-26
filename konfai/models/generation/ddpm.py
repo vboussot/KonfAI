@@ -8,7 +8,7 @@ import numpy as np
 
 from konfai.network import network, blocks
 from konfai.utils.config import config
-from konfai.data.HDF5 import ModelPatch
+from konfai.data.patching import ModelPatch
 from konfai.utils.utils import gpuInfo
 from konfai.metric.measure import Criterion
 

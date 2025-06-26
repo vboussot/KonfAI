@@ -6,7 +6,7 @@ import SimpleITK as sitk
 import torch.nn.functional as F
 from typing import Union
 import os
-from konfai import DEEP_LEARNING_API_ROOT
+from konfai import KONFAI_ROOT
 from konfai.utils.config import config
 from konfai.utils.utils import _getModule
 from konfai.utils.dataset import Attribute, data_to_image
@@ -51,7 +51,7 @@ class Prob():
 class DataAugmentationsList():
 
     @config()
-    def __init__(self, nb : int = 10, dataAugmentations: dict[str, Prob] = {"default:RandomElastixTransform" : Prob(1)}) -> None:
+    def __init__(self, nb : int = 10, dataAugmentations: dict[str, Prob] = {"default:Flip" : Prob(1)}) -> None:
         self.nb = nb
         self.dataAugmentations : list[DataAugmentation] = []
         self.dataAugmentationsLoader = dataAugmentations
@@ -59,7 +59,7 @@ class DataAugmentationsList():
     def load(self, key: str):
         for augmentation, prob in self.dataAugmentationsLoader.items():
             module, name = _getModule(augmentation, "data.augmentation")
-            dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="{}.Dataset.augmentations.{}.dataAugmentations".format(DEEP_LEARNING_API_ROOT(), key))
+            dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="{}.Dataset.augmentations.{}.dataAugmentations".format(KONFAI_ROOT(), key))
             dataAugmentation.load(prob.prob)
             self.dataAugmentations.append(dataAugmentation)
     
@@ -525,7 +525,7 @@ class Elastix(DataAugmentation):
 class Permute(DataAugmentation):
 
     @config("Permute")
-    def __init__(self, prob_permute: Union[list[float], None] = [0.33 ,0.33]) -> None:
+    def __init__(self, prob_permute: Union[list[float], None] = [0.5 ,0.5]) -> None:
         super().__init__()
         self._permute_dims = torch.tensor([[0, 2, 1, 3], [0, 3, 1, 2]])
         self.prob_permute = prob_permute

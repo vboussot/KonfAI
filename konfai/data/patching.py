@@ -37,13 +37,13 @@ class PathCombine(ABC):
     3D : 
         AAA+AAB+ABA+ABB+BAA+BAB+BBA+BBB
         
-        AAC+ABC+BAC+BBC
-        ACA+ACB+BCA+BCB
         CAA+CAB+CBA+CBB
+        ACA+ACB+BCA+BCB
+        AAC+ABC+BAC+BBC
 
-        ACC+BCC
-        CAC+CBC
         CCA+CCB
+        CAC+CBC
+        ACC+BCC
     
     """
     def setPatchConfig(self, patch_size: list[int], overlap: int):
@@ -214,13 +214,13 @@ class Patch(ABC):
 class DatasetPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[int, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
+    def __init__(self, patch_size : list[int] = [128, 128, 128], overlap : Union[int, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
         super().__init__(patch_size, overlap, mask, padValue, extend_slice)
 
 class ModelPatch(Patch):
 
     @config("Patch")
-    def __init__(self, patch_size : list[int] = [128, 256, 256], overlap : Union[int, None] = None, patchCombine: Union[str, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
+    def __init__(self, patch_size : list[int] = [128, 128, 128], overlap : Union[int, None] = None, patchCombine: Union[str, None] = None, mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
         super().__init__(patch_size, overlap, mask, padValue, extend_slice)
         self.patchCombine = patchCombine
 
