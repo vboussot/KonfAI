@@ -94,7 +94,6 @@ class SpatialTransformer(torch.nn.Module):
             new_locs[:, 1,1] = 1
             new_locs[:, 0,2] = flow[:, 0]
             new_locs[:, 1,2] = flow[:, 1]
-            print(new_locs)
             return F.grid_sample(src, F.affine_grid(new_locs, src.size()), align_corners=True, mode="bilinear")
         else:
             new_locs = self.grid + flow

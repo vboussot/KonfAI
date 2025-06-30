@@ -6,14 +6,10 @@ from copy import deepcopy
 from typing import Union, Literal, get_origin, get_args
 import torch
 from konfai import CONFIG_FILE
+from konfai.utils.utils import ConfigError
 
 yaml = ruamel.yaml.YAML()
 
-class ConfigError(Exception):
-
-    def __init__(self, message : str = "The config only supports types : config(Object), int, str, bool, float, list[int], list[str], list[bool], list[float], dict[str, Object]") -> None:
-        self.message = message
-        super().__init__(self.message)
 
 class Config():
 
@@ -187,9 +183,8 @@ def config(key : Union[str, None] = None):
                             default_value = param.default if param.default != inspect._empty else allowed_values[0]
                             value = config.getValue(param.name, f"default:{default_value}")
                             if value not in allowed_values:
-                                raise ValueError(
-                                    f"[Config] Invalid value '{value}' for parameter '{param.name}'. "
-                                    f"Expected one of: {allowed_values}."
+                                raise ConfigError(
+                                    f"Invalid value '{value}' for parameter '{param.name} expected one of: {allowed_values}."
                                 )
                             kwargs[param.name] = value
                             continue
@@ -222,21 +217,26 @@ def config(key : Union[str, None] = None):
                                         values = config.getValue(param.name, param.default)
                                         kwargs[param.name] = values
                                     else:
-                                        raise ConfigError()
+                                        raise ConfigError("Config: The config only supports types : config(Object), int, str, bool, float, list[int], list[str], list[bool], list[float], dict[str, Object]")
                                 elif str(annotation).startswith("dict"):
                                     if annotation.__args__[0] == str:
                                         values = config.getValue(param.name, param.default)
                                         if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
-                                            kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
+                                            try:
+                                                kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
+                                            except ValueError as e:
+                                                raise ValueError(e)
+                                            except Exception as e:
+                                                raise ConfigError("{} {}".format(values, e))
                                         else:
                                             kwargs[param.name] = values
                                     else: 
-                                        raise ConfigError()
+                                        raise ConfigError("Config: The config only supports types : config(Object), int, str, bool, float, list[int], list[str], list[bool], list[float], dict[str, Object]")
                                 else:
                                     try:
                                         kwargs[param.name] = annotation(config = filename, DL_args = key_tmp)
                                     except Exception as e:
-                                        raise ValueError("[Config] Failed to instantiate {} with type {}".format(param.name, annotation.__name__))
+                                        raise ConfigError("Failed to instantiate {} with type {}, error {} ".format(param.name, annotation.__name__, e))
                                     
                                     if os.environ['KONFAI_CONFIG_VARIABLE'] == "True":
                                         os.environ['KONFAI_CONFIG_VARIABLE'] = "False"

@@ -94,10 +94,10 @@ class OutDataset(Dataset, NeedDevice, ABC):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "./Dataset:mha", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, redution: str = "mean", inverse_transform: bool = True) -> None:
+    def __init__(self, dataset_filename: str = "./Dataset:mha", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, reduction: str = "mean", inverse_transform: bool = True) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, final_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split(":")
-        self.redution = redution
+        self.reduction = reduction
         self.inverse_transform = inverse_transform
 
     def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
@@ -151,9 +151,9 @@ class OutSameAsGroupDataset(OutDataset):
         self.output_layer_accumulator.pop(index)
         dtype = result.dtype
 
-        if self.redution == "mean":
+        if self.reduction == "mean":
             result = torch.mean(result.float(), dim=0).to(dtype)
-        elif self.redution == "median":
+        elif self.reduction == "median":
             result, _ = torch.median(result.float(), dim=0)
         else:
             raise NameError("Reduction method does not exist (mean, median)")
@@ -201,7 +201,7 @@ class OutDatasetLoader():
 
 class _Predictor():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, predict_path: str, data_log: Union[list[str], None], outsDataset: dict[str, OutDataset], modelComposite: DDP, dataloader_prediction: DataLoader) -> None:
+    def __init__(self, world_size: int, global_rank: int, local_rank: int, autocast: bool, predict_path: str, data_log: Union[list[str], None], outsDataset: dict[str, OutDataset], modelComposite: DDP, dataloader_prediction: DataLoader) -> None:
         self.world_size = world_size        
         self.global_rank = global_rank
         self.local_rank = local_rank
@@ -209,7 +209,7 @@ class _Predictor():
         self.modelComposite = modelComposite
         self.dataloader_prediction = dataloader_prediction
         self.outsDataset = outsDataset
-
+        self.autocast = autocast
         
         self.it = 0
 
@@ -239,21 +239,22 @@ class _Predictor():
         self.modelComposite.eval()  
         self.modelComposite.module.setState(NetState.PREDICTION)
         desc = lambda : "Prediction : {}".format(description(self.modelComposite))
-        self.dataloader_prediction.dataset.load()
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=False, desc = desc(), total=len(self.dataloader_prediction), disable=self.global_rank != 0 and "KONFAI_CLUSTER" not in os.environ) as batch_iter:
+        self.dataloader_prediction.dataset.load("Prediction")
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=True, desc = desc(), total=len(self.dataloader_prediction), ncols=0) as batch_iter:
             dist.barrier()
             for it, data_dict in batch_iter:
-                input = self.getInput(data_dict)
-                for name, output in self.modelComposite(input, list(self.outsDataset.keys())):
-                    self._predict_log(data_dict)
-                    outDataset = self.outsDataset[name]
-                    for i, (index, patch_augmentation, patch_index) in enumerate([(int(index), int(patch_augmentation), int(patch_index)) for index, patch_augmentation, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2], list(data_dict.values())[0][3])]):
-                        outDataset.addLayer(index, patch_augmentation, patch_index, output[i].cpu(), self.dataset)
-                        if outDataset.isDone(index):
-                            outDataset.write(index, self.dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1], outDataset.getOutput(index, self.dataset))
+                with torch.amp.autocast('cuda', enabled=self.autocast):
+                    input = self.getInput(data_dict)
+                    for name, output in self.modelComposite(input, list(self.outsDataset.keys())):
+                        self._predict_log(data_dict)
+                        outDataset = self.outsDataset[name]
+                        for i, (index, patch_augmentation, patch_index) in enumerate([(int(index), int(patch_augmentation), int(patch_index)) for index, patch_augmentation, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2], list(data_dict.values())[0][3])]):
+                            outDataset.addLayer(index, patch_augmentation, patch_index, output[i].cpu(), self.dataset)
+                            if outDataset.isDone(index):
+                                outDataset.write(index, self.dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1], outDataset.getOutput(index, self.dataset))
 
-                batch_iter.set_description(desc())
-                self.it += 1
+                    batch_iter.set_description(desc())
+                    self.it += 1
 
     def _predict_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
         measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank, {"" : self.modelComposite.module}, 1)
@@ -320,6 +321,7 @@ class Predictor(DistributedObject):
                     train_name: str = "name",
                     manual_seed : Union[int, None] = None,
                     gpu_checkpoints: Union[list[str], None] = None,
+                    autocast : bool = False,
                     outsDataset: Union[dict[str, OutDatasetLoader], None] = {"default:Default" : OutDatasetLoader()},
                     images_log: list[str] = []) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
@@ -328,6 +330,7 @@ class Predictor(DistributedObject):
         self.manual_seed = manual_seed
         self.dataset = dataset
         self.combine = combine
+        self.autocast = autocast
 
         self.model = model.getModel(train=False)
         self.it = 0
@@ -384,7 +387,7 @@ class Predictor(DistributedObject):
 
         shutil.copyfile(CONFIG_FILE(), self.predict_path+"Prediction.yml")
 
-        self.model.init(autocast=False, state = State.PREDICTION)
+        self.model.init(self.autocast, State.PREDICTION, self.dataset.getGroupsDest())
         self.model.init_outputsGroup()
         self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
         self.modelComposite = ModelComposite(self.model, len(MODEL().split(":")), self.combine)
@@ -402,7 +405,7 @@ class Predictor(DistributedObject):
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
         modelComposite = Network.to(self.modelComposite, local_rank*self.size)
         modelComposite = DDP(modelComposite, static_graph=True) if torch.cuda.is_available() else CPU_Model(modelComposite)
-        with _Predictor(world_size, global_rank, local_rank, self.predict_path, self.images_log, self.outsDataset, modelComposite, *dataloaders) as p:
+        with _Predictor(world_size, global_rank, local_rank, self.autocast, self.predict_path, self.images_log, self.outsDataset, modelComposite, *dataloaders) as p:
             p.run()
 
         

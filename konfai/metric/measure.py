@@ -147,7 +147,7 @@ class Dice(Criterion):
     def forward(self, output: torch.Tensor, *targets : list[torch.Tensor]) -> torch.Tensor:
         target = targets[0]
         if output.shape[1] == 1:
-            output = F.one_hot(output.type(torch.int64), num_classes=torch.max(output).item()+1).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
+            output = F.one_hot(output.type(torch.int64), num_classes=int(torch.max(output).item()+1)).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
         target = F.one_hot(target.type(torch.int64), num_classes=output.shape[1]).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float().squeeze(2)
         return 1-torch.mean(self.dice_per_channel(output, target))
 

@@ -12,5 +12,5 @@ CONFIG_FILE = lambda : os.environ["KONFAI_CONFIG_FILE"]
 KONFAI_STATE = lambda : os.environ["KONFAI_STATE"]
 KONFAI_ROOT = lambda : os.environ["KONFAI_ROOT"]
 CUDA_VISIBLE_DEVICES = lambda : os.environ["CUDA_VISIBLE_DEVICES"]
-
+KONFAI_NB_CORES = lambda : os.environ["KONFAI_NB_CORES"]
 DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")

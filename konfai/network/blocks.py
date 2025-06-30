@@ -176,7 +176,6 @@ class Print(torch.nn.Module):
         super().__init__()
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        print(input.shape)
         return input
 
 class Write(torch.nn.Module):

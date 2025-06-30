@@ -3,6 +3,7 @@ import os
 from torch.cuda import device_count
 import torch.multiprocessing as mp
 from konfai.utils.utils import setup, TensorBoard, Log
+from konfai import KONFAI_NB_CORES
 
 import sys
 sys.path.insert(0, os.getcwd())
@@ -11,16 +12,15 @@ def main():
     parser = argparse.ArgumentParser(description="KonfAI", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     try:
         with setup(parser) as distributedObject:
-            with Log(distributedObject.name):
+            with Log(distributedObject.name, 0):
                 world_size = device_count()
                 if world_size == 0:
-                    world_size = 1
+                    world_size = int(KONFAI_NB_CORES())
                 distributedObject.setup(world_size)
                 with TensorBoard(distributedObject.name):
                     mp.spawn(distributedObject, nprocs=world_size)
-    except Exception as e:
-        print(e)
-        exit(1)
+    except KeyboardInterrupt:
+        print("\n[KonfAI] Manual interruption (Ctrl+C)")
 
 
 def cluster():
@@ -47,6 +47,8 @@ def cluster():
             executor.update_parameters(name=config["name"], mem_gb=config["memory"], gpus_per_node=n_gpu, tasks_per_node=n_gpu//distributedObject.size, cpus_per_task=config["num_workers"], nodes=config["num_nodes"], timeout_min=config["time_limit"])
             with TensorBoard(distributedObject.name):
                 executor.submit(distributedObject)
+    except KeyboardInterrupt:
+        print("\n[KonfAI] Manual interruption (Ctrl+C)")
     except Exception as e:
         print(e)
         exit(1)

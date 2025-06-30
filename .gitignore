@@ -3,3 +3,8 @@
 __pycache__/
 dist
 examples
+.Test
+.coverage
+.pytest_cache
+docs
+tests

@@ -15,7 +15,6 @@ from konfai.utils.dataset import Dataset, Attribute
 from konfai.data.transform import Transform, Save
 from konfai.data.augmentation import DataAugmentationsList
 
-
 class PathCombine(ABC):
 
     def __init__(self) -> None:
@@ -150,7 +149,10 @@ class Patch(ABC):
 
     def __init__(self, patch_size: list[int], overlap: Union[int, None], path_mask: Union[str, None] = None, padValue: float = 0, extend_slice: int = 0) -> None:
         self.patch_size = patch_size
-        self.overlap = overlap
+        self.overlap = overlap 
+        if isinstance(self.overlap, int):
+             if self.overlap < 0:
+                 self.overlap = None
         self._patch_slices : dict[int, list[tuple[slice]]] = {}
         self._nb_patch_per_dim: dict[int, list[tuple[int, bool]]] = {}
         self.path_mask = path_mask
@@ -188,7 +190,7 @@ class Patch(ABC):
             pad_bottom = 0
             pad_top = 0
             if self._patch_slices[a][index][0].start-bottom < 0:
-                pad_bottom = bottom-s.start
+                pad_bottom = bottom-self._patch_slices[a][index][0].start
             if self._patch_slices[a][index][0].stop+top > data.shape[len(slices_pre)]:
                 pad_top = self._patch_slices[a][index][0].stop+top-data.shape[len(slices_pre)]
             data_sliced = F.pad(data_sliced, [0 for _ in range((len(slices)-1)*2)]+[pad_bottom, pad_top], 'reflect')
@@ -237,6 +239,7 @@ class DatasetManager():
         self.index = index
         self.dataset = dataset
         self.loaded = False
+        self.augmentationLoaded = False
         self.cache_attributes: list[Attribute] = []
         _shape, cache_attribute =  self.dataset.getInfos(self.group_src, name)
         self.cache_attributes.append(cache_attribute)
@@ -255,6 +258,7 @@ class DatasetManager():
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
     
     def resetAugmentation(self):
+        self.cache_attributes[:] = self.cache_attributes[:1]
         i = 1
         for dataAugmentations in self.dataAugmentationsList:
             shape = []
@@ -269,15 +273,24 @@ class DatasetManager():
                 self.cache_attributes.append(caches_attribute[it])
                 self.patch.load(s, i)
                 i+=1
-
+    
     def load(self, pre_transform : list[Transform], dataAugmentationsList : list[DataAugmentationsList], device: torch.device) -> None:
-        if self.loaded:
-            return
+        if not self.loaded:
+            self._load(pre_transform)
+        if not self.augmentationLoaded:
+            self._loadAugmentation(dataAugmentationsList, device)
+            
+    def _load(self, pre_transform : list[Transform]):
+        self.cache_attributes = copy.deepcopy(self.cache_attributes_bak)
         i = len(pre_transform)
         data = None
         for transformFunction in reversed(pre_transform):
             if isinstance(transformFunction, Save):
-                filename, format = transformFunction.save.split(":")
+                if len(transformFunction.dataset.split(":")) > 1:
+                    filename, format = transformFunction.dataset.split(":")
+                else:
+                    filename = transformFunction.dataset.split(":")
+                    format = "mha"
                 dataset = Dataset(filename, format)
                 if dataset.isDatasetExist(self.group_dest, self.name):
                     data, attrib = dataset.readData(self.group_dest, self.name)
@@ -295,27 +308,40 @@ class DatasetManager():
             for transformFunction in pre_transform[i:]:
                 data = transformFunction(self.name, data, self.cache_attributes[0])
                 if isinstance(transformFunction, Save):
-                    filename, format = transformFunction.save.split(":")
+                    if len(transformFunction.dataset.split(":")) > 1:
+                        filename, format = transformFunction.dataset.split(":")
+                    else:
+                        filename = transformFunction.dataset.split(":")
+                        format = "mha"
                     dataset = Dataset(filename, format)
                     dataset.write(self.group_dest, self.name, data.numpy(), self.cache_attributes[0])
         self.data : list[torch.Tensor] = list()
         self.data.append(data)
 
+        for i in range(len(self.cache_attributes)-1):
+            self.cache_attributes[i+1].update(self.cache_attributes[0])
+        self.loaded = True
+    
+    def _loadAugmentation(self, dataAugmentationsList : list[DataAugmentationsList], device: torch.device) -> None:
         for dataAugmentations in dataAugmentationsList:
-            a_data = [data.clone() for _ in range(dataAugmentations.nb)]
+            a_data = [self.data[0].clone() for _ in range(dataAugmentations.nb)]
             for dataAugmentation in dataAugmentations.dataAugmentations:
                 a_data = dataAugmentation(self.index, a_data, device)
             
             for d in a_data:
                 self.data.append(d)
-        self.loaded = True
+        self.augmentationLoaded = True
 
     def unload(self) -> None:
-        if hasattr(self, "data"):
-            del self.data
-        self.cache_attributes = copy.deepcopy(self.cache_attributes_bak)
+        self.data.clear()
         self.loaded = False
-    
+        self.augmentationLoaded = False
+        
+    def unloadAugmentation(self) -> None:
+        self.data[:] = self.data[:1]
+        self.augmentationLoaded = False
+
+
     def getData(self, index : int, a : int, post_transforms : list[Transform], isInput: bool) -> torch.Tensor:
         data = self.patch.getData(self.data[a], index, a, isInput)
         for transformFunction in post_transforms:
