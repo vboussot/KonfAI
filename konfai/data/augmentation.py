@@ -8,7 +8,7 @@ from typing import Union
 import os
 from konfai import KONFAI_ROOT
 from konfai.utils.config import config
-from konfai.utils.utils import _getModule
+from konfai.utils.utils import _getModule, AugmentationError
 from konfai.utils.dataset import Attribute, data_to_image
 
 
@@ -222,7 +222,7 @@ class ColorTransform(DataAugmentation):
                 matrix = matrix[:, :3, :].mean(dim=1, keepdims=True).to(input.device)
                 result = result.float() * matrix[:, :, :3].sum(dim=2, keepdims=True) + matrix[:, :, 3:]
             else:
-                raise ValueError('Image must be RGB (3 channels) or L (1 channel)')
+                raise AugmentationError('Image must be RGB (3 channels) or L (1 channel)')
             results.append(result.reshape(input.shape))
         return results
     

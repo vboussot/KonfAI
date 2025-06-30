@@ -14,12 +14,75 @@ import torch.distributed as dist
 from konfai import MODELS_DIRECTORY, CHECKPOINTS_DIRECTORY, STATISTICS_DIRECTORY, SETUPS_DIRECTORY, CONFIG_FILE, MODEL, DATE, KONFAI_STATE
 from konfai.data.data_manager import DataTrain
 from konfai.utils.config import config
-from konfai.utils.utils import State, DataLog, DistributedObject, description
+from konfai.utils.utils import State, DataLog, DistributedObject, description, TrainerError
 from konfai.network.network import Network, ModelLoader, NetState, CPU_Model
+
+class EarlyStoppingBase:
+
+    def __init__(self):
+        pass
+
+    def isStopped(self) -> bool:
+        return False
+
+    def getScore(self, values: dict[str, float]):
+        return sum([i for i in values.values()])
+        
+    def __call__(self, current_score: float) -> bool:
+        return False
+
+class EarlyStopping(EarlyStoppingBase):
+
+    @config("EarlyStopping")
+    def __init__(self, monitor: Union[list[str], None] = [], patience=10, min_delta=0.0, mode="min"):
+        super().__init__()
+        self.monitor = [] if monitor is None else monitor
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+
+    def isStopped(self) -> bool:
+        return self.early_stop
+
+    def getScore(self, values: dict[str, float]):
+        if len(self.monitor) == 0:
+            return super().getScore(values)
+        for v in self.monitor:
+            if v not in values.keys():
+                raise TrainerError(
+                    "Metric '{}' specified in EarlyStopping.monitor not found in logged values. ",
+                    "Available keys: {}. Please check your configuration.".format(v, list(values.keys())))
+        return sum([i for v, i in values.items() if v in self.monitor])
+        
+    def __call__(self, current_score: float) -> bool:
+        if self.best_score is None:
+            self.best_score = current_score
+            return False
+
+        if self.mode == "min":
+            improvement = self.best_score - current_score
+        elif self.mode == "max":
+            improvement = current_score - self.best_score
+        else:
+            raise TrainerError("Mode must be 'min' or 'max'.")
+
+        if improvement > self.min_delta:
+            self.best_score = current_score
+            self.counter = 0
+        else:
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            self.early_stop = True
+
+        return self.early_stop
 
 class _Trainer():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, size: int, train_name: str, data_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, autocast: bool, it_validation: Union[int, None], it: int, model: Union[DDP, CPU_Model], modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
+    def __init__(self, world_size: int, global_rank: int, local_rank: int, size: int, train_name: str, early_stopping: EarlyStopping, data_log: Union[list[str], None] , save_checkpoint_mode: str, epochs: int, epoch: int, autocast: bool, it_validation: Union[int, None], it: int, model: Union[DDP, CPU_Model], modelEMA: AveragedModel, dataloader_training: DataLoader, dataloader_validation: Union[DataLoader, None] = None) -> None:
         self.world_size = world_size        
         self.global_rank = global_rank
         self.local_rank = local_rank
@@ -34,6 +97,7 @@ class _Trainer():
         self.dataloader_validation = dataloader_validation
         self.autocast = autocast
         self.modelEMA = modelEMA
+        self.early_stopping = EarlyStoppingBase() if early_stopping is None else early_stopping 
         
         self.it_validation = it_validation
         if self.it_validation is None:
@@ -53,11 +117,14 @@ class _Trainer():
             self.tb.close()
 
     def run(self) -> None:
-        with tqdm.tqdm(iterable = range(self.epoch, self.epochs), leave=False, total=self.epochs, initial=self.epoch, desc="Progress", disable=self.global_rank != 0) as epoch_tqdm:
+        self.dataloader_training.dataset.load("Train")
+        self.dataloader_validation.dataset.load("Validation")
+        with tqdm.tqdm(iterable = range(self.epoch, self.epochs), leave=False, total=self.epochs, initial=self.epoch, desc="Progress") as epoch_tqdm:
             for self.epoch in epoch_tqdm:
-                self.dataloader_training.dataset.load()
                 self.train()
-                self.dataloader_training.dataset.resetAugmentation()
+                if self.early_stopping.isStopped():
+                    break
+                self.dataloader_training.dataset.resetAugmentation("Train")
                 
     def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int, str, bool]]) -> dict[tuple[str, bool], torch.Tensor]:
         return {(k, v[5][0].item()) : v[0] for k, v in data_dict.items()}
@@ -70,7 +137,8 @@ class _Trainer():
             self.modelEMA.module.setState(NetState.TRAIN)
 
         desc = lambda : "Training : {}".format(description(self.model, self.modelEMA))
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = desc(), total=len(self.dataloader_training), leave=False, disable=self.global_rank != 0 and "KONFAI_CLUSTER" not in os.environ) as batch_iter:
+
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_training), desc = desc(), total=len(self.dataloader_training), leave=False, ncols=0) as batch_iter:
             for _, data_dict in batch_iter:
                 with torch.amp.autocast('cuda', enabled=self.autocast):
                     input = self.getInput(data_dict)
@@ -86,7 +154,11 @@ class _Trainer():
                         if self.dataloader_validation is not None:
                             loss = self._validate()
                         self.model.module.update_lr()
-                        self.checkpoint_save(loss)
+                        score = self.early_stopping.getScore(loss)
+                        self.checkpoint_save(score)
+                        if self.early_stopping(score):
+                            break
+                        
 
                 batch_iter.set_description(desc()) 
             
@@ -100,8 +172,7 @@ class _Trainer():
 
         desc = lambda : "Validation : {}".format(description(self.model, self.modelEMA))
         data_dict = None
-        self.dataloader_validation.dataset.load()
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = desc(), total=len(self.dataloader_validation), leave=False, disable=self.global_rank != 0 and "KONFAI_CLUSTER" not in os.environ) as batch_iter:
+        with tqdm.tqdm(iterable = enumerate(self.dataloader_validation), desc = desc(), total=len(self.dataloader_validation), leave=False, ncols=0) as batch_iter:
             for _, data_dict in batch_iter:
                 input = self.getInput(data_dict)
                 self.model(input)
@@ -109,7 +180,7 @@ class _Trainer():
                     self.modelEMA.module(input)
 
                 batch_iter.set_description(desc())
-        self.dataloader_validation.dataset.resetAugmentation()
+        self.dataloader_validation.dataset.resetAugmentation("Validation")
         dist.barrier()
         self.model.train()
         self.model.module.setState(NetState.TRAIN)
@@ -159,7 +230,7 @@ class _Trainer():
                     os.remove(f)
 
     @torch.no_grad()
-    def _log(self, type_log: str, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> float:
+    def _log(self, type_log: str, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[str, float]:
         models: dict[str, Network] = {"" : self.model.module}
         if self.modelEMA is not None:
             models["_EMA"] = self.modelEMA.module
@@ -194,21 +265,23 @@ class _Trainer():
                         self.tb.add_scalar("{}/{}/Learning Rate".format(type_log, name), network.optimizer.param_groups[0]['lr'], self.it)
         
         if self.global_rank == 0:
-            loss = []
+            loss = {}
             for name, network in self.model.module.getNetworks().items():
                 if network.measure is not None:
-                    loss.append(sum([v[1] for v in measures["{}".format(name)][0].values()]))
-            return np.mean(loss)
+                    loss.update({k : v[1] for k, v in measures["{}{}".format(name, label)][0].items()})
+                    loss.update({k : v[1] for k, v in measures["{}{}".format(name, label)][1].items()})
+            return loss
         return None
     
     @torch.no_grad()
-    def _train_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> float:
+    def _train_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[str, float]:
         return self._log("Training", data_dict)
 
     @torch.no_grad()
-    def _validation_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> float:
+    def _validation_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[str, float]:
         return self._log("Validation", data_dict)
 
+    
 class Trainer(DistributedObject):
 
     @config("Trainer")
@@ -224,6 +297,7 @@ class Trainer(DistributedObject):
                     gpu_checkpoints: Union[list[str], None] = None,
                     ema_decay : float = 0,
                     data_log: Union[list[str], None] = None,
+                    early_stopping: Union[EarlyStopping, None] = None,
                     save_checkpoint_mode: str= "BEST") -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             exit(0)
@@ -233,6 +307,7 @@ class Trainer(DistributedObject):
         self.autocast = autocast
         self.epochs = epochs
         self.epoch = 0
+        self.early_stopping = early_stopping
         self.it = 0
         self.it_validation = it_validation
         self.model = model.getModel(train=True)
@@ -285,7 +360,7 @@ class Trainer(DistributedObject):
                     os.makedirs(dir)
 
             for name in sorted(os.listdir(path_checkpoint)):
-                checkpoint = torch.load(path_checkpoint+name, weights_only=False)
+                checkpoint = torch.load(path_checkpoint+name, weights_only=False, map_location='cpu')
                 self.model.load(checkpoint, init=False, ema=False)
 
                 torch.save(self.model, "{}Serialized/{}".format(path_model, name))
@@ -316,7 +391,7 @@ class Trainer(DistributedObject):
         if state != State.TRAIN:
             state_dict = self._load()
 
-        self.model.init(self.autocast, state)
+        self.model.init(self.autocast, state, self.dataset.getGroupsDest())
         self.model.init_outputsGroup()
         self.model._compute_channels_trace(self.model, self.model.in_channels, self.gradient_checkpoints, self.gpu_checkpoints)
         self.model.load(state_dict, init=True, ema=False)
@@ -336,5 +411,5 @@ class Trainer(DistributedObject):
         model = DDP(model, static_graph=True) if torch.cuda.is_available() else CPU_Model(model)
         if self.modelEMA is not None:
             self.modelEMA.module = Network.to(self.modelEMA.module, local_rank)
-        with _Trainer(world_size, global_rank, local_rank, self.size, self.name, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:
+        with _Trainer(world_size, global_rank, local_rank, self.size, self.name, self.early_stopping, self.data_log, self.save_checkpoint_mode, self.epochs, self.epoch, self.autocast, self.it_validation, self.it, model, self.modelEMA, *dataloaders) as t:
             t.run()

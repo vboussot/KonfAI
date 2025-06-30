@@ -348,6 +348,10 @@ class Dataset():
         @abstractmethod
         def getNames(self, group: str) -> list[str]:
             pass
+        
+        @abstractmethod
+        def getGroup(self) -> list[str]:
+            pass
 
         @abstractmethod
         def isExist(self, group: str, name: Union[str, None] = None) -> bool:
@@ -457,6 +461,9 @@ class Dataset():
                 if group in h5_group:
                     names.extend(self.getNames("/".join(groups.split("/")[1:]), h5_group[group]))
             return names
+        
+        def getGroup(self):
+            return self.h5.keys()
         
         def _getDataset(self, groups: str, name: str, h5_group: h5py.Group = None) -> h5py.Dataset:
             if h5_group is None:
@@ -613,7 +620,10 @@ class Dataset():
         
         def getNames(self, group: str) -> list[str]:
             raise NotImplementedError()
-
+        
+        def getGroup(self):
+            raise NotImplementedError()
+        
         def getInfos(self, group: str, name: str) -> tuple[list[int], Attribute]:
             attributes = Attribute()
             if os.path.exists("{}{}{}.{}".format(self.filename, group if group is not None else "", name, self.format)):
@@ -736,7 +746,7 @@ class Dataset():
                 subDirectories.extend(self._getSubDirectories("/".join(groups.split("/")[1:]), subDirectory))
         return subDirectories
 
-    def getNames(self, groups: str, index: Union[list[int], None] = None, subDirectory: str = "") -> list[str]:
+    def getNames(self, groups: str, index: Union[list[int], None] = None) -> list[str]:
         names = []
         if self.is_directory:
             for subDirectory in self._getSubDirectories(groups):
@@ -751,6 +761,21 @@ class Dataset():
             with Dataset.File(self.filename, True, self.format) as file:
                 names = file.getNames(groups)
         return [name for i, name in enumerate(sorted(names)) if index is None or i in index]
+    
+    def getGroup(self):
+        if self.is_directory:
+            groups = set()
+            for root, _, files in os.walk(self.filename):
+                for file in files:
+                    path = os.path.relpath(os.path.join(root, file.split(".")[0]), self.filename)
+                    parts = path.split("/")
+                    if len(parts) >= 2:
+                        del parts[-2]
+                    groups.add("/".join(parts))
+        else:
+            with Dataset.File(self.filename, True, self.format) as file:
+                groups = file.getGroup()
+        return list(groups)
     
     def getInfos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
         if self.is_directory:

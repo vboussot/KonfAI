@@ -18,13 +18,15 @@ import random
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import sys
+import re
+
 
 def description(model, modelEMA = None, showMemory: bool = True) -> str:
     values_desc = lambda weights, values: " ".join(["{}({:.2f}) : {:.6f}".format(name.split(":")[-1], weight, value) for (name, value), weight in zip(values.items(), weights.values())])
     model_desc = lambda model : "("+" ".join(["{}({:.6f}) : {}".format(name, network.optimizer.param_groups[0]['lr'] if network.optimizer is not None else 0, values_desc(network.measure.getLastWeights(), network.measure.getLastValues())) for name, network in model.module.getNetworks().items() if network.measure is not None])+")"
     result = "Loss {}".format(model_desc(model))
     if modelEMA is not None:
-        result += "Loss EMA {}".format(model_desc(modelEMA))
+        result += " Loss EMA {}".format(model_desc(modelEMA))
     result += " "+gpuInfo()
     if showMemory:
         result +=" | {}".format(memoryInfo())
@@ -145,8 +147,12 @@ def get_patch_slices_from_nb_patch_per_dim(patch_size_tmp: list[int], nb_patch_p
 
 def get_patch_slices_from_shape(patch_size: list[int], shape : list[int], overlap: Union[int, None]) -> tuple[list[tuple[slice]], list[tuple[int, bool]]]:
     if len(shape) != len(patch_size):
-        return [tuple([slice(0, s) for s in shape])], [(1, True)]*len(shape)
-    
+         raise DatasetManagerError(
+                f"Dimension mismatch: 'patch_size' has {len(patch_size)} dimensions, but 'shape' has {len(shape)}.",
+                f"patch_size: {patch_size}",
+                f"shape: {shape}",
+                "Both must have the same number of dimensions (e.g., 3D patch for 3D volume)."
+            )
     patch_slices = []
     nb_patch_per_dim = []
     slices : list[list[slice]] = []
@@ -192,12 +198,8 @@ def _logImageFormat(input : np.ndarray):
 
     if len(input.shape) == 3 and input.shape[0] != 1:
         input = np.expand_dims(input, axis=0)
-
     if len(input.shape) == 4:
         input = input[:, input.shape[1]//2]
-    
-    if input.dtype == np.uint8:
-        return input
         
     input = input.astype(float)
     b = -np.min(input)
@@ -237,7 +239,7 @@ class DataLog(Enum):
     AUDIO   = lambda tb, name, layer, it : tb.add_audio(name, _logImageFormat(layer), it)
 
 class Log:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, rank: int) -> None:
         if KONFAI_STATE() == "PREDICTION":
             path = PREDICTIONS_DIRECTORY()
         elif KONFAI_STATE() == "EVALUATION":
@@ -248,11 +250,12 @@ class Log:
         self.verbose = os.environ.get("KONFAI_VERBOSE", "True") == "True"
         self.log_path = os.path.join(path, name)
         os.makedirs(self.log_path, exist_ok=True)
-        
-        self.file = open(os.path.join(self.log_path, "log.txt"), "w", buffering=1) 
+        self.rank = rank
+        self.file = open(os.path.join(self.log_path, "log_{}.txt".format(rank)), "w", buffering=1) 
         self.stdout_bak = sys.stdout
         self.stderr_bak = sys.stderr
-
+        self._buffered_line = ""
+    
     def __enter__(self):
         self.file.__enter__()
         sys.stdout = self
@@ -264,12 +267,26 @@ class Log:
         sys.stdout = self.stdout_bak
         sys.stderr = self.stderr_bak
 
-    def write(self, msg):
+    def write(self, msg: str):
         if not msg:
             return
-        self.file.write(msg)
-        self.file.flush()
-        if self.verbose:
+        
+        
+        ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+        CARRIAGE_RETURN = re.compile(r'(?:\r|\x1b\[A).*')
+        msg_clean = ANSI_ESCAPE.sub('', msg)
+        if '\r' in msg_clean or '[A' in msg:
+            # On garde seulement le contenu après le dernier retour chariot
+            msg_clean = msg_clean.split('\r')[-1].strip()
+            self._buffered_line = msg_clean
+        else:
+            self._buffered_line = msg_clean.strip()
+
+        if self._buffered_line:
+            # Écrit dans le fichier
+            self.file.write(self._buffered_line + "\n")
+            self.file.flush()
+        if self.verbose and (self.rank == 0 or "KONFAI_CLUSTER" in os.environ):
             sys.__stdout__.write(msg)
             sys.__stdout__.flush()
 
@@ -325,7 +342,7 @@ class DistributedObject():
         return self
 
     def __exit__(self, type, value, traceback):
-        pass
+        cleanup()
 
     @abstractmethod
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
@@ -352,7 +369,7 @@ class DistributedObject():
         return result
 
     def __call__(self, rank: Union[int, None] = None) -> None:
-        with Log(self.name):
+        with Log(self.name, rank):
             world_size = len(self.dataloader)
             global_rank, local_rank = setupGPU(world_size, self.port, rank)
             if global_rank is None:
@@ -370,11 +387,12 @@ class DistributedObject():
             dataloaders = self.dataloader[global_rank]
             if torch.cuda.is_available():    
                 torch.cuda.set_device(local_rank)
-                
-            self.run_process(world_size, global_rank, local_rank, dataloaders)
-            if torch.cuda.is_available():
-                pynvml.nvmlShutdown()
-            cleanup()
+            try:
+                self.run_process(world_size, global_rank, local_rank, dataloaders)
+            finally:
+                cleanup()
+                if torch.cuda.is_available():
+                    pynvml.nvmlShutdown()
 
 def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     # KONFAI arguments
@@ -384,6 +402,7 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     KONFAI_args.add_argument('-tb', action='store_true', help='Start TensorBoard')
     KONFAI_args.add_argument("-c", "--config", type=str, default="None", help="Configuration file location")
     KONFAI_args.add_argument("-g", "--gpu", type=str, default=os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else "", help="List of GPU")
+    KONFAI_args.add_argument("-cpu", "--cpu", type=str, default="1" , help="List of GPU")
     KONFAI_args.add_argument('--num-workers', '--num_workers', default=4, type=int, help='No. of workers per DataLoader & GPU')
     KONFAI_args.add_argument("-models_dir", "--MODELS_DIRECTORY", type=str, default="./Models/", help="Models location")
     KONFAI_args.add_argument("-checkpoints_dir", "--CHECKPOINTS_DIRECTORY", type=str, default="./Checkpoints/", help="Checkpoints location")
@@ -400,6 +419,7 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     config = vars(args)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = config["gpu"]
+    os.environ["KONFAI_NB_CORES"] = config["cpu"]
     os.environ["KONFAI_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
     os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
@@ -460,10 +480,18 @@ def setupGPU(world_size: int, port: int, rank: Union[int, None] = None) -> tuple
         local_rank = rank
     if global_rank >= world_size:
         return None, None
-    print("tcp://{}:{}".format(host_name, port))
+    #print("tcp://{}:{}".format(host_name, port))
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         dist.init_process_group("nccl", rank=global_rank, init_method="tcp://{}:{}".format(host_name, port), world_size=world_size)
+    else:
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="gloo",
+                init_method=f"tcp://{host_name}:{port}",
+                rank=global_rank,
+                world_size=world_size
+            )
     return global_rank, local_rank
 
 import socket
@@ -476,7 +504,7 @@ def find_free_port():
         return s.getsockname()[1]
     
 def cleanup():
-    if torch.cuda.is_available():
+    if dist.is_initialized():
         dist.destroy_process_group()
 
 def synchronize_data(world_size: int, gpu: int, data: any) -> list[Any]:
@@ -506,3 +534,59 @@ def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
     else:
         mode = "bilinear"
     return F.grid_sample(data.unsqueeze(0).type(torch.float32), F.affine_grid(matrix[:, :-1,...].type(torch.float32), [1]+list(data.shape), align_corners=True), align_corners=True, mode=mode, padding_mode="reflection").squeeze(0).type(data.dtype)
+
+
+SUPPORTED_EXTENSIONS = [
+    "mha", "mhd",         # MetaImage
+    "nii", "nii.gz",      # NIfTI
+    "nrrd", "nrrd.gz",    # NRRD
+    "gipl", "gipl.gz",    # GIPL
+    "hdr", "img",         # Analyze
+    "dcm",                 # DICOM (si GDCM activé)
+    "tif", "tiff",        # TIFF
+    "png", "jpg", "jpeg", "bmp",  # 2D formats
+    "h5", "itk.txt", ".fcsv", ".xml", ".vtk", ".npy"
+
+]
+
+class KonfAIError(Exception):
+
+    def __init__(self, typeError: str, messages: list[str]) -> None:
+        super().__init__("\n[{}] {}".format(typeError, messages[0])+("\n" if len(messages) > 0 else "")+"\n→\t".join(messages[1:]))
+
+
+class ConfigError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Config", message)
+
+
+class DatasetManagerError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("DatasetManager", message)
+
+class MeasureError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Measure", message)
+
+class TrainerError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Trainer", message)
+
+class AugmentationError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Augmentation", message)
+
+class EvaluatorError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Evaluator", message)
+
+class TransformError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Transform", message)

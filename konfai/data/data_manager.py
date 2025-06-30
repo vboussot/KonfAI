@@ -11,11 +11,12 @@ from typing import Union, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from torch.cuda import device_count
+import SimpleITK as sitk
 
 from konfai import KONFAI_STATE, KONFAI_ROOT
 from konfai.data.patching import DatasetPatch, DatasetManager
 from konfai.utils.config import config
-from konfai.utils.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, State
+from konfai.utils.utils import memoryInfo, cpuInfo, memoryForecast, getMemory, State, SUPPORTED_EXTENSIONS, DatasetManagerError
 from konfai.utils.dataset import Dataset, Attribute
 from konfai.data.transform import TransformLoader, Transform
 from konfai.data.augmentation import DataAugmentationsList
@@ -61,10 +62,23 @@ class GroupTransform:
         for transform in self.post_transforms:
             transform.setDevice(device)
 
+class GroupTransformMetric(GroupTransform):
+
+    @config()
+    def __init__(self,  pre_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
+                        post_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}):
+        super().__init__(pre_transforms, post_transforms)
+
 class Group(dict[str, GroupTransform]):
 
     @config()
     def __init__(self, groups_dest: dict[str, GroupTransform] = {"default:group_dest": GroupTransform()}):
+        super().__init__(groups_dest)
+
+class GroupMetric(dict[str, GroupTransformMetric]):
+
+    @config()
+    def __init__(self, groups_dest: dict[str, GroupTransformMetric] = {"default:group_dest": GroupTransformMetric()}):
         super().__init__(groups_dest)
 
 class CustomSampler(Sampler[int]):
@@ -108,32 +122,33 @@ class DatasetIter(data.Dataset):
     def getDatasetFromIndex(self, group_dest: str, index: int) -> DatasetManager:
         return self.data[group_dest][index]
     
-    def resetAugmentation(self):
-        if self.inlineAugmentations:
+    def resetAugmentation(self, label):
+        if self.inlineAugmentations and len(self.dataAugmentationsList) > 0:
             for index in range(self.nb_dataset):
-                self._unloadData(index)
                 for group_src in self.groups_src:
                     for group_dest in self.groups_src[group_src]:
+                        self.data[group_dest][index].unloadAugmentation()
                         self.data[group_dest][index].resetAugmentation()
+        self.load(label + " Augmentation")
 
-    def load(self):
+    def load(self, label: str):
         if self.use_cache:
             memory_init = getMemory()
 
-            indexs = [index for index in range(self.nb_dataset) if index not in self._index_cache]
+            indexs = [index for index in range(self.nb_dataset)]
             if len(indexs) > 0:
                 memory_lock = threading.Lock()
+                desc = lambda : "Caching "+ label +": {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, 0, self.nb_dataset), cpuInfo())
                 pbar = tqdm.tqdm(
                     total=len(indexs),
-                    desc="Caching : init | {} | {}".format(memoryForecast(memory_init, 0, self.nb_dataset), cpuInfo()),
-                    leave=False,
-                    disable=self.rank != 0 and "KONFAI_CLUSTER" not in os.environ
+                    desc=desc(),
+                    leave=False
                 )
 
                 def process(index):
                     self._loadData(index)
                     with memory_lock:
-                        pbar.set_description("Caching : {} | {} | {}".format(memoryInfo(), memoryForecast(memory_init, index, self.nb_dataset), cpuInfo()))
+                        pbar.set_description(desc())
                         pbar.update(1)
                 with ThreadPoolExecutor(max_workers=os.cpu_count()//(device_count() if device_count() > 0 else 1)) as executor:
                     futures = [executor.submit(process, index) for index in indexs]
@@ -236,6 +251,8 @@ class Subset():
             index = random.sample(index, len(index))
         return set([names_filtred[i] for i in index])
     
+    def __str__(self):
+        return "Subset : " + str(self.subset) + " shuffle : "+ str(self.shuffle) + " filter : "+ str(self.filter)
 class TrainSubset(Subset):
 
     @config()
@@ -254,17 +271,17 @@ class Data(ABC):
                         groups_src : dict[str, Group],
                         patch : Union[DatasetPatch, None],
                         use_cache : bool,
-                        subset : Union[Subset, dict[str, Subset]],
+                        subset : Subset,
                         num_workers : int,
                         batch_size : int,
-                        train_size: Union[float, str, list[int], list[str]] = 1,
+                        validation: Union[float, str, list[int], list[str], None] = None,
                         inlineAugmentations: bool = False,
                         dataAugmentationsList: dict[str, DataAugmentationsList]= {}) -> None:
         self.dataset_filenames = dataset_filenames
         self.subset = subset
         self.groups_src = groups_src
         self.patch = patch
-        self.train_size = train_size
+        self.validation = validation
         self.dataAugmentationsList = dataAugmentationsList
         self.batch_size = batch_size
         self.dataSet_args = dict(groups_src=self.groups_src, inlineAugmentations=inlineAugmentations, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, buffer_size=batch_size+1, patch_size=self.patch.patch_size if self.patch is not None else None, overlap=self.patch.overlap if self.patch is not None else None)
@@ -290,6 +307,13 @@ class Data(ABC):
                     map.append((x, y, z))
         return data, map
 
+    def getGroupsDest(self):
+        groupsDest = []
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                groupsDest.append(group_dest)
+        return groupsDest
+    
     def _split(map: list[tuple[int, int, int]], world_size: int) -> list[list[tuple[int, int, int]]]:
         if len(map) == 0:
             return [[] for _ in range(world_size)]
@@ -313,7 +337,14 @@ class Data(ABC):
     
     def getData(self, world_size: int) -> list[list[DataLoader]]:
         datasets: dict[str, list[(str, bool)]] = {}
+        if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
+            raise DatasetManagerError("No dataset filenames were provided")
         for dataset_filename in self.dataset_filenames:
+            if dataset_filename is None:
+                raise DatasetManagerError("Invalid dataset entry: 'None' received.",
+                    "Each dataset must be a valid path string (e.g., './Dataset/', './Dataset/:mha, './Dataset/:a:mha', './Dataset/:i:mha').",
+                    "Please check your 'dataset_filenames' list for missing or null entries."
+                )
             if len(dataset_filename.split(":")) == 1:
                 filename = dataset_filename
                 format = "mha"
@@ -324,9 +355,13 @@ class Data(ABC):
             else:
                 filename, flag, format = dataset_filename.split(":")
                 append = flag == "a"
-                
-            dataset = Dataset(filename, format) 
+
+            if format not in SUPPORTED_EXTENSIONS:
+                raise DatasetManagerError(f"Unsupported file format '{format}'.",
+                        f"Supported extensions are: {', '.join(SUPPORTED_EXTENSIONS)}")
             
+            dataset = Dataset(filename, format)
+
             self.datasets[filename] = dataset
             for group in self.groups_src:
                 if dataset.isGroupExist(group):
@@ -334,75 +369,145 @@ class Data(ABC):
                         datasets[group].append((filename, append)) 
                     else:
                         datasets[group] = [(filename, append)]
+        modelHaveInput = False
         for group_src in self.groups_src:
             if group_src not in datasets:
-                raise ValueError("[DatasetManager] Error: group source {} not found. Available groups: {}".format(group_src, list(datasets.keys())))
                 
+                raise DatasetManagerError(
+                    f"Group source '{group_src}' not found in any dataset.",
+                    f"Dataset filenames provided: {self.dataset_filenames}",
+                    "Available groups across all datasets: {}".format(["{} {}".format(f, d.getGroup()) for f, d in self.datasets.items()]),
+                    f"Please check that an entry in the dataset with the name '{group_src}.{format}' exists."
+                )
+           
             for group_dest in self.groups_src[group_src]:
                 self.groups_src[group_src][group_dest].load(group_src, group_dest, [self.datasets[filename] for filename, _ in datasets[group_src]])
+                modelHaveInput |= self.groups_src[group_src][group_dest].isInput
+
+        if not modelHaveInput:
+            raise DatasetManagerError(
+                "At least one group must be defined with 'isInput: true' to provide input to the network."
+            )
+
         for key, dataAugmentations in self.dataAugmentationsList.items():
             dataAugmentations.load(key)
 
-        names : list[list[str]] = []
+        names = set()
         dataset_name : dict[str, dict[str, list[str]]] = {}
         dataset_info : dict[str, dict[str, dict[str, Attribute]]] = {}
         for group in self.groups_src:
+            namesByGroup = set()
             if group not in dataset_name:
                 dataset_name[group] = {}
                 dataset_info[group] = {}
             for filename, _ in datasets[group]:
-                names.append(self.datasets[filename].getNames(group))
+                namesByGroup.update(self.datasets[filename].getNames(group))
                 dataset_name[group][filename] = self.datasets[filename].getNames(group)
                 dataset_info[group][filename] = {name: self.datasets[filename].getInfos(group, name) for name in dataset_name[group][filename]}
+            if len(names) == 0:
+                names.update(namesByGroup)
+            else: 
+                names = names.intersection(namesByGroup)
+        if len(names) == 0:
+           raise DatasetManagerError(
+                f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data from a dataset, there are no common dataset names shared across all groups, the intersection is empty."
+            )   
+                    
         subset_names = set()
-        if isinstance(self.subset, dict):
-            for filename, subset in self.subset.items():
-                subset_names.update(subset([dataset_name[group][filename] for group in dataset_name], [dataset_info[group][filename] for group in dataset_name]))
-        else:
-             for group in dataset_name:
-                for filename, append in datasets[group]:
-                    if append:
-                        subset_names.update(self.subset([dataset_name[group][filename]], [dataset_info[group][filename]]))
+        for group in dataset_name:
+            subset_names_bygroup = set()
+            for filename, append in datasets[group]:
+                if append:
+                    subset_names_bygroup.update(self.subset([dataset_name[group][filename]], [dataset_info[group][filename]]))
+                else:
+                    if len(subset_names_bygroup) == 0:
+                        subset_names_bygroup.update(self.subset([dataset_name[group][filename]], [dataset_info[group][filename]])) 
                     else:
-                        if len(subset_names) == 0:
-                            subset_names.update(self.subset([dataset_name[group][filename]], [dataset_info[group][filename]])) 
-                        else:
-                            subset_names.intersection(self.subset([dataset_name[group][filename]], [dataset_info[group][filename]]))
+                        subset_names_bygroup = subset_names_bygroup.intersection(self.subset([dataset_name[group][filename]], [dataset_info[group][filename]]))
+            if len(subset_names) == 0:
+                subset_names.update(subset_names_bygroup)
+            else: 
+                subset_names = subset_names.intersection(subset_names_bygroup)
+        if len(subset_names) == 0:
+            raise DatasetManagerError("All data entries were excluded by the subset filter.",
+                f"Dataset entries found: {', '.join(names)}",
+                f"Subset object applied: {self.subset}",
+                f"Subset requested : {', '.join(subset_names)}",
+                "None of the dataset entries matched the given subset.",
+                "Please check your 'subset' configuration — it may be too restrictive or incorrectly formatted.",
+                "Examples of valid subset formats:",
+                "\tsubset: [0, 1]            # explicit indices",
+                "\tsubset: 0:10              # slice notation",
+                "\tsubset: ./Validation.txt  # external file",
+                "\tsubset: None              # to disable filtering"
+            )
+                                        
         data, map = self._getDatasets(list(subset_names), dataset_name)
-    
+
         train_map = map
         validate_map = []
-        if isinstance(self.train_size, float):
-            if self.train_size < 1.0 and int(math.floor(len(map)*(1-self.train_size))) > 0:
-                train_map, validate_map = map[:int(math.floor(len(map)*self.train_size))], map[int(math.floor(len(map)*self.train_size)):]
-        elif isinstance(self.train_size, str):
-            if ":" in self.train_size:
+        if isinstance(self.validation, float) or isinstance(self.validation, int):
+            if self.validation <= 0 or self.validation >= 1:
+                raise DatasetManagerError("Validation must be a float between 0 and 1.", f"Received: {self.validation}", "Example: validation = 0.2  # for a 20% validation split")
+            
+            train_map, validate_map = map[:int(math.floor(len(map)*(1-self.validation)))], map[int(math.floor(len(map)*(1-self.validation))):]
+        elif isinstance(self.validation, str):
+            if ":" in self.validation:
                 index = list(range(int(self.subset.split(":")[0]), int(self.subset.split(":")[1])))
                 train_map = [m for m in map if m[0] not in index]
                 validate_map = [m for m in map if m[0] in index]
-            elif os.path.exists(self.train_size):
+            elif os.path.exists(self.validation):
                 validation_names = []
-                with open(self.train_size, "r") as f:
+                with open(self.validation, "r") as f:
                     for name in f:
                         validation_names.append(name.strip())
                 index = [i for i, n in enumerate(subset_names) if n in validation_names]
                 train_map = [m for m in map if m[0] not in index]
                 validate_map = [m for m in map if m[0] in index]
             else:
-                validate_map = train_map
-        elif isinstance(self.train_size, list):
-            if len(self.train_size) > 0:
-                if isinstance(self.train_size[0], int):
-                    train_map = [m for m in map if m[0] not in self.train_size]
-                    validate_map = [m for m in map if m[0] in self.train_size]
-                elif isinstance(self.train_size[0], str):
-                    index = [i for i, n in enumerate(subset_names) if n in self.train_size]
+                raise DatasetManagerError(
+                    f"Invalid string value for 'validation': '{self.validation}'",
+                    "Expected one of the following formats:",
+                    "\t• A slice string like '0:10'",
+                    "\t• A path to a text file listing validation sample names (e.g., './val.txt')",
+                    "\t• A float between 0 and 1 (e.g., 0.2)",
+                    "\t• A list of sample names or indices",
+                    "The provided value is neither a valid slice nor a readable file.",
+                    "Please fix your 'validation' setting in the configuration."
+                    )
+            
+        elif isinstance(self.validation, list):
+            if len(self.validation) > 0:
+                if isinstance(self.validation[0], int):
+                    train_map = [m for m in map if m[0] not in self.validation]
+                    validate_map = [m for m in map if m[0] in self.validation]
+                elif isinstance(self.validation[0], str):
+                    index = [i for i, n in enumerate(subset_names) if n in self.validation]
                     train_map = [m for m in map if m[0] not in index]
                     validate_map = [m for m in map if m[0] in index]
+                else:
+                    raise DatasetManagerError(f"Invalid list type for 'validation': elements of type '{type(self.validation[0]).__name__}' are not supported.",
+                            "Supported list element types are:",
+                            "\t• int  → list of indices (e.g., [0, 1, 2])",
+                            "\t• str  → list of sample names (e.g., ['patient01', 'patient02'])",
+                            f"Received list: {self.validation}"
+                        )
+        if len(train_map) == 0:
+            raise DatasetManagerError("No data left for training after applying the validation split.",
+                f"Dataset size: {len(map)}",
+                f"Validation setting: {self.validation}",
+                "Please reduce the validation size, increase the dataset, or disable validation."
+            )
 
+        if self.validation is not None and len(validate_map) == 0:
+            raise DatasetManagerError("No data left for validation after applying the validation split.",
+                f"Dataset size: {len(map)}",
+                f"Validation setting: {self.validation}",
+                "Please increase the validation size, increase the dataset, or disable validation."
+            )
         train_maps = Data._split(train_map, world_size)
         validate_maps = Data._split(validate_map, world_size)
-
+        
         for i, (train_map, validate_map) in enumerate(zip(train_maps, validate_maps)):
             maps = [train_map]
             if len(validate_map):
@@ -436,8 +541,8 @@ class DataTrain(Data):
                         subset : Union[TrainSubset, dict[str, TrainSubset]] = TrainSubset(),
                         num_workers : int = 4,
                         batch_size : int = 1,
-                        train_size : Union[float, str, list[int], list[str]] = 0.8) -> None:
-        super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, num_workers, batch_size, train_size, inlineAugmentations, augmentations if augmentations else {})
+                        validation : Union[float, str, list[int], list[str]] = 0.2) -> None:
+        super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, num_workers, batch_size, validation, inlineAugmentations, augmentations if augmentations else {})
 
 class DataPrediction(Data):
 
@@ -445,22 +550,20 @@ class DataPrediction(Data):
     def __init__(self,  dataset_filenames : list[str] = ["default:./Dataset"], 
                         groups_src : dict[str, Group] = {"default" : Group()},
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
-                        inlineAugmentations: bool = False,
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
-                        use_cache : bool = True,
                         subset : Union[PredictionSubset, dict[str, PredictionSubset]] = PredictionSubset(),
                         num_workers : int = 4,
                         batch_size : int = 1) -> None:
 
-        super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, num_workers, batch_size, inlineAugmentations=inlineAugmentations, dataAugmentationsList=augmentations if augmentations else {})
+        super().__init__(dataset_filenames, groups_src, patch, False, subset, num_workers, batch_size, dataAugmentationsList=augmentations if augmentations else {})
 
 class DataMetric(Data):
 
     @config("Dataset")
     def __init__(self,  dataset_filenames : list[str] = ["default:./Dataset"], 
-                        groups_src : dict[str, Group] = {"default" : Group()},
+                        groups_src : dict[str, GroupMetric] = {"default" : GroupMetric()},
                         subset : Union[PredictionSubset, dict[str, PredictionSubset]] = PredictionSubset(),
                         validation: Union[str, None] = None,
                         num_workers : int = 4) -> None:
 
-        super().__init__(dataset_filenames=dataset_filenames, groups_src=groups_src, patch=None, use_cache=False, subset=subset, num_workers=num_workers, batch_size=1, train_size=1 if validation is None else validation)
+        super().__init__(dataset_filenames=dataset_filenames, groups_src=groups_src, patch=None, use_cache=False, subset=subset, num_workers=num_workers, batch_size=1, validation=validation)

@@ -9,7 +9,7 @@ import builtins
 import importlib
 from konfai import EVALUATIONS_DIRECTORY, PREDICTIONS_DIRECTORY, KONFAI_ROOT, CONFIG_FILE
 from konfai.utils.config import config
-from konfai.utils.utils import _getModule, DistributedObject, synchronize_data
+from konfai.utils.utils import _getModule, DistributedObject, synchronize_data, EvaluatorError
 from konfai.data.data_manager import DataMetric
 
 class CriterionsAttr():
@@ -54,7 +54,8 @@ class Statistics():
             if name_dataset not in self.measures:
                 self.measures[name_dataset] = {}
             self.measures[name_dataset][name] = value
-            
+    
+    @staticmethod   
     def getStatistic(values: list[float]) -> dict[str, float]:
         return {"max": np.max(values), "min": np.min(values), "std": np.std(values), "25pc": np.percentile(values, 25), "50pc": np.percentile(values, 50), "75pc": np.percentile(values, 75), "mean": np.mean(values), "count": len(values)}
     
@@ -91,7 +92,6 @@ class Evaluator(DistributedObject):
             exit(0)
         super().__init__(train_name)
         self.metric_path = EVALUATIONS_DIRECTORY()+self.name+"/"
-        self.predict_path = PREDICTIONS_DIRECTORY()+self.name+"/"
         self.metricsLoader = metrics
         self.dataset = dataset
         self.metrics = {k: v.getTargetsCriterions(k) for k, v in self.metricsLoader.items()}
@@ -102,10 +102,10 @@ class Evaluator(DistributedObject):
         result = {}
         for output_group in self.metrics:
             for target_group in self.metrics[output_group]:
-                targets = [data_dict[group][0] for group in target_group.split("/") if group in data_dict]
+                targets = [data_dict[group][0].to(0) if torch.cuda.is_available() else data_dict[group][0] for group in target_group.split("/") if group in data_dict]
                 name = data_dict[output_group][1][0]
                 for metric in self.metrics[output_group][target_group]:
-                    result["{}:{}:{}".format(output_group, target_group, metric.__class__.__name__)] = metric(data_dict[output_group][0], *targets).item()
+                    result["{}:{}:{}".format(output_group, target_group, metric.__class__.__name__)] = metric(data_dict[output_group][0].to(0) if torch.cuda.is_available() else data_dict[output_group][0], *targets).item()
         statistics.add(result, name)
         return result
     
@@ -126,9 +126,26 @@ class Evaluator(DistributedObject):
 
         self.dataloader = self.dataset.getData(world_size)
 
+        groupsDest = [group for groups in self.dataset.groups_src.values() for group in groups]
+
+        missing_outputs = set(self.metrics.keys()) - set(groupsDest)
+        if missing_outputs:
+            raise EvaluatorError(
+                f"The following metric output groups are missing from 'groupsDest': {sorted(missing_outputs)}. ",
+                f"Available groups: {sorted(groupsDest)}"
+            )
+
+        target_groups = {target for targets in self.metrics.values() for target in targets}
+        missing_targets = target_groups - set(groupsDest)
+        if missing_targets:
+            raise EvaluatorError(
+                f"The following metric target groups are missing from 'groupsDest': {sorted(missing_targets)}. ",
+                f"Available groups: {sorted(groupsDest)}"
+            )
+
     def run_process(self, world_size: int, global_rank: int, gpu: int, dataloaders: list[DataLoader]):
         description = lambda measure : "Metric TRAIN : {} ".format(" | ".join("{}: {:.2f}".format(k, v) for k, v in measure.items()) if measure is not None else "")
-        with tqdm.tqdm(iterable = enumerate(dataloaders[0]), leave=False, desc = description(None), total=len(dataloaders[0])) as batch_iter:
+        with tqdm.tqdm(iterable = enumerate(dataloaders[0]), leave=True, desc = description(None), total=len(dataloaders[0]), ncols=0) as batch_iter:
             for _, data_dict in batch_iter:
                 batch_iter.set_description(description(self.update({k: (v[0], v[4]) for k,v in data_dict.items()}, self.statistics_train)))
         outputs = synchronize_data(world_size, gpu, self.statistics_train.measures)
@@ -136,7 +153,7 @@ class Evaluator(DistributedObject):
             self.statistics_train.write(outputs)
         if len(dataloaders) == 2:
             description = lambda measure : "Metric VALIDATION : {} ".format(" | ".join("{}: {:.2f}".format(k, v) for k, v in measure.items()) if measure is not None else "")
-            with tqdm.tqdm(iterable = enumerate(dataloaders[1]), leave=False, desc = description(None), total=len(dataloaders[1])) as batch_iter:
+            with tqdm.tqdm(iterable = enumerate(dataloaders[1]), leave=True, desc = description(None), total=len(dataloaders[1]), ncols=0) as batch_iter:
                 for _, data_dict in batch_iter:
                     batch_iter.set_description(description(self.update({k: (v[0], v[4]) for k,v in data_dict.items()}, self.statistics_validation)))
             outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)

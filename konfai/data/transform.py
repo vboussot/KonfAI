@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 import torch.nn.functional as F
 from typing import Any, Union
 
-from konfai.utils.utils import _getModule, NeedDevice, _resample_affine, _affine_matrix
+from konfai.utils.utils import _getModule, NeedDevice, _resample_affine, _affine_matrix, TransformError
 from konfai.utils.dataset import Dataset, Attribute, data_to_image, image_to_data
 from konfai.utils.config import config
 
@@ -211,39 +211,67 @@ class Resample(Transform, ABC):
         _ = cache_attribute.pop_np_array("Spacing")
         return self._resample(input, [int(size) for size in size_1])
 
-class ResampleIsotropic(Resample):
+class ResampleToResolution(Resample):
 
-    def __init__(self, spacing : list[float] = [1., 1., 1.]) -> None:
-        self.spacing = torch.tensor(spacing, dtype=torch.float64)
-        
+    def __init__(self, spacing : list[Union[float, None]] = [1., 1., 1.]) -> None:
+        self.spacing = torch.tensor([0 if s < 0 else s for s in spacing])
+
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        assert "Spacing" in cache_attribute, "Error no spacing"
-        resize_factor = self.spacing/cache_attribute.get_tensor("Spacing").flip(0)
-        return  [int(x) for x in (torch.tensor(shape) * 1/resize_factor)]
+        if "Spacing" not in cache_attribute:
+            TransformError("Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
+                        "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.")
+        if len(shape) != len(self.spacing):
+            TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
+        image_spacing = cache_attribute.get_tensor("Spacing").flip(0)
+        spacing = self.spacing
+        
+        for i, s in enumerate(self.spacing):
+            if s == 0:
+                spacing[i] = image_spacing[i]
+        resize_factor = spacing/cache_attribute.get_tensor("Spacing").flip(0)
+        return [int(x) for x in (torch.tensor(shape) * 1/resize_factor)]
 
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        assert "Spacing" in cache_attribute, "Error no spacing"
-        resize_factor = self.spacing/cache_attribute.get_tensor("Spacing").flip(0)
-        cache_attribute["Spacing"] = self.spacing.flip(0)
+        image_spacing = cache_attribute.get_tensor("Spacing").flip(0)
+        spacing = self.spacing
+        for i, s in enumerate(self.spacing):
+            if s == 0:
+                spacing[i] = image_spacing[i]
+        resize_factor = spacing/cache_attribute.get_tensor("Spacing").flip(0)
+        cache_attribute["Spacing"] = spacing.flip(0)
         cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(input.shape[1:])])
         size = [int(x) for x in (torch.tensor(input.shape[1:]) * 1/resize_factor)]
         cache_attribute["Size"] = np.asarray(size)
         return self._resample(input, size)
 
-class ResampleResize(Resample):
+class ResampleToSize(Resample):
 
     def __init__(self, size : list[int] = [100,512,512]) -> None:
         self.size = size
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        return self.size
+        if "Spacing" not in cache_attribute:
+            TransformError("Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
+                        "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.")
+        if len(shape) != len(self.size):
+            TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
+        size = self.size
+        for i, s in enumerate(self.size):
+            if s == -1:
+                size[i] = shape[i]
+        return size
     
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        size = self.size
+        image_size =  np.asarray([int(x) for x in torch.tensor(input.shape[1:])])
+        for i, s in enumerate(self.size):
+            if s is None:
+                size[i] = image_size[i]
         if "Spacing" in cache_attribute:
-            cache_attribute["Spacing"] = torch.flip(torch.tensor(list(input.shape[1:]))/torch.tensor(self.size)*torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]), dims=[0])
-        cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(input.shape[1:])])
-        cache_attribute["Size"] = self.size
-        return self._resample(input, self.size)
+            cache_attribute["Spacing"] = torch.flip(torch.tensor(image_size)/torch.tensor(size)*torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]), dims=[0])
+        cache_attribute["Size"] = image_size
+        cache_attribute["Size"] = size
+        return self._resample(input, size)
 
 class ResampleTransform(Transform):
 
@@ -412,8 +440,8 @@ class FlatLabel(Transform):
 
 class Save(Transform):
 
-    def __init__(self, save: str) -> None:
-        self.save = save
+    def __init__(self, dataset: str) -> None:
+        self.dataset = dataset
     
     def __call__(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input
@@ -528,8 +556,7 @@ class OneHot(Transform):
         self.num_classes = num_classes
 
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        result =  F.one_hot(input.type(torch.int64), num_classes=self.num_classes).permute(0, len(input.shape), *[i+1 for i in range(len(input.shape)-1)]).float().squeeze(2)
-        print(result.shape)
+        result =  F.one_hot(input.type(torch.int64), num_classes=self.num_classes).permute(0, len(input.shape), *[i+1 for i in range(len(input.shape)-1)]).float().squeeze(0)
         return result
     
     def inverse(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
