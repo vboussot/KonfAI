@@ -22,7 +22,6 @@ def main():
     except KeyboardInterrupt:
         print("\n[KonfAI] Manual interruption (Ctrl+C)")
 
-
 def cluster():
     parser = argparse.ArgumentParser(description="KonfAI", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 

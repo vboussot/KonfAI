@@ -9,8 +9,7 @@ import os
 from konfai import KONFAI_ROOT
 from konfai.utils.config import config
 from konfai.utils.utils import _getModule, AugmentationError
-from konfai.utils.dataset import Attribute, data_to_image
-
+from konfai.utils.dataset import Attribute, data_to_image, Dataset
 
 def _translate2DMatrix(t: torch.Tensor) -> torch.Tensor:
     return torch.cat((torch.cat((torch.eye(2), torch.tensor([[t[0]], [t[1]]])), dim=1), torch.Tensor([[0,0,1]])), dim=0)
@@ -56,23 +55,29 @@ class DataAugmentationsList():
         self.dataAugmentations : list[DataAugmentation] = []
         self.dataAugmentationsLoader = dataAugmentations
 
-    def load(self, key: str):
+    def load(self, key: str, datasets: list[Dataset]):
         for augmentation, prob in self.dataAugmentationsLoader.items():
-            module, name = _getModule(augmentation, "data.augmentation")
-            dataAugmentation: DataAugmentation = getattr(importlib.import_module(module), name)(config = None, DL_args="{}.Dataset.augmentations.{}.dataAugmentations".format(KONFAI_ROOT(), key))
+            module, name = _getModule(augmentation, "konfai.data.augmentation")
+            dataAugmentation: DataAugmentation = config("{}.Dataset.augmentations.{}.dataAugmentations.{}".format(KONFAI_ROOT(), key, augmentation))(getattr(importlib.import_module(module), name))(config = None)
             dataAugmentation.load(prob.prob)
+            dataAugmentation.setDatasets(datasets)
             self.dataAugmentations.append(dataAugmentation)
-    
+
 class DataAugmentation(ABC):
 
-    def __init__(self) -> None:
+    def __init__(self, groups: Union[list[str], None] = None) -> None:
         self.who_index: dict[int, list[int]] = {}
         self.shape_index: dict[int, list[list[int]]] = {}
         self._prob: float = 0
+        self.groups = groups
+        self.datasets : list[Dataset] = []
 
     def load(self, prob: float):
         self._prob = prob
 
+    def setDatasets(self, datasets: list[Dataset]):
+        self.datasets = datasets
+    
     def state_init(self, index: Union[None, int], shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         if index is not None:
             if index not in self.who_index:
@@ -93,14 +98,14 @@ class DataAugmentation(ABC):
     def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         pass
 
-    def __call__(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def __call__(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         if len(self.who_index[index]) > 0:
-            for i, result in enumerate(self._compute(index, [inputs[i] for i in self.who_index[index]], device)):
+            for i, result in enumerate(self._compute(name, index, [inputs[i] for i in self.who_index[index]], device)):
                 inputs[self.who_index[index][i]] = result if device is None else result.cpu()
         return inputs
     
     @abstractmethod
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         pass
 
     def inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
@@ -118,7 +123,7 @@ class EulerTransform(DataAugmentation):
         super().__init__()
         self.matrix: dict[int, list[torch.Tensor]] = {}
 
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, matrix in zip(inputs, self.matrix[index]):
             results.append(F.grid_sample(input.unsqueeze(0).type(torch.float32), F.affine_grid(matrix[:, :-1,...], [1]+list(input.shape), align_corners=True).to(input.device), align_corners=True, mode="bilinear", padding_mode="reflection").type(input.dtype).squeeze(0))
@@ -126,10 +131,9 @@ class EulerTransform(DataAugmentation):
     
     def _inverse(self, index: int, a: int, input : torch.Tensor) -> torch.Tensor:
         return F.grid_sample(input.unsqueeze(0).type(torch.float32), F.affine_grid(self.matrix[index][a].inverse()[:, :-1,...], [1]+list(input.shape), align_corners=True).to(input.device), align_corners=True, mode="bilinear", padding_mode="reflection").type(input.dtype).squeeze(0)
-
+                                                                                   
 class Translate(EulerTransform):
     
-    @config("Translate")
     def __init__(self, t_min: float = -10, t_max = 10, is_int: bool = False):
         super().__init__()
         self.t_min = t_min
@@ -147,7 +151,6 @@ class Translate(EulerTransform):
 
 class Rotate(EulerTransform):
 
-    @config("Rotate")
     def __init__(self, a_min: float = 0, a_max: float = 360, is_quarter: bool = False):
         super().__init__()
         self.a_min = a_min
@@ -169,7 +172,6 @@ class Rotate(EulerTransform):
 
 class Scale(EulerTransform):
 
-    @config("Scale")
     def __init__(self, s_std: float = 0.2):
         super().__init__()
         self.s_std = s_std
@@ -182,7 +184,6 @@ class Scale(EulerTransform):
 
 class Flip(DataAugmentation):
 
-    @config("Flip")
     def __init__(self, f_prob: Union[list[float], None] = [0.33, 0.33 ,0.33]) -> None:
         super().__init__()
         self.f_prob = f_prob
@@ -194,7 +195,7 @@ class Flip(DataAugmentation):
         self.flip[index] = [dims[mask].tolist() for mask in prob]
         return shapes
 
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, flip in zip(inputs, self.flip[index]):
             results.append(torch.flip(input, dims=flip))
@@ -206,12 +207,11 @@ class Flip(DataAugmentation):
 
 class ColorTransform(DataAugmentation):
 
-    @config("ColorTransform")
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.matrix: dict[int, list[torch.Tensor]] = {}
     
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, matrix in zip(inputs, self.matrix[index]):
             result = input.reshape([*input.shape[:1], int(np.prod(input.shape[1:]))])
@@ -231,9 +231,8 @@ class ColorTransform(DataAugmentation):
 
 class Brightness(ColorTransform):
 
-    @config("Brightness")
-    def __init__(self, b_std: float) -> None:
-        super().__init__()
+    def __init__(self, b_std: float, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.b_std = b_std
 
     def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
@@ -243,9 +242,8 @@ class Brightness(ColorTransform):
 
 class Contrast(ColorTransform):
 
-    @config("Contrast")
-    def __init__(self, c_std: float) -> None:
-        super().__init__()
+    def __init__(self, c_std: float, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.c_std = c_std
 
     def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
@@ -255,9 +253,8 @@ class Contrast(ColorTransform):
 
 class LumaFlip(ColorTransform):
 
-    @config("LumaFlip")
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.v = torch.tensor([1, 1, 1, 0])/torch.sqrt(torch.tensor(3)) 
     
     def _state_init(self, index : int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
@@ -268,8 +265,8 @@ class LumaFlip(ColorTransform):
 class HUE(ColorTransform):
 
     @config("HUE")
-    def __init__(self, hue_max: float) -> None:
-        super().__init__()
+    def __init__(self, hue_max: float, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.hue_max = hue_max
         self.v = torch.tensor([1, 1, 1])/torch.sqrt(torch.tensor(3)) 
     
@@ -280,9 +277,8 @@ class HUE(ColorTransform):
     
 class Saturation(ColorTransform):
 
-    @config("Saturation")
-    def __init__(self, s_std: float) -> None:
-        super().__init__()
+    def __init__(self, s_std: float, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.s_std = s_std
         self.v = torch.tensor([1, 1, 1, 0])/torch.sqrt(torch.tensor(3)) 
 
@@ -367,9 +363,8 @@ class Saturation(ColorTransform):
 
 class Noise(DataAugmentation):
 
-    @config("Noise")
-    def __init__(self, n_std: float, noise_step: int=1000, beta_start: float = 1e-4, beta_end: float = 0.02) -> None:
-        super().__init__()
+    def __init__(self, n_std: float, noise_step: int=1000, beta_start: float = 1e-4, beta_end: float = 0.02, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.n_std = n_std
         self.noise_step = noise_step
 
@@ -410,7 +405,7 @@ class Noise(DataAugmentation):
             self.ts[index] = [torch.randint(0, int(self.max_T), (1,)) for _ in shapes]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, t in zip(inputs, self.ts[index]):
             alpha_hat_t = self.alpha_hat[t].to(input.device).reshape(*[1 for _ in range(len(input.shape))])
@@ -422,9 +417,8 @@ class Noise(DataAugmentation):
 
 class CutOUT(DataAugmentation):
 
-    @config("CutOUT")
-    def __init__(self, c_prob: float, cutout_size: int, value: float) -> None:
-        super().__init__()
+    def __init__(self, c_prob: float, cutout_size: int, value: float, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         self.c_prob = c_prob
         self.cutout_size = cutout_size
         self.centers: dict[int, list[torch.Tensor]] = {}
@@ -434,7 +428,7 @@ class CutOUT(DataAugmentation):
         self.centers[index] = [torch.rand((3) if len(shape) == 3 else (2)) for shape in shapes]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, center in zip(inputs, self.centers[index]):
             masks = []
@@ -453,7 +447,6 @@ class CutOUT(DataAugmentation):
 
 class Elastix(DataAugmentation):
 
-    @config("Elastix")
     def __init__(self, grid_spacing: int = 16, max_displacement: int = 16) -> None:
         super().__init__()
         self.grid_spacing = grid_spacing
@@ -513,7 +506,7 @@ class Elastix(DataAugmentation):
             print("Compute in progress : {:.2f} %".format((i+1)/len(shapes)*100))
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, displacement_field in zip(inputs, self.displacement_fields[index]):
             results.append(F.grid_sample(input.type(torch.float32).unsqueeze(0), displacement_field.to(input.device), align_corners=True, mode="bilinear", padding_mode="border").type(input.dtype).squeeze(0))
@@ -524,7 +517,6 @@ class Elastix(DataAugmentation):
 
 class Permute(DataAugmentation):
 
-    @config("Permute")
     def __init__(self, prob_permute: Union[list[float], None] = [0.5 ,0.5]) -> None:
         super().__init__()
         self._permute_dims = torch.tensor([[0, 2, 1, 3], [0, 3, 1, 2]])
@@ -546,7 +538,7 @@ class Permute(DataAugmentation):
                     shapes[i] = [shapes[i][dim-1] for dim in permute[1:]]
         return shapes
     
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, prob in zip(inputs, self.permute[index]):
             res = input
@@ -562,9 +554,8 @@ class Permute(DataAugmentation):
 
 class Mask(DataAugmentation):
 
-    @config("Mask")
-    def __init__(self, mask: str, value: float) -> None:
-        super().__init__()
+    def __init__(self, mask: str, value: float, groups: Union[list[str], None] = None) -> None:
+        super().__init__(groups)
         if mask is not None:
             if os.path.exists(mask):
                 self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(mask)))
@@ -577,7 +568,7 @@ class Mask(DataAugmentation):
         self.positions[index] = [torch.rand((3) if len(shape) == 3 else (2))*(torch.tensor([max(s1-s2, 0) for s1, s2 in zip(torch.tensor(shape), torch.tensor(self.mask.shape))])) for shape in shapes]
         return [self.mask.shape for _ in shapes]
     
-    def _compute(self, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
+    def _compute(self, name: str, index: int, inputs : list[torch.Tensor], device: Union[torch.device, None]) -> list[torch.Tensor]:
         results = []
         for input, position in zip(inputs, self.positions[index]):
             slices = [slice(None, None)]+[slice(int(s1), int(s1)+s2) for s1, s2 in zip(position, self.mask.shape)]

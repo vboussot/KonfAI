@@ -34,7 +34,7 @@ class EarlyStoppingBase:
 class EarlyStopping(EarlyStoppingBase):
 
     @config("EarlyStopping")
-    def __init__(self, monitor: Union[list[str], None] = [], patience=10, min_delta=0.0, mode="min"):
+    def __init__(self, monitor: Union[list[str], None] = [], patience: int=10, min_delta: float=0.0, mode: str="min"):
         super().__init__()
         self.monitor = [] if monitor is None else monitor
         self.patience = patience
@@ -108,7 +108,7 @@ class _Trainer():
         if data_log is not None:
             for data in data_log:
                 self.data_log[data.split("/")[0].replace(":", ".")] = (DataLog.__getitem__(data.split("/")[1]).value[0], int(data.split("/")[2]))
-        
+ 
     def __enter__(self):
         return self
     
@@ -118,7 +118,8 @@ class _Trainer():
 
     def run(self) -> None:
         self.dataloader_training.dataset.load("Train")
-        self.dataloader_validation.dataset.load("Validation")
+        if self.dataloader_validation is not None:
+            self.dataloader_validation.dataset.load("Validation")
         with tqdm.tqdm(iterable = range(self.epoch, self.epochs), leave=False, total=self.epochs, initial=self.epoch, desc="Progress") as epoch_tqdm:
             for self.epoch in epoch_tqdm:
                 self.train()
@@ -209,6 +210,9 @@ class _Trainer():
             save_dict["Model_EMA"] = self.modelEMA.module.state_dict()
         
         save_dict.update({'{}_optimizer_state_dict'.format(name): network.optimizer.state_dict() for name, network in self.model.module.getNetworks().items() if network.optimizer is not None})
+        save_dict.update({'{}_it'.format(name): network._it for name, network in self.model.module.getNetworks().items() if network.optimizer is not None})
+        save_dict.update({'{}_nb_lr_update'.format(name): network._nb_lr_update for name, network in self.model.module.getNetworks().items() if network.optimizer is not None})
+        
         torch.save(save_dict, save_path)
 
         if self.save_checkpoint_mode == "BEST":
@@ -314,6 +318,18 @@ class Trainer(DistributedObject):
         self.ema_decay = ema_decay
         self.modelEMA : Union[torch.optim.swa_utils.AveragedModel, None] = None
         self.data_log = data_log
+
+        modules = []
+        for i,_ in self.model.named_modules():
+            modules.append(i)
+        for k in self.data_log:
+            tmp = k.split("/")[0].replace(":", ".")
+            if tmp not in self.dataset.getGroupsDest() and tmp not in modules:
+                raise TrainerError( f"Invalid key '{tmp}' in `data_log`.",
+                                   f"This key is neither a destination group from the dataset ({self.dataset.getGroupsDest()})",
+                                    f"nor a valid module name in the model ({modules}).",
+                "Please check your `data_log` configuration — it should reference either a model output or a dataset group.")
+            
         self.gradient_checkpoints = gradient_checkpoints
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
@@ -341,7 +357,7 @@ class Trainer(DistributedObject):
                     name = sorted(os.listdir(path))[-1]
             
             if os.path.exists(path+name):
-                state_dict = torch.load(path+name, weights_only=False)
+                state_dict = torch.load(path+name, weights_only=False, map_location="cpu")
             else:
                 raise Exception("Model : {} does not exist !".format(self.name))
             

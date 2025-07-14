@@ -16,7 +16,7 @@ from enum import Enum
 from konfai import KONFAI_ROOT
 from konfai.metric.schedulers import Scheduler
 from konfai.utils.config import config
-from konfai.utils.utils import State, _getModule, getDevice, getGPUMemory, MeasureError
+from konfai.utils.utils import State, _getModule, getDevice, getGPUMemory, MeasureError, TrainerError
 from konfai.data.patching import Accumulator, ModelPatch
 
 class NetState(Enum):
@@ -55,9 +55,16 @@ class LRSchedulersLoader():
 
     def getschedulers(self, key: str, optimizer: torch.optim.Optimizer) -> dict[torch.optim.lr_scheduler._LRScheduler, int]:
         schedulers : dict[torch.optim.lr_scheduler._LRScheduler, int] = {}
-        for name, step in self.params.items():
-            if name:
-                schedulers[config("Trainer.Model.{}.Schedulers.{}".format(key, name))(getattr(importlib.import_module('torch.optim.lr_scheduler'), name))(optimizer, config = None)] = step.nb_step
+        for nameTmp, step in self.params.items():
+            if nameTmp:
+                ok = False
+                for m in ["torch.optim.lr_scheduler", "konfai.metric.schedulers"]:
+                    module, name = _getModule(nameTmp, m)
+                    if hasattr(importlib.import_module(module), name):
+                        schedulers[config("{}.Model.{}.Schedulers.{}".format(KONFAI_ROOT(), key, name))(getattr(importlib.import_module(module), name))(optimizer, config = None)] = step.nb_step        
+                        ok = True
+                if not ok:
+                    raise TrainerError("Unknown scheduler {}, tried importing from: 'torch.optim.lr_scheduler' and 'konfai.metric.schedulers', but no valid match was found. Check your YAML config or scheduler name spelling.".format(nameTmp))
         return schedulers
 
 class SchedulersLoader():
@@ -95,7 +102,7 @@ class CriterionsLoader():
     def getCriterions(self, model_classname : str, output_group : str, target_group : str) -> dict[torch.nn.Module, CriterionsAttr]:
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
-            module, name = _getModule(module_classpath, "metric.measure")
+            module, name = _getModule(module_classpath, "konfai.metric.measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
             criterionsAttr.sheduler = criterionsAttr.l.getschedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath))
             criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
@@ -133,9 +140,10 @@ class Measure():
             self._loss.clear()
 
         def add(self, weight: float, value: torch.Tensor) -> None:
-            self._loss.append(value if self.isLoss else value.detach())
-            self._values.append(value.item())
-            self._weight.append(weight)
+            if self.isLoss or value != 0:
+                self._loss.append(value if self.isLoss else value.detach())
+                self._values.append(value.item())
+                self._weight.append(weight)
 
         def getLastLoss(self) -> torch.Tensor:
             return self._loss[-1]*self._weight[-1] if len(self._loss) else torch.zeros((1), requires_grad = True)
@@ -157,7 +165,7 @@ class Measure():
         outputs_group_rename = {}
         
         modules = []
-        for i,_ in model.named_modules():
+        for i,_,_ in model.named_ModuleArgsDict():
             modules.append(i)
 
         for output_group in self.outputsCriterions.keys():
@@ -167,11 +175,12 @@ class Measure():
                     "Please check that the name matches exactly a submodule or output of your model architecture."
                 )
             for target_group in self.outputsCriterions[output_group]:
-                if target_group not in group_dest:
-                    raise MeasureError(
-                        f"The target_group '{target_group}' defined in 'outputsCriterions.{output_group}.targetsCriterions' was not found in the available destination groups.",
-                        "This target_group is expected for loss or metric computation, but was not loaded in 'group_dest'.",
-                        f"Please make sure that the group '{target_group}' is defined in 'Dataset:groups_src:...:groups_dest:'{target_group}'' and correctly loaded from the dataset.")
+                for target_group_tmp in target_group.split(";"): 
+                    if target_group_tmp not in group_dest:
+                        raise MeasureError(
+                            f"The target_group '{target_group_tmp}' defined in 'outputsCriterions.{output_group}.targetsCriterions' was not found in the available destination groups.",
+                            "This target_group is expected for loss or metric computation, but was not loaded in 'group_dest'.",
+                            f"Please make sure that the group '{target_group_tmp}' is defined in 'Dataset:groups_src:...:groups_dest:'{target_group_tmp}'' and correctly loaded from the dataset.")
                 for criterion in self.outputsCriterions[output_group][target_group]:
                     if not self.outputsCriterions[output_group][target_group][criterion].isTorchCriterion:
                         outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
@@ -189,7 +198,7 @@ class Measure():
 
     def update(self, output_group: str, output : torch.Tensor, data_dict: dict[str, torch.Tensor], it: int, nb_patch: int, training: bool) -> None:
         for target_group in self.outputsCriterions[output_group]:
-            target = [data_dict[group].to(output[0].device).detach() for group in target_group.split("/") if group in data_dict]
+            target = [data_dict[group].to(output[0].device).detach() for group in target_group.split(";") if group in data_dict]
 
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
@@ -559,6 +568,7 @@ class Network(ModuleArgsDict, ABC):
         self.init_gain  = init_gain
         self.dim = dim
         self._it = 0
+        self._nb_lr_update = 0
         self.outputsGroup : list[OutputsGroup]= []
 
     @_function_network()
@@ -653,9 +663,15 @@ class Network(ModuleArgsDict, ABC):
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
-            
-        if "{}_optimizer_state_dict".format(name) in state_dict and self.optimizer:
-            self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(name)])
+        if "{}_optimizer_state_dict".format(self.getName()) in state_dict and self.optimizer:
+            self.optimizer.load_state_dict(state_dict['{}_optimizer_state_dict'.format(self.getName())])
+        if "{}_it".format(self.getName()) in state_dict:
+            self._it = int(state_dict["{}_it".format(self.getName())])
+        if "{}_nb_lr_update".format(self.getName()) in state_dict:
+            self._nb_lr_update = int(state_dict["{}_nb_lr_update".format(self.getName())])
+        if self.schedulers:
+            for scheduler in self.schedulers:
+                scheduler.last_epoch = self._nb_lr_update
         self.initialized()
 
     def _compute_channels_trace(self, module : ModuleArgsDict, in_channels : int, gradient_checkpoints: Union[list[str], None], gpu_checkpoints: Union[list[str], None], name: Union[str, None] = None, in_is_channel = True, out_channels : Union[int, None] = None, out_is_channel = True) -> tuple[int, bool, int, bool]:
@@ -884,11 +900,12 @@ class Network(ModuleArgsDict, ABC):
 
     @_function_network()
     def update_lr(self):
+        self._nb_lr_update+=1 
         step = 0
         scheduler = None
         if self.schedulers:
             for scheduler, value in self.schedulers.items():
-                if value is None or (self._it >= step  and self._it < step+value):
+                if value is None or (self._nb_lr_update >= step and self._nb_lr_update < step+value):
                     break
                 step += value
         if scheduler:
@@ -896,7 +913,7 @@ class Network(ModuleArgsDict, ABC):
                 if self.measure:
                     scheduler.step(sum(self.measure.getLastValues(0).values()))
             else:
-                scheduler.step()     
+                scheduler.step()
 
     @_function_network()
     def getNetworks(self) -> Self:
@@ -914,6 +931,12 @@ class Network(ModuleArgsDict, ABC):
                     v = Network.to(v, int(os.environ["device"]))
                 else:
                     v = v.to(getDevice(int(os.environ["device"])))
+        if isinstance(module, Network):
+            if module.optimizer is not None:
+                for state in module.optimizer.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(getDevice(int(os.environ["device"])))
         return module
                 
     def getName(self) -> str:
@@ -928,20 +951,32 @@ class Network(ModuleArgsDict, ABC):
             if isinstance(module, ModuleArgsDict):
                 module._training = state
 
+class MinimalModel(Network):
+    
+    def __init__(self, model: Network, optimizer : OptimizerLoader = OptimizerLoader(),
+                    schedulers : LRSchedulersLoader = LRSchedulersLoader(),
+                    outputsCriterions: dict[str, TargetCriterionsLoader] = {"default" : TargetCriterionsLoader()},
+                    patch : Union[ModelPatch, None] = None,
+                    dim : int = 3, nb_batch_per_step = 1, init_type = "normal", init_gain = 0.02):
+        super().__init__(1, optimizer, schedulers, outputsCriterions, patch, nb_batch_per_step, init_type, init_gain, dim)
+        self.add_module("Model", model)
+
 class ModelLoader():
 
     @config("Model")
     def __init__(self, classpath : str = "default:segmentation.UNet.UNet") -> None:
-        self.module, self.name = _getModule(classpath, "models")
+        self.module, self.name = _getModule(classpath, "konfai.models")
         
     def getModel(self, train : bool = True, DL_args: Union[str, None] = None, DL_without=["optimizer", "schedulers", "nb_batch_per_step", "init_type", "init_gain"]) -> Network:
         if not DL_args:
             DL_args="{}.Model".format(KONFAI_ROOT())
-        model = partial(getattr(importlib.import_module(self.module), self.name), config = None, DL_args=DL_args)
-        if not train: 
-            model = partial(model, DL_without = DL_without)
-        return model()
-
+        DL_args += "."+self.name
+        model = config(DL_args)(getattr(importlib.import_module(self.module), self.name))(config = None,  DL_without = DL_without if not train else [])
+        if not isinstance(model, Network):
+            model = config(DL_args)(partial(MinimalModel, model))(config = None,  DL_without = DL_without+["model"] if not train else [])
+            model.setName(self.name)
+        return model
+    
 class CPU_Model():
 
     def __init__(self, model: Network) -> None:

@@ -8,7 +8,7 @@ import os
 
 from konfai import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, KONFAI_ROOT
 from konfai.utils.config import config
-from konfai.utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description
+from konfai.utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description, PredictorError
 from konfai.utils.dataset import Dataset, Attribute
 from konfai.data.data_manager import DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
@@ -46,7 +46,7 @@ class OutDataset(Dataset, NeedDevice, ABC):
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
 
-    def load(self, name_layer: str, datasets: list[Dataset]):
+    def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
         transforms_type = ["pre_transforms", "post_transforms", "final_transforms"]
         for name, _transform_type, transform_type in [(k, getattr(self, "_{}".format(k)), getattr(self, k)) for k in transforms_type]:
             
@@ -57,7 +57,7 @@ class OutDataset(Dataset, NeedDevice, ABC):
                     transform_type.append(transform)
 
         if self._patchCombine is not None:
-            module, name = _getModule(self._patchCombine, "data.patching")
+            module, name = _getModule(self._patchCombine, "konfai.data.patching")
             self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(KONFAI_ROOT(), name_layer))
     
     def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
@@ -91,13 +91,34 @@ class OutDataset(Dataset, NeedDevice, ABC):
         super().write(self.group, name, layer.numpy(), self.attributes[index][0][0])
         self.attributes.pop(index)
 
+class Reduction():
+
+    def __init__(self):
+        pass
+
+class Mean(Reduction):
+
+    def __init__(self):
+        pass
+
+    def __call__(self, result: torch.Tensor) -> torch.Tensor:
+        return torch.mean(result.float(), dim=0)
+        
+class Median(Reduction):
+
+    def __init__(self):
+        pass
+    
+    def __call__(self, result: torch.Tensor) -> torch.Tensor:
+        return torch.median(result.float(), dim=0).values
+
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
     def __init__(self, dataset_filename: str = "./Dataset:mha", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, reduction: str = "mean", inverse_transform: bool = True) -> None:
         super().__init__(dataset_filename, group, pre_transforms, post_transforms, final_transforms, patchCombine)
         self.group_src, self.group_dest = sameAsGroup.split(":")
-        self.reduction = reduction
+        self.reduction_classpath = reduction
         self.inverse_transform = inverse_transform
 
     def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
@@ -120,9 +141,24 @@ class OutSameAsGroupDataset(OutDataset):
         if self.inverse_transform:
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].post_transforms):
                 layer = transform.inverse(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
-                
         self.output_layer_accumulator[index_dataset][index_augmentation].addLayer(index_patch, layer)
 
+
+    def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
+        super().load(name_layer, datasets, groups)
+        module, name = _getModule(self.reduction_classpath, "konfai.predictor")
+        self.reduction = config("{}.outsDataset.{}.OutDataset.{}".format(KONFAI_ROOT(), name_layer, self.reduction_classpath))(getattr(importlib.import_module(module), name))(config = None)
+       
+        if self.group_src not in groups.keys():
+            raise PredictorError(
+                f"Source group '{self.group_src}' not found. Available groups: {list(groups.keys())}."
+            )
+
+        if self.group_dest not in groups[self.group_src]:
+            raise PredictorError(
+                f"Destination group '{self.group_dest}' not found. Available groups: {groups[self.group_src]}."
+            )
+    
     def _getOutput(self, index: int, index_augmentation: int, dataset: DatasetIter) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()
         name = self.names[index]
@@ -149,14 +185,8 @@ class OutSameAsGroupDataset(OutDataset):
         result = torch.cat([self._getOutput(index, index_augmentation, dataset).unsqueeze(0) for index_augmentation in self.output_layer_accumulator[index].keys()], dim=0)
         name = self.names[index]
         self.output_layer_accumulator.pop(index)
-        dtype = result.dtype
+        result = self.reduction(result.float()).to(result.dtype)
 
-        if self.reduction == "mean":
-            result = torch.mean(result.float(), dim=0).to(dtype)
-        elif self.reduction == "median":
-            result, _ = torch.median(result.float(), dim=0)
-        else:
-            raise NameError("Reduction method does not exist (mean, median)")
         for transform in self.final_transforms:
             result = transform(name, result, self.attributes[index][0][0])
         return result
@@ -241,7 +271,6 @@ class _Predictor():
         desc = lambda : "Prediction : {}".format(description(self.modelComposite))
         self.dataloader_prediction.dataset.load("Prediction")
         with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=True, desc = desc(), total=len(self.dataloader_prediction), ncols=0) as batch_iter:
-            dist.barrier()
             for it, data_dict in batch_iter:
                 with torch.amp.autocast('cuda', enabled=self.autocast):
                     input = self.getInput(data_dict)
@@ -255,7 +284,7 @@ class _Predictor():
 
                     batch_iter.set_description(desc())
                     self.it += 1
-
+        
     def _predict_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
         measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank, {"" : self.modelComposite.module}, 1)
         
@@ -278,9 +307,9 @@ class _Predictor():
 
 class ModelComposite(Network):
 
-    def __init__(self, model: Network, nb_models: int, method: str):
+    def __init__(self, model: Network, nb_models: int, combine: Reduction):
         super().__init__(model.in_channels, model.optimizer, model.schedulers, model.outputsCriterionsLoader, model.patch, model.nb_batch_per_step, model.init_type, model.init_gain, model.dim)
-        self.method = method
+        self.combine = combine
         for i in range(nb_models):
             self.add_module("Model_{}".format(i), copy.deepcopy(model), in_branch=[0], out_branch=["output_{}".format(i)])
 
@@ -301,12 +330,7 @@ class ModelComposite(Network):
 
         final_outputs = []
         for key, tensors in aggregated.items():
-            stacked = torch.stack(tensors, dim=0)
-            if self.method == 'mean':
-                agg = torch.mean(stacked, dim=0)
-            elif self.method == 'median':
-                agg = torch.median(stacked, dim=0).values
-            final_outputs.append((key, agg))
+            final_outputs.append((key, self.combine(torch.stack(tensors, dim=0))))
 
         return final_outputs
     
@@ -329,7 +353,7 @@ class Predictor(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
-        self.combine = combine
+        self.combine_classpath = combine
         self.autocast = autocast
 
         self.model = model.getModel(train=False)
@@ -387,10 +411,24 @@ class Predictor(DistributedObject):
 
         shutil.copyfile(CONFIG_FILE(), self.predict_path+"Prediction.yml")
 
+        
         self.model.init(self.autocast, State.PREDICTION, self.dataset.getGroupsDest())
         self.model.init_outputsGroup()
         self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
-        self.modelComposite = ModelComposite(self.model, len(MODEL().split(":")), self.combine)
+        
+        modules = []
+        for i,_,_ in self.model.named_ModuleArgsDict():
+            modules.append(i)
+        for output_group in self.outsDataset.keys():
+            if output_group not in modules:
+                raise PredictorError("The output group '{}' defined in 'outputsCriterions' does not correspond to any module in the model.".format(output_group),
+                    "Available modules: {}".format(modules),
+                    "Please check that the name matches exactly a submodule or output of your model architecture."
+                )
+        module, name = _getModule(self.combine_classpath, "konfai.predictor")
+        combine = config("{}.{}".format(KONFAI_ROOT(), self.combine_classpath))(getattr(importlib.import_module(module), name))(config = None)
+       
+        self.modelComposite = ModelComposite(self.model, len(MODEL().split(":")), combine)
         self.modelComposite.load(self._load())
 
         if len(list(self.outsDataset.keys())) == 0 and len([network for network in self.modelComposite.getNetworks().values() if network.measure is not None]) == 0:
@@ -399,7 +437,7 @@ class Predictor(DistributedObject):
         self.size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
         self.dataloader = self.dataset.getData(world_size//self.size)
         for name, outDataset in self.outsDataset.items():
-            outDataset.load(name.replace(".", ":"), list(self.dataset.datasets.values()))
+            outDataset.load(name.replace(".", ":"), list(self.dataset.datasets.values()), {src : dest for src, inner in self.dataset.groups_src.items() for dest in inner})
            
            
     def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
