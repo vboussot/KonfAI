@@ -21,7 +21,7 @@ import sys
 import re
 
 
-def description(model, modelEMA = None, showMemory: bool = True) -> str:
+def description(model, modelEMA = None, showMemory: bool = True, train: bool = True) -> str:
     values_desc = lambda weights, values: " ".join(["{}({:.2f}) : {:.6f}".format(name.split(":")[-1], weight, value) for (name, value), weight in zip(values.items(), weights.values())])
     model_desc = lambda model : "("+" ".join(["{}({:.6f}) : {}".format(name, network.optimizer.param_groups[0]['lr'] if network.optimizer is not None else 0, values_desc(network.measure.getLastWeights(), network.measure.getLastValues())) for name, network in model.module.getNetworks().items() if network.measure is not None])+")"
     result = "Loss {}".format(model_desc(model))
@@ -33,11 +33,11 @@ def description(model, modelEMA = None, showMemory: bool = True) -> str:
     return result
 
 def _getModule(classpath : str, type : str) -> tuple[str, str]:
-    if len(classpath.split("_")) > 1:
-        module = ".".join(classpath.split("_")[:-1])
-        name = classpath.split("_")[-1] 
+    if len(classpath.split(":")) > 1:
+        module = ".".join(classpath.split(":")[:-1])
+        name = classpath.split(":")[-1] 
     else:
-        module = "konfai."+type+("." if len(classpath.split(".")) > 2 else "")+".".join(classpath.split(".")[:-1])
+        module = type+("." if len(classpath.split(".")) > 2 else "")+".".join(classpath.split(".")[:-1])
         name = classpath.split(".")[-1]
     return module, name
 
@@ -585,6 +585,11 @@ class EvaluatorError(KonfAIError):
 
     def __init__(self, *message) -> None:
         super().__init__("Evaluator", message)
+
+class PredictorError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Predictor", message)
 
 class TransformError(KonfAIError):
 

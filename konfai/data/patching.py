@@ -125,23 +125,20 @@ class Accumulator():
         return len(self.patch_slices) == len([v for v in self._layer_accumulator if v is not None])
 
     def assemble(self) -> torch.Tensor:
-        if all([self._layer_accumulator[0].shape[i-len(self.patch_size)] == size for i, size in enumerate(self.patch_size)]): 
-            N = 2 if self.batch else 1
-            
-            result = torch.zeros((list(self._layer_accumulator[0].shape[:N])+list(max([[v.stop for v in patch] for patch in self.patch_slices]))), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
-            for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
-                slices_dest = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
+        N = 2 if self.batch else 1
+        result = torch.zeros((list(self._layer_accumulator[0].shape[:N])+list(max([[v.stop for v in patch] for patch in self.patch_slices]))), dtype=self._layer_accumulator[0].dtype).to(self._layer_accumulator[0].device)
+        for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
+            slices_dest = tuple([slice(result.shape[i]) for i in range(N)] + list(patch_slice))
 
-                for dim, s in enumerate(patch_slice):
-                    if s.stop-s.start == 1:
-                        data = data.unsqueeze(dim=dim+N)
-                if self.patchCombine is not None:
-                    result[slices_dest] += self.patchCombine(data)
-                else:
-                    result[slices_dest] = data
-            result = result[tuple([slice(None, None)]+[slice(0, s) for s in self.shape])]
-        else:
-            result = torch.cat(tuple(self._layer_accumulator), dim=0)
+            for dim, s in enumerate(patch_slice):
+                if s.stop-s.start == 1:
+                    data = data.unsqueeze(dim=dim+N)
+            if self.patchCombine is not None:
+                result[slices_dest] += self.patchCombine(data)
+            else:
+                result[slices_dest] = data
+        result = result[tuple([slice(None, None)]+[slice(0, s) for s in self.shape])]
+
         self._layer_accumulator.clear()
         return result
 
@@ -326,7 +323,8 @@ class DatasetManager():
         for dataAugmentations in dataAugmentationsList:
             a_data = [self.data[0].clone() for _ in range(dataAugmentations.nb)]
             for dataAugmentation in dataAugmentations.dataAugmentations:
-                a_data = dataAugmentation(self.index, a_data, device)
+                if dataAugmentation.groups is None or self.group_dest in dataAugmentation.groups:
+                    a_data = dataAugmentation(self.name, self.index, a_data, device)
             
             for d in a_data:
                 self.data.append(d)

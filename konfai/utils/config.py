@@ -3,7 +3,7 @@ import ruamel.yaml
 import inspect 
 import collections
 from copy import deepcopy
-from typing import Union, Literal, get_origin, get_args
+from typing import Union, Literal, get_origin, get_args, Any
 import torch
 from konfai import CONFIG_FILE
 from konfai.utils.utils import ConfigError
@@ -175,8 +175,11 @@ def config(key : Union[str, None] = None):
                     os.environ['KONFAI_CONFIG_VARIABLE'] = "False"
                     kwargs = {} 
                     for param in list(inspect.signature(function).parameters.values())[len(args):]:
-
+                        if param.name in without:
+                            continue
+                        
                         annotation = param.annotation
+
                         # --- support Literal ---
                         if get_origin(annotation) is Literal:
                             allowed_values = get_args(annotation)
@@ -192,11 +195,10 @@ def config(key : Union[str, None] = None):
                             for i in annotation.__args__:
                                 annotation = i
                                 break
-                        if param.name in without:
-                            continue
+                        
                         if not annotation == inspect._empty:
                             if annotation not in [int, str, bool, float, torch.Tensor]:
-                                if str(annotation).startswith("list") or str(annotation).startswith("tuple") or str(annotation).startswith("typing.Tuple") or str(annotation).startswith("typing.List"):
+                                if str(annotation).startswith("list") or str(annotation).startswith("tuple") or str(annotation).startswith("typing.Tuple") or str(annotation).startswith("typing.List") or str(annotation).startswith("typing.Sequence"):
                                     elem_type = annotation.__args__[0]
                                     values = config.getValue(param.name, param.default)
                                     if getattr(elem_type, '__origin__', None) is Union:
@@ -221,7 +223,7 @@ def config(key : Union[str, None] = None):
                                 elif str(annotation).startswith("dict"):
                                     if annotation.__args__[0] == str:
                                         values = config.getValue(param.name, param.default)
-                                        if values is not None and annotation.__args__[1] not in [int, str, bool, float]:
+                                        if values is not None and annotation.__args__[1] not in [int, str, bool, float, Any]:
                                             try:
                                                 kwargs[param.name] = {value : annotation.__args__[1](config = filename, DL_args = key_tmp+"."+param.name+"."+value) for value in values}
                                             except ValueError as e:
@@ -229,6 +231,7 @@ def config(key : Union[str, None] = None):
                                             except Exception as e:
                                                 raise ConfigError("{} {}".format(values, e))
                                         else:
+
                                             kwargs[param.name] = values
                                     else: 
                                         raise ConfigError("Config: The config only supports types : config(Object), int, str, bool, float, list[int], list[str], list[bool], list[float], dict[str, Object]")
@@ -236,7 +239,7 @@ def config(key : Union[str, None] = None):
                                     try:
                                         kwargs[param.name] = annotation(config = filename, DL_args = key_tmp)
                                     except Exception as e:
-                                        raise ConfigError("Failed to instantiate {} with type {}, error {} ".format(param.name, annotation.__name__, e))
+                                        raise ConfigError("Failed to instantiate {} with type {}, error {} ".format(param.name, annotation, e))
                                     
                                     if os.environ['KONFAI_CONFIG_VARIABLE'] == "True":
                                         os.environ['KONFAI_CONFIG_VARIABLE'] = "False"

@@ -3,6 +3,9 @@ import importlib
 import numpy as np
 import torch
 
+from torchvision.models import inception_v3, Inception_V3_Weights
+from torchvision.transforms import functional as F
+from scipy import linalg    
 
 import torch.nn.functional as F
 import os
@@ -247,7 +250,7 @@ class PerceptualLoss(Criterion):
         def getLoss(self) -> dict[torch.nn.Module, float]:
             result: dict[torch.nn.Module, float] = {}
             for loss, l in self.losses.items():
-                module, name = _getModule(loss, "metric.measure")
+                module, name = _getModule(loss, "konfai.metric.measure")
                 result[config(self.DL_args)(getattr(importlib.import_module(module), name))(config=None)] = l   
             return result
         
@@ -401,21 +404,42 @@ class L1LossRepresentation(Criterion):
     def forward(self, output: torch.Tensor) -> torch.Tensor:
         return self.loss(output[0], output[1])+ self._variance(output[0]) + self._variance(output[1])
 
-"""import torch
-import torch.nn as nn
-from torchvision.models import inception_v3, Inception_V3_Weights
-from torchvision.transforms import functional as F
-from scipy import linalg
-import numpy as np
+class FocalLoss(Criterion):
+
+    def __init__(self, gamma: float = 2.0, alpha: list[float] = [0.5, 2.0, 0.5, 0.5, 1], reduction: str = "mean"):
+        super().__init__()
+        raw_alpha = torch.tensor(alpha, dtype=torch.float32)
+        self.alpha = raw_alpha / raw_alpha.sum() * len(raw_alpha)
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, output: torch.Tensor, targets: list[torch.Tensor]) -> torch.Tensor:
+        target = targets[0].long()
+        
+        logpt = F.log_softmax(output, dim=1)
+        pt = torch.exp(logpt)
+
+        logpt = logpt.gather(1, target.unsqueeze(1)) 
+        pt = pt.gather(1, target.unsqueeze(1))
+
+        at = self.alpha[target].unsqueeze(1)
+        loss = -at * ((1 - pt) ** self.gamma) * logpt
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
     
+
 class FID(Criterion):
 
-    class InceptionV3(nn.Module):
+    class InceptionV3(torch.nn.Module):
 
         def __init__(self) -> None:
             super().__init__()
             self.model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
-            self.model.fc = nn.Identity()
+            self.model.fc = torch.nn.Identity()
             self.model.eval()
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -434,13 +458,11 @@ class FID(Criterion):
         return features
 
     def calculate_fid(real_features: np.ndarray, generated_features: np.ndarray) -> float:
-        # Calculate mean and covariance statistics
         mu1 = np.mean(real_features, axis=0)
         sigma1 = np.cov(real_features, rowvar=False)
         mu2 = np.mean(generated_features, axis=0)
         sigma2 = np.cov(generated_features, rowvar=False)
 
-        # Calculate FID score
         diff = mu1 - mu2
         covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
         if np.iscomplexobj(covmean):
@@ -456,9 +478,8 @@ class FID(Criterion):
         generated_features = FID.get_features(generated_images, self.inception_model)
 
         return FID.calculate_fid(real_features, generated_features)
-        """
 
-"""class MutualInformationLoss(torch.nn.Module):
+class MutualInformationLoss(torch.nn.Module):
     def __init__(self, num_bins: int = 23, sigma_ratio: float = 0.5, smooth_nr: float = 1e-7, smooth_dr: float = 1e-7) -> None:
         super().__init__()
         bin_centers = torch.linspace(0.0, 1.0, num_bins)
@@ -469,13 +490,12 @@ class FID(Criterion):
         self.smooth_nr = float(smooth_nr)
         self.smooth_dr = float(smooth_dr)
 
-    def parzen_windowing(self, pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def parzen_windowing(self, pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         pred_weight, pred_probability = self.parzen_windowing_gaussian(pred)
         target_weight, target_probability = self.parzen_windowing_gaussian(target)
         return pred_weight, pred_probability, target_weight, target_probability
 
-
-    def parzen_windowing_gaussian(self, img: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def parzen_windowing_gaussian(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         img = torch.clamp(img, 0, 1)
         img = img.reshape(img.shape[0], -1, 1)  # (batch, num_sample, 1)
         weight = torch.exp(-self.preterm.to(img) * (img - self.bin_centers.to(img)) ** 2)  # (batch, num_sample, num_bin)
@@ -488,4 +508,4 @@ class FID(Criterion):
         pab = torch.bmm(wa.permute(0, 2, 1), wb.to(wa)).div(wa.shape[1])  # (batch, num_bins, num_bins)
         papb = torch.bmm(pa.permute(0, 2, 1), pb.to(pa))  # (batch, num_bins, num_bins)
         mi = torch.sum(pab * torch.log((pab + self.smooth_nr) / (papb + self.smooth_dr) + self.smooth_dr), dim=(1, 2))  # (batch)
-        return torch.mean(mi).neg()  # average over the batch and channel ndims"""
+        return torch.mean(mi).neg()  # average over the batch and channel ndims

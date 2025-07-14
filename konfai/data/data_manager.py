@@ -129,7 +129,7 @@ class DatasetIter(data.Dataset):
                     for group_dest in self.groups_src[group_src]:
                         self.data[group_dest][index].unloadAugmentation()
                         self.data[group_dest][index].resetAugmentation()
-        self.load(label + " Augmentation")
+            self.load(label + " Augmentation")
 
     def load(self, label: str):
         if self.use_cache:
@@ -217,7 +217,6 @@ class Subset():
         else:
             names_filtred = names
         size = len(names_filtred)
-        
         index = []
         if self.subset is None:
             index = list(range(0, size))
@@ -226,15 +225,24 @@ class Subset():
                 r = np.clip(np.asarray([int(self.subset.split(":")[0]), int(self.subset.split(":")[1])]), 0, size)
                 index = list(range(r[0], r[1]))
             elif os.path.exists(self.subset):
-                validation_names = []
+                train_names = []
                 with open(self.subset, "r") as f:
                     for name in f:
-                        validation_names.append(name.strip())
+                        train_names.append(name.strip())
                 index = []
                 for i, name in enumerate(names_filtred):
-                    if name in validation_names:
+                    if name in train_names:
                         index.append(i)
-            
+            elif self.subset.startswith("~") and os.path.exists(self.subset[1:]):
+                exclude_names = []
+                with open(self.subset[1:], "r") as f:
+                    for name in f:
+                        exclude_names.append(name.strip())
+                index = []
+                for i, name in enumerate(names_filtred):
+                    if name not in exclude_names:
+                        index.append(i)
+
         elif isinstance(self.subset, list):
             if len(self.subset) > 0:
                 if isinstance(self.subset[0], int):
@@ -390,7 +398,7 @@ class Data(ABC):
             )
 
         for key, dataAugmentations in self.dataAugmentationsList.items():
-            dataAugmentations.load(key)
+            dataAugmentations.load(key, [self.datasets[filename] for filename, _ in datasets[group_src]])
 
         names = set()
         dataset_name : dict[str, dict[str, list[str]]] = {}

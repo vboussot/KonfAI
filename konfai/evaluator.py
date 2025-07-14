@@ -27,7 +27,7 @@ class CriterionsLoader():
     def getCriterions(self, output_group : str, target_group : str) -> dict[torch.nn.Module, CriterionsAttr]:
         criterions = {}
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
-            module, name = _getModule(module_classpath, "metric.measure")
+            module, name = _getModule(module_classpath, "konfai.metric.measure")
             criterions[config("{}.metrics.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
@@ -102,7 +102,7 @@ class Evaluator(DistributedObject):
         result = {}
         for output_group in self.metrics:
             for target_group in self.metrics[output_group]:
-                targets = [data_dict[group][0].to(0) if torch.cuda.is_available() else data_dict[group][0] for group in target_group.split("/") if group in data_dict]
+                targets = [data_dict[group][0].to(0) if torch.cuda.is_available() else data_dict[group][0] for group in target_group.split(";") if group in data_dict]
                 name = data_dict[output_group][1][0]
                 for metric in self.metrics[output_group][target_group]:
                     result["{}:{}:{}".format(output_group, target_group, metric.__class__.__name__)] = metric(data_dict[output_group][0].to(0) if torch.cuda.is_available() else data_dict[output_group][0], *targets).item()
@@ -135,8 +135,11 @@ class Evaluator(DistributedObject):
                 f"Available groups: {sorted(groupsDest)}"
             )
 
-        target_groups = {target for targets in self.metrics.values() for target in targets}
-        missing_targets = target_groups - set(groupsDest)
+        target_groups = []
+        for i in {target for targets in self.metrics.values() for target in targets}:
+            for u in i.split(";"):
+                target_groups.append(u)
+        missing_targets = set(target_groups) - set(groupsDest)
         if missing_targets:
             raise EvaluatorError(
                 f"The following metric target groups are missing from 'groupsDest': {sorted(missing_targets)}. ",

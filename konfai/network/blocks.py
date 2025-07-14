@@ -19,7 +19,7 @@ class NormMode(Enum):
     SYNCBATCH = 5
     INSTANCE_AFFINE = 6
 
-def getNorm(normMode: Enum, channels : int, dim: int) -> torch.nn.Module:
+def getNorm(normMode: Enum, channels : int, dim: int) -> Union[torch.nn.Module, None]:
     if normMode == NormMode.BATCH:
         return getTorchModule("BatchNorm", dim = dim)(channels, affine=True, track_running_stats=True)
     if normMode == NormMode.INSTANCE:
@@ -32,7 +32,7 @@ def getNorm(normMode: Enum, channels : int, dim: int) -> torch.nn.Module:
         return torch.nn.GroupNorm(num_groups=32, num_channels=channels)
     if normMode == NormMode.LAYER:
         return torch.nn.GroupNorm(num_groups=1, num_channels=channels)
-    return torch.nn.Identity()
+    return None
 
 class UpSampleMode(Enum):
     CONV_TRANSPOSE = 0,
@@ -59,9 +59,9 @@ class BlockConfig():
         self.stride = stride
         self.padding = padding
         self.activation = activation
-        self.normMode = normMode
-
-        if isinstance(normMode, str):
+        if normMode is None:
+            self.norm = None
+        elif isinstance(normMode, str):
             self.norm = NormMode._member_map_[normMode]
         elif isinstance(normMode, NormMode):
             self.norm = normMode
@@ -70,9 +70,13 @@ class BlockConfig():
         return getTorchModule("Conv", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = self.kernel_size, stride = self.stride, padding = self.padding, bias=self.bias)
     
     def getNorm(self, channels : int, dim: int) -> torch.nn.Module:
+        if self.norm is None:
+            return None
         return getNorm(self.norm, channels, dim) if isinstance(self.norm, NormMode) else self.norm(channels)
 
     def getActivation(self) -> torch.nn.Module:
+        if self.activation is None:
+            return None
         if isinstance(self.activation, str):
             return getTorchModule(self.activation.split(";")[0])(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]]) if self.activation != "None" else torch.nn.Identity()
         return self.activation()
@@ -83,21 +87,35 @@ class ConvBlock(network.ModuleArgsDict):
         super().__init__()
         for i, blockConfig in enumerate(blockConfigs):
             self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
-            self.add_module("Norm_{}".format(i), blockConfig.getNorm(out_channels, dim), alias=alias[1])
-            self.add_module("Activation_{}".format(i), blockConfig.getActivation(), alias=alias[2])
+            norm = blockConfig.getNorm(out_channels, dim)
+            if norm is not None:
+                self.add_module("Norm_{}".format(i), norm, alias=alias[1])
+            activation = blockConfig.getActivation()
+            if activation is not None:
+                self.add_module("Activation_{}".format(i), activation, alias=alias[2])
             in_channels = out_channels
 
 class ResBlock(network.ModuleArgsDict):
     
-    def __init__(self, in_channels : int, out_channels : int, nb_conv: int, blockConfig : BlockConfig, dim : int, alias : list[list[str]]=[[], [], [], []]) -> None:
+    def __init__(self, in_channels : int, out_channels : int, blockConfigs : list[BlockConfig], dim : int, alias : list[list[str]]=[[], [], [], [], []]) -> None:
         super().__init__()
-        for i in range(nb_conv):
-            self.add_module("ConvBlock_{}".format(i), ConvBlock(in_channels, out_channels, nb_conv=1, blockConfig=blockConfig, dim=dim, alias=alias[:3]))
+        for i, blockConfig in enumerate(blockConfigs):
+            self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
+            norm = blockConfig.getNorm(out_channels, dim)
+            if norm is not None:
+                self.add_module("Norm_{}".format(i), norm, alias=alias[1])
+            activation = blockConfig.getActivation()
+            if activation is not None:
+                self.add_module("Activation_{}".format(i), activation, alias=alias[2])
+
             if in_channels != out_channels:
-                self.add_module("Conv_skip_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[3], in_branch=[1], out_branch=[1])    
+                self.add_module("Conv_skip", getTorchModule("Conv", dim)(in_channels, out_channels, 1, blockConfig.stride, bias=blockConfig.bias), alias=alias[3], in_branch=[1], out_branch=[1])    
+                self.add_module("Norm_skip", blockConfig.getNorm(out_channels, dim), alias=alias[4], in_branch=[1], out_branch=[1])    
             in_channels = out_channels
-            self.add_module("Add_{}".format(i), Add(), in_branch=[0,1], out_branch=[0,1])
-    
+            
+        self.add_module("Add", Add(), in_branch=[0,1])
+        self.add_module("Norm_{}".format(i+1), torch.nn.ReLU(inplace=True))
+            
 def downSample(in_channels: int, out_channels: int, downSampleMode: DownSampleMode, dim: int) -> torch.nn.Module:
     if downSampleMode == DownSampleMode.MAXPOOL:
         return getTorchModule("MaxPool", dim = dim)(2)
@@ -176,6 +194,7 @@ class Print(torch.nn.Module):
         super().__init__()
     
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        print(input.shape)
         return input
 
 class Write(torch.nn.Module):

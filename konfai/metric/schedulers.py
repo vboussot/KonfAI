@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from abc import abstractmethod
 from konfai.utils.config import config
+from functools import partial
 
 class Scheduler():
 
@@ -47,3 +48,11 @@ class CosineAnnealing(Scheduler):
 
     def get_value(self):
         return self.eta_min + (self.baseValue - self.eta_min) *(1 + np.cos(self.it * torch.pi / self.T_max)) / 2
+
+class Warmup(torch.optim.lr_scheduler.LambdaLR):
+    
+    def warmup(warmup_steps: int, step: int) -> float:
+        return min(1.0, step / warmup_steps)
+
+    def __init__(self, optimizer: torch.optim.Optimizer, warmup_steps: int = 10, last_epoch=-1, verbose="deprecated"):
+        super().__init__(optimizer, partial(Warmup.warmup, warmup_steps), last_epoch, verbose)

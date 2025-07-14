@@ -36,7 +36,7 @@ class TransformLoader:
         pass
     
     def getTransform(self, classpath : str, DL_args : str) -> Transform:
-        module, name = _getModule(classpath, "data.transform")
+        module, name = _getModule(classpath, "konfai.data.transform")
         return config("{}.{}".format(DL_args, classpath))(getattr(importlib.import_module(module), name))(config = None)
 
 class Clip(Transform):
@@ -52,7 +52,7 @@ class Clip(Transform):
         input[torch.where(input < self.min_value)] = self.min_value
         input[torch.where(input > self.max_value)] = self.max_value
         if self.saveClip_min:
-            cache_attribute["Min"] = self .min_value
+            cache_attribute["Min"] = self.min_value
         if self.saveClip_max:
             cache_attribute["Max"] = self.max_value
         return input
@@ -213,7 +213,7 @@ class Resample(Transform, ABC):
 
 class ResampleToResolution(Resample):
 
-    def __init__(self, spacing : list[Union[float, None]] = [1., 1., 1.]) -> None:
+    def __init__(self, spacing : list[float] = [1., 1., 1.]) -> None:
         self.spacing = torch.tensor([0 if s < 0 else s for s in spacing])
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
@@ -244,34 +244,35 @@ class ResampleToResolution(Resample):
         cache_attribute["Size"] = np.asarray(size)
         return self._resample(input, size)
 
-class ResampleToSize(Resample):
+class ResampleToShape(Resample):
 
-    def __init__(self, size : list[int] = [100,512,512]) -> None:
-        self.size = size
+    def __init__(self, shape : list[float] = [100,256,256]) -> None:
+        self.shape = torch.tensor([0 if s < 0 else s for s in shape])
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
             TransformError("Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
                         "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.")
-        if len(shape) != len(self.size):
+        if len(shape) != len(self.shape):
             TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
-        size = self.size
-        for i, s in enumerate(self.size):
-            if s == -1:
-                size[i] = shape[i]
-        return size
+        new_shape = self.shape
+        for i, s in enumerate(self.shape):
+            if s == 0:
+                new_shape[i] = shape[i]
+        print(new_shape)
+        return new_shape
     
     def __call__(self, name: str, input: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        size = self.size
-        image_size =  np.asarray([int(x) for x in torch.tensor(input.shape[1:])])
-        for i, s in enumerate(self.size):
-            if s is None:
-                size[i] = image_size[i]
+        shape = self.shape
+        image_shape =  torch.tensor([int(x) for x in torch.tensor(input.shape[1:])])
+        for i, s in enumerate(self.shape):
+            if s == 0:
+                shape[i] = image_shape[i]
         if "Spacing" in cache_attribute:
-            cache_attribute["Spacing"] = torch.flip(torch.tensor(image_size)/torch.tensor(size)*torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]), dims=[0])
-        cache_attribute["Size"] = image_size
-        cache_attribute["Size"] = size
-        return self._resample(input, size)
+            cache_attribute["Spacing"] = torch.flip(image_shape/shape*torch.flip(cache_attribute.get_tensor("Spacing"), dims=[0]), dims=[0])
+        cache_attribute["Size"] = image_shape
+        cache_attribute["Size"] = shape
+        return self._resample(input, shape)
 
 class ResampleTransform(Transform):
 
