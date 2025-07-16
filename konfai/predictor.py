@@ -27,17 +27,19 @@ from collections import defaultdict
 
 class OutDataset(Dataset, NeedDevice, ABC):
 
-    def __init__(self, filename: str, group: str, pre_transforms : dict[str, TransformLoader], post_transforms : dict[str, TransformLoader], final_transforms : dict[str, TransformLoader], patchCombine: Union[str, None]) -> None: 
+    def __init__(self, filename: str, group: str, before_reduction_transforms : dict[str, TransformLoader], after_reduction_transforms : dict[str, TransformLoader], final_transforms : dict[str, TransformLoader], patchCombine: Union[str, None], reduction: str) -> None: 
         filename, format = filename.split(":")
         super().__init__(filename, format)
         self.group = group
-        self._pre_transforms = pre_transforms
-        self._post_transforms = post_transforms
+        self._before_reduction_transforms = before_reduction_transforms
+        self._after_reduction_transforms = after_reduction_transforms
         self._final_transforms = final_transforms
         self._patchCombine = patchCombine
+        self.reduction_classpath = reduction
+        self.reduction = None
        
-        self.pre_transforms : list[Transform] = []
-        self.post_transforms : list[Transform] = []
+        self.before_reduction_transforms : list[Transform] = []
+        self.after_reduction_transforms : list[Transform] = []
         self.final_transforms : list[Transform] = []
         self.patchCombine: PathCombine = None
 
@@ -47,7 +49,7 @@ class OutDataset(Dataset, NeedDevice, ABC):
         self.nb_data_augmentation = 0
 
     def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
-        transforms_type = ["pre_transforms", "post_transforms", "final_transforms"]
+        transforms_type = ["before_reduction_transforms", "after_reduction_transforms", "final_transforms"]
         for name, _transform_type, transform_type in [(k, getattr(self, "_{}".format(k)), getattr(self, k)) for k in transforms_type]:
             
             if _transform_type is not None:
@@ -57,8 +59,15 @@ class OutDataset(Dataset, NeedDevice, ABC):
                     transform_type.append(transform)
 
         if self._patchCombine is not None:
-            module, name = _getModule(self._patchCombine, "konfai.data.patching")
-            self.patchCombine = getattr(importlib.import_module(module), name)(config = None, DL_args =  "{}.outsDataset.{}.OutDataset".format(KONFAI_ROOT(), name_layer))
+            module, name = _getModule(self._patchCombine, "konfai.data.patching")                                                      
+            self.patchCombine = config("{}.outsDataset.{}.OutDataset".format(KONFAI_ROOT(), name_layer))(getattr(importlib.import_module(module), name))(config = None)
+
+        module, name = _getModule(self.reduction_classpath, "konfai.predictor")
+        if module == "konfai.predictor":
+            self.reduction = getattr(importlib.import_module(module), name)
+        else:
+            self.reduction = config("{}.outsDataset.{}.OutDataset.{}".format(KONFAI_ROOT(), name_layer, self.reduction_classpath))(getattr(importlib.import_module(module), name))(config = None)
+       
     
     def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
         if patchSize is not None and overlap is not None:
@@ -70,14 +79,14 @@ class OutDataset(Dataset, NeedDevice, ABC):
     
     def setDevice(self, device: torch.device):
         super().setDevice(device)
-        transforms_type = ["pre_transforms", "post_transforms", "final_transforms"]
+        transforms_type = ["before_reduction_transforms", "after_reduction_transforms", "final_transforms"]
         for transform_type in [(getattr(self, k)) for k in transforms_type]:
             if transform_type is not None:
                 for transform in transform_type:
                     transform.setDevice(device)       
 
     @abstractmethod
-    def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
+    def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
         pass
 
     def isDone(self, index: int) -> bool:
@@ -115,10 +124,9 @@ class Median(Reduction):
 class OutSameAsGroupDataset(OutDataset):
 
     @config("OutDataset")
-    def __init__(self, dataset_filename: str = "./Dataset:mha", group: str = "default", sameAsGroup: str = "default", pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, reduction: str = "mean", inverse_transform: bool = True) -> None:
-        super().__init__(dataset_filename, group, pre_transforms, post_transforms, final_transforms, patchCombine)
+    def __init__(self, sameAsGroup: str = "default", dataset_filename: str = "default:./Dataset:mha", group: str = "default", before_reduction_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, after_reduction_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, reduction: str = "mean", inverse_transform: bool = True) -> None:
+        super().__init__(dataset_filename, group, before_reduction_transforms, after_reduction_transforms, final_transforms, patchCombine, reduction)
         self.group_src, self.group_dest = sameAsGroup.split(":")
-        self.reduction_classpath = reduction
         self.inverse_transform = inverse_transform
 
     def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
@@ -135,9 +143,6 @@ class OutSameAsGroupDataset(OutDataset):
             for i in range(len(input_dataset.patch.getPatch_slices(index_augmentation))):
                 self.attributes[index_dataset][index_augmentation][i] = Attribute(input_dataset.cache_attributes[0])
 
-        for transform in self.pre_transforms:
-            layer = transform(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
-
         if self.inverse_transform:
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].post_transforms):
                 layer = transform.inverse(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
@@ -146,9 +151,7 @@ class OutSameAsGroupDataset(OutDataset):
 
     def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
         super().load(name_layer, datasets, groups)
-        module, name = _getModule(self.reduction_classpath, "konfai.predictor")
-        self.reduction = config("{}.outsDataset.{}.OutDataset.{}".format(KONFAI_ROOT(), name_layer, self.reduction_classpath))(getattr(importlib.import_module(module), name))(config = None)
-       
+        
         if self.group_src not in groups.keys():
             raise PredictorError(
                 f"Source group '{self.group_src}' not found. Available groups: {list(groups.keys())}."
@@ -161,7 +164,6 @@ class OutSameAsGroupDataset(OutDataset):
     
     def _getOutput(self, index: int, index_augmentation: int, dataset: DatasetIter) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()
-        name = self.names[index]
         if index_augmentation > 0:
             
             i = 0
@@ -173,52 +175,26 @@ class OutSameAsGroupDataset(OutDataset):
                     break
                 i += dataAugmentations.nb
 
-        for transform in self.post_transforms:
-            layer = transform(name, layer, self.attributes[index][index_augmentation][0])
-            
-        if self.inverse_transform:
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
-                layer = transform.inverse(name, layer, self.attributes[index][index_augmentation][0])
+        for transform in self.before_reduction_transforms:
+            layer = transform(self.names[index], layer, self.attributes[index][index_augmentation][0])
+        
         return layer
 
     def getOutput(self, index: int, dataset: DatasetIter) -> torch.Tensor:
         result = torch.cat([self._getOutput(index, index_augmentation, dataset).unsqueeze(0) for index_augmentation in self.output_layer_accumulator[index].keys()], dim=0)
-        name = self.names[index]
         self.output_layer_accumulator.pop(index)
         result = self.reduction(result.float()).to(result.dtype)
-
-        for transform in self.final_transforms:
-            result = transform(name, result, self.attributes[index][0][0])
-        return result
-
-class OutLayerDataset(OutDataset):
-
-    @config("OutDataset")
-    def __init__(self, dataset_filename: str = "Dataset.h5", group: str = "default", overlap : Union[list[int], None] = None, pre_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, post_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None) -> None:
-        super().__init__(dataset_filename, group, pre_transforms, post_transforms, final_transforms, patchCombine)
-        self.overlap = overlap
-        
-    def addLayer(self, index: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
-        if index not in self.output_layer_accumulator:
-            group = list(dataset.groups.keys())[0]
-            patch_slices = get_patch_slices_from_nb_patch_per_dim(list(layer.shape[2:]), dataset.getDatasetFromIndex(group, index).patch.nb_patch_per_dim, self.overlap)
-            self.output_layer_accumulator[index] = Accumulator(patch_slices, self.patchCombine, batch=False)
-            self.attributes[index] = Attribute()
-            self.names[index] = dataset.getDatasetFromIndex(group, index).name
             
+        for transform in self.after_reduction_transforms:
+            result = transform(self.names[index], result, self.attributes[index][0][0])
 
-        for transform in self.pre_transforms:
-            layer = transform(layer, self.attributes[index])
-        self.output_layer_accumulator[index].addLayer(index_patch, layer)
-
-    def getOutput(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        layer = self.output_layer_accumulator[index].assemble()
-        name = self.names[index]
-        for transform in self.post_transforms:
-            layer = transform(name, layer, self.attributes[index])
-
-        self.output_layer_accumulator.pop(index)
-        return layer
+        if self.inverse_transform:
+            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
+                result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
+        
+        for transform in self.final_transforms:
+            result = transform(self.names[index], result, self.attributes[index][0][0]) 
+        return result
 
 class OutDatasetLoader():
 
@@ -425,9 +401,14 @@ class Predictor(DistributedObject):
                     "Available modules: {}".format(modules),
                     "Please check that the name matches exactly a submodule or output of your model architecture."
                 )
+        
         module, name = _getModule(self.combine_classpath, "konfai.predictor")
-        combine = config("{}.{}".format(KONFAI_ROOT(), self.combine_classpath))(getattr(importlib.import_module(module), name))(config = None)
+        if module == "konfai.predictor":
+            combine = getattr(importlib.import_module(module), name)
+        else:
+            combine = config("{}.{}".format(KONFAI_ROOT(), self.combine_classpath))(getattr(importlib.import_module(module), name))(config = None)
        
+        
         self.modelComposite = ModelComposite(self.model, len(MODEL().split(":")), combine)
         self.modelComposite.load(self._load())
 

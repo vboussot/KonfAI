@@ -36,11 +36,7 @@ def getNorm(normMode: Enum, channels : int, dim: int) -> Union[torch.nn.Module, 
 
 class UpSampleMode(Enum):
     CONV_TRANSPOSE = 0,
-    UPSAMPLE_NEAREST = 1,
-    UPSAMPLE_LINEAR = 2,
-    UPSAMPLE_BILINEAR = 3,
-    UPSAMPLE_BICUBIC = 4,
-    UPSAMPLE_TRILINEAR = 5
+    UPSAMPLE = 1,
 
 class DownSampleMode(Enum):
     MAXPOOL = 0,
@@ -128,7 +124,13 @@ def upSample(in_channels: int, out_channels: int, upSampleMode: UpSampleMode, di
     if upSampleMode == UpSampleMode.CONV_TRANSPOSE:
         return getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = kernel_size, stride = stride, padding = 0)
     else:
-        return torch.nn.Upsample(scale_factor=2, mode=upSampleMode.name.replace("UPSAMPLE_", "").lower(), align_corners=False)
+        if dim == 3:
+            upsampleMethod = "trilinear" 
+        if dim == 2:
+            upsampleMethod = "bilinear"
+        if dim == 1:
+            upsampleMethod = "linear"
+        return torch.nn.Upsample(scale_factor=2, mode=upsampleMethod.lower(), align_corners=False)
 
 class Unsqueeze(torch.nn.Module):
 

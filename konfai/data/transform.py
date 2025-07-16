@@ -250,6 +250,7 @@ class ResampleToShape(Resample):
         self.shape = torch.tensor([0 if s < 0 else s for s in shape])
 
     def transformShape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        print(shape)
         if "Spacing" not in cache_attribute:
             TransformError("Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
                         "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.")
@@ -411,7 +412,7 @@ class Gradient(Transform):
     def inverse(self, name: str, input : torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return input
 
-class ArgMax(Transform):
+class Argmax(Transform):
 
     def __init__(self, dim: int = 0) -> None:
         self.dim = dim

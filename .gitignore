@@ -8,3 +8,4 @@ examples
 .pytest_cache
 docs
 tests
+konfai/metric/models

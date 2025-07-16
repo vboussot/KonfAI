@@ -118,10 +118,9 @@ class Generator(network.Network):
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = 3, stride = 1, padding = 1))
             self.add_module("Tanh", torch.nn.Tanh())
 
-    @config("Generator")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],

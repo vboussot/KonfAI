@@ -264,7 +264,6 @@ class LumaFlip(ColorTransform):
 
 class HUE(ColorTransform):
 
-    @config("HUE")
     def __init__(self, hue_max: float, groups: Union[list[str], None] = None) -> None:
         super().__init__(groups)
         self.hue_max = hue_max

@@ -98,10 +98,9 @@ class Head(network.ModuleArgsDict):
         
 class ResNet(network.Network):
 
-    @config("ResNet")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : ModelPatch = ModelPatch(),
                     dim : int = 3,

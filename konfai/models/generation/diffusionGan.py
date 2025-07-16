@@ -37,10 +37,9 @@ class Discriminator(network.Network):
             self.add_module("Layers", Discriminator.DiscriminatorNLayers(channels, strides, dim))
             self.add_module("Head", Discriminator.DiscriminatorHead(channels[-1], dim))
 
-    @config("Discriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     channels: list[int] = [1, 16, 32, 64, 64],
                     strides: list[int] = [2,2,2,1],
@@ -169,10 +168,9 @@ class Discriminator_ADA(network.Network):
             self.add_module("Layers", Discriminator_ADA.DiscriminatorNLayers(channels, strides, 100, dim), in_branch=[0, "te"])
             self.add_module("Head", Discriminator_ADA.DiscriminatorHead(channels[-1], dim))
 
-    @config("Discriminator_ADA")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     channels: list[int] = [1, 16, 32, 64, 64],
                     strides: list[int] = [2,2,2,1],
@@ -261,10 +259,9 @@ class Discriminator_ADA(network.Network):
             self.add_module("AutoEncoder", GeneratorV1.GeneratorAutoEncoder(ngf, dim))
             self.add_module("Head", GeneratorV1.GeneratorHead(in_channels=ngf, out_channels=1, dim=dim))
 
-    @config("GeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3) -> None:
@@ -349,10 +346,9 @@ class GeneratorV1(network.Network):
             self.add_module("AutoEncoder", GeneratorV1.GeneratorAutoEncoder(ngf, dim))
             self.add_module("Head", GeneratorV1.GeneratorHead(in_channels=ngf, out_channels=1, dim=dim))
 
-    @config("GeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3) -> None:
@@ -383,10 +379,9 @@ class GeneratorV2(network.Network):
             self.add_module("UNetBlock_0", NestedUNet.NestedUNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock if blockType == "Conv" else blocks.ResBlock, dim=dim), out_branch=["X_0_{}".format(j+1) for j in range(len(channels)-2)])    
             self.add_module("Head", GeneratorV2.NestedUNetHead(channels[:2], dim=dim), in_branch=["X_0_{}".format(len(channels)-2)])
 
-    @config("GeneratorV2")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -424,10 +419,9 @@ class GeneratorV3(network.Network):
             self.add_module("UNetBlock_0", UNet.UNetBlock(channels, nb_conv_per_stage, blockConfig, downSampleMode=blocks.DownSampleMode._member_map_[downSampleMode], upSampleMode=blocks.UpSampleMode._member_map_[upSampleMode], attention=attention, block = blocks.ConvBlock if blockType == "Conv" else blocks.ResBlock, nb_class=1, dim=dim), out_branch=["X_0_{}".format(j+1) for j in range(len(channels)-2)])    
             self.add_module("Head", GeneratorV3.NestedUNetHead(channels[:2], dim=dim), in_branch=["X_0_{}".format(len(channels)-2)])
 
-    @config("GeneratorV3")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -443,7 +437,6 @@ class GeneratorV3(network.Network):
 
 class DiffusionGan(network.Network):
 
-    @config("DiffusionGan")
     def __init__(self, generator : GeneratorV1 = GeneratorV1(), discriminator : Discriminator_ADA = Discriminator_ADA()) -> None:
         super().__init__()
         self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
@@ -454,7 +447,6 @@ class DiffusionGan(network.Network):
 
 class DiffusionGanV2(network.Network):
 
-    @config("DiffusionGan")
     def __init__(self, generator : GeneratorV2 = GeneratorV2(), discriminator : Discriminator = Discriminator()) -> None:
         super().__init__()
         self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
@@ -466,10 +458,9 @@ class DiffusionGanV2(network.Network):
 
 class CycleGanDiscriminator(network.Network):
 
-    @config("CycleGanDiscriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int] = [1, 16, 32, 64, 64],
@@ -485,10 +476,9 @@ class CycleGanDiscriminator(network.Network):
 
 class CycleGanGeneratorV1(network.Network):
 
-    @config("CycleGanGeneratorV1")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     dim : int = 3) -> None:
@@ -498,10 +488,9 @@ class CycleGanGeneratorV1(network.Network):
 
 class CycleGanGeneratorV2(network.Network):
 
-    @config("CycleGanGeneratorV2")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -518,10 +507,9 @@ class CycleGanGeneratorV2(network.Network):
 
 class CycleGanGeneratorV3(network.Network):
 
-    @config("CycleGanGeneratorV3")
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     channels: list[int]=[1, 64, 128, 256, 512, 1024],
@@ -538,7 +526,6 @@ class CycleGanGeneratorV3(network.Network):
 
 class DiffusionCycleGan(network.Network):
 
-    @config("DiffusionCycleGan")
     def __init__(self, generators : CycleGanGeneratorV3 = CycleGanGeneratorV3(), discriminators : CycleGanDiscriminator = CycleGanDiscriminator()) -> None:
         super().__init__()
         self.add_module("Generator", generators, in_branch=[0, 1], out_branch=["pB", "pA"])

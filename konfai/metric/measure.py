@@ -9,7 +9,6 @@ from scipy import linalg
 
 import torch.nn.functional as F
 import os
-import tqdm
 
 from typing import Callable, Union
 from functools import partial
@@ -19,10 +18,11 @@ import copy
 from abc import abstractmethod
 
 from konfai.utils.config import config
-from konfai.utils.utils import _getModule
+from konfai.utils.utils import _getModule, download_url
 from konfai.data.patching import ModelPatch
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
+from tqdm import tqdm
 
 modelsRegister = {}
 
@@ -122,7 +122,7 @@ class LPIPS(MaskedLoss):
 
         patchIterator = datasetPatch.disassemble(LPIPS.normalize(x), LPIPS.normalize(y))
         loss = 0
-        with tqdm.tqdm(iterable = enumerate(patchIterator), leave=False, total=datasetPatch.getSize(0)) as batch_iter:
+        with tqdm(iterable = enumerate(patchIterator), leave=False, total=datasetPatch.getSize(0)) as batch_iter:
             for i, patch_input in batch_iter:
                 real, fake = LPIPS.preprocessing(patch_input[0]), LPIPS.preprocessing(patch_input[1])
                 loss += loss_fn_alex(real, fake).item()
@@ -146,9 +146,11 @@ class Dice(Criterion):
         target = self.flatten(target)
         return (2.*(input * target).sum() + self.smooth)/(input.sum() + target.sum() + self.smooth)
 
-
     def forward(self, output: torch.Tensor, *targets : list[torch.Tensor]) -> torch.Tensor:
-        target = targets[0]
+        target = F.interpolate(
+            targets[0],
+            output.shape[2:],
+            mode="nearest")
         if output.shape[1] == 1:
             output = F.one_hot(output.type(torch.int64), num_classes=int(torch.max(output).item()+1)).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float()
         target = F.one_hot(target.type(torch.int64), num_classes=output.shape[1]).permute(0, len(target.shape), *[i+1 for i in range(len(target.shape)-1)]).float().squeeze(2)
@@ -242,7 +244,7 @@ class PerceptualLoss(Criterion):
     
     class Module():
         
-        @config(None)
+        @config()
         def __init__(self, losses: dict[str, float] = {"Gram": 1, "torch_nn_L1Loss": 1}) -> None:
             self.losses = losses
             self.DL_args = os.environ['KONFAI_CONFIG_PATH'] if "KONFAI_CONFIG_PATH" in os.environ else ""
@@ -413,16 +415,19 @@ class FocalLoss(Criterion):
         self.gamma = gamma
         self.reduction = reduction
 
-    def forward(self, output: torch.Tensor, targets: list[torch.Tensor]) -> torch.Tensor:
-        target = targets[0].long()
+    def forward(self, output: torch.Tensor, *targets: list[torch.Tensor]) -> torch.Tensor:
+        target = F.interpolate(
+            targets[0],
+            output.shape[2:],
+            mode="nearest").long()
         
         logpt = F.log_softmax(output, dim=1)
         pt = torch.exp(logpt)
 
-        logpt = logpt.gather(1, target.unsqueeze(1)) 
-        pt = pt.gather(1, target.unsqueeze(1))
+        logpt = logpt.gather(1, target) 
+        pt = pt.gather(1, target)
 
-        at = self.alpha[target].unsqueeze(1)
+        at = self.alpha.to(target.device)[target].unsqueeze(1)
         loss = -at * ((1 - pt) ** self.gamma) * logpt
 
         if self.reduction == "mean":
@@ -509,3 +514,71 @@ class MutualInformationLoss(torch.nn.Module):
         papb = torch.bmm(pa.permute(0, 2, 1), pb.to(pa))  # (batch, num_bins, num_bins)
         mi = torch.sum(pab * torch.log((pab + self.smooth_nr) / (papb + self.smooth_dr) + self.smooth_dr), dim=(1, 2))  # (batch)
         return torch.mean(mi).neg()  # average over the batch and channel ndims
+
+class FOCUS(Criterion): #Feature-Oriented Comparison for Unpaired Synthesis
+
+    def __init__(self, model_name: str, shape: list[int] = [0,0], in_channels: int = 1, losses: dict[str, list[float]] = {"Gram": 1, "torch_nn_L1Loss": 1}) -> None:
+        super().__init__()
+        if model_name is None:
+            return
+        self.shape = shape
+        self.in_channels = in_channels
+        self.losses: dict[torch.nn.Module, list[float]] = {}
+        for loss, weights in losses.items():
+            module, name = _getModule(loss, "konfai.metric.measure")
+            self.losses[config(os.environ['KONFAI_CONFIG_PATH'])(getattr(importlib.import_module(module), name))(config=None)] = weights
+
+        self.model_path = download_url(model_name, "https://huggingface.co/VBoussot/impact-torchscript-models/resolve/main/")
+        self.model: torch.nn.Module = torch.jit.load(self.model_path)
+        self.dim = len(self.shape)
+        self.shape = self.shape if all([s > 0 for s in self.shape]) else None
+        self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
+
+        try:
+            dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim)))
+            out = self.model(dummy_input)
+            if not isinstance(out, (list, tuple)):
+                raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
+            if len(self.weight) != len(out):
+                raise ValueError(f"Mismatch between number of weights ({len(self.weight)}) and model outputs ({len(out)}).")
+        except Exception as e:
+            msg = (
+                f"[Model Sanity Check Failed]\n"
+                f"Input shape attempted: {dummy_input.shape}\n"
+                f"Expected output length: {len(self.weight)}\n"
+                f"Error: {type(e).__name__}: {e}"
+            )
+            raise RuntimeError(msg) from e
+        self.model = None
+        
+    def preprocessing(self, input: torch.Tensor) -> torch.Tensor:
+        if self.shape is not None and not all([input.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
+            input = torch.nn.functional.interpolate(input, mode=self.mode, size=tuple(self.shape), align_corners=False).type(torch.float32)
+        if input.shape[1] != self.in_channels:
+            input = input.repeat(tuple([1,3] + [1 for _ in range(self.dim)]))   
+        return input
+    
+    def _compute(self, output: torch.Tensor, targets: list[torch.Tensor]) -> torch.Tensor:
+        loss = torch.zeros((1), requires_grad = True).to(output.device, non_blocking=False).type(torch.float32)
+        output = self.preprocessing(output)
+        targets = [self.preprocessing(target) for target in targets]
+        self.model.to(output.device)
+        for zipped_output in zip(self.model(output), *[self.model(target) for target in targets]):
+            output_features = zipped_output[0]
+            targets_features = zipped_output[1:]            
+            for target_features, (loss_function, weights) in zip(targets_features, self.losses.items()):
+                for output_feature, target_feature, weight in zip(output_features ,target_features, weights):
+                    loss += weights*loss_function(output_feature, target_feature)
+        return loss
+    
+    def forward(self, output: torch.Tensor, *targets : list[torch.Tensor]) -> torch.Tensor:
+        if self.model is None:
+            self.model = torch.jit.load(self.model_path)
+        loss = torch.zeros((1), requires_grad = True).to(output.device, non_blocking=False).type(torch.float32)
+        if len(output.shape) == 5 and self.dim == 2:
+            for i in range(output.shape[2]):
+                loss = loss + self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets])
+            loss/=output.shape[2]
+        else:
+            loss = self._compute(output, targets)
+        return loss.to(output)

@@ -41,57 +41,41 @@ class OptimizerLoader():
     def getOptimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
         return config("{}.Model.{}.Optimizer".format(KONFAI_ROOT(), key))(getattr(importlib.import_module('torch.optim'), self.name))(parameter, config = None)
         
-class SchedulerStep():
-    
-    @config(None)
-    def __init__(self, nb_step : int = 0) -> None:
-        self.nb_step = nb_step
 
 class LRSchedulersLoader():
         
-    @config("Schedulers")
-    def __init__(self, params: dict[str, SchedulerStep] = {"default:ReduceLROnPlateau" : SchedulerStep(0)}) -> None:
-        self.params = params
+    @config()
+    def __init__(self, nb_step : int = 0) -> None:
+        self.nb_step = nb_step
 
-    def getschedulers(self, key: str, optimizer: torch.optim.Optimizer) -> dict[torch.optim.lr_scheduler._LRScheduler, int]:
-        schedulers : dict[torch.optim.lr_scheduler._LRScheduler, int] = {}
-        for nameTmp, step in self.params.items():
-            if nameTmp:
-                ok = False
-                for m in ["torch.optim.lr_scheduler", "konfai.metric.schedulers"]:
-                    module, name = _getModule(nameTmp, m)
-                    if hasattr(importlib.import_module(module), name):
-                        schedulers[config("{}.Model.{}.Schedulers.{}".format(KONFAI_ROOT(), key, name))(getattr(importlib.import_module(module), name))(optimizer, config = None)] = step.nb_step        
-                        ok = True
-                if not ok:
-                    raise TrainerError("Unknown scheduler {}, tried importing from: 'torch.optim.lr_scheduler' and 'konfai.metric.schedulers', but no valid match was found. Check your YAML config or scheduler name spelling.".format(nameTmp))
-        return schedulers
+    def getschedulers(self, key: str, scheduler_classname: str, optimizer: torch.optim.Optimizer) -> torch.optim.lr_scheduler._LRScheduler:
+        for m in ["torch.optim.lr_scheduler", "konfai.metric.schedulers"]:
+            module, name = _getModule(scheduler_classname, m)
+            if hasattr(importlib.import_module(module), name):
+                return config("{}.Model.{}.schedulers.{}".format(KONFAI_ROOT(), key, scheduler_classname))(getattr(importlib.import_module(module), name))(optimizer, config = None)
+        raise TrainerError("Unknown scheduler {}, tried importing from: 'torch.optim.lr_scheduler' and 'konfai.metric.schedulers', but no valid match was found. Check your YAML config or scheduler name spelling.".format(scheduler_classname))
 
-class SchedulersLoader():
+class LossSchedulersLoader():
         
-    @config("Schedulers")
-    def __init__(self, params: dict[str, SchedulerStep] = {"default:Constant" : SchedulerStep(0)}) -> None:
-        self.params = params
+    @config()
+    def __init__(self, nb_step : int = 0) -> None:
+        self.nb_step = nb_step
 
-    def getschedulers(self, key: str) -> dict[torch.optim.lr_scheduler._LRScheduler, int]:
-        schedulers : dict[Scheduler, int] = {}
-        for name, step in self.params.items():
-            if name:    
-                schedulers[getattr(importlib.import_module("konfai.metric.schedulers"), name)(config = None, DL_args = key)] = step.nb_step
-        return schedulers
+    def getschedulers(self, key: str, scheduler_classname: str) -> torch.optim.lr_scheduler._LRScheduler:
+        return config("{}.{}".format(key, scheduler_classname))(getattr(importlib.import_module('konfai.metric.schedulers'), scheduler_classname))(config = None)
     
 class CriterionsAttr():
     
     @config()
-    def __init__(self, l: SchedulersLoader = SchedulersLoader(), isLoss: bool = True, group: int = 0, stepStart: int = 0, stepStop: Union[int, None] = None, accumulation: bool = False) -> None:
-        self.l = l
+    def __init__(self, schedulers: dict[str, LossSchedulersLoader] = {"default:Constant": LossSchedulersLoader(0)}, isLoss: bool = True, group: int = 0, stepStart: int = 0, stepStop: Union[int, None] = None, accumulation: bool = False) -> None:
+        self.schedulersLoader = schedulers
         self.isTorchCriterion = True
         self.isLoss = isLoss
         self.stepStart = stepStart
         self.stepStop = stepStop
         self.group = group
         self.accumulation = accumulation
-        self.sheduler = None
+        self.schedulers: dict[Scheduler, int] = {}
         
 class CriterionsLoader():
 
@@ -104,7 +88,8 @@ class CriterionsLoader():
         for module_classpath, criterionsAttr in self.criterionsLoader.items():
             module, name = _getModule(module_classpath, "konfai.metric.measure")
             criterionsAttr.isTorchCriterion = module.startswith("torch")
-            criterionsAttr.sheduler = criterionsAttr.l.getschedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath))
+            for scheduler_classname, schedulers in criterionsAttr.schedulersLoader.items():
+                criterionsAttr.schedulers[schedulers.getschedulers("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}.schedulers".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath), scheduler_classname)] = schedulers.nb_step
             criterions[config("{}.Model.{}.outputsCriterions.{}.targetsCriterions.{}.criterionsLoader.{}".format(KONFAI_ROOT(), model_classname, output_group, target_group, module_classpath))(getattr(importlib.import_module(module), name))(config = None)] = criterionsAttr
         return criterions
 
@@ -202,7 +187,7 @@ class Measure():
 
             for criterion, criterionsAttr in self.outputsCriterions[output_group][target_group].items():
                 if it >= criterionsAttr.stepStart and (criterionsAttr.stepStop is None or it <= criterionsAttr.stepStop):
-                    scheduler = self.update_scheduler(criterionsAttr.sheduler, it)
+                    scheduler = self.update_scheduler(criterionsAttr.schedulers, it)
                     self._loss[criterionsAttr.group]["{}:{}:{}".format(output_group, target_group, criterion.__class__.__name__)].add(scheduler.get_value(), criterion(output, *target))
                     if training and len(np.unique([len(l) for l in self._loss[criterionsAttr.group].values() if l.accumulation and l.isLoss])) == 1:
                         if criterionsAttr.isLoss:
@@ -542,7 +527,7 @@ class Network(ModuleArgsDict, ABC):
     def __init__(   self,
                     in_channels : int = 1,
                     optimizer: Union[OptimizerLoader, None] = None, 
-                    schedulers: Union[LRSchedulersLoader, None] = None, 
+                    schedulers: Union[dict[str, LRSchedulersLoader], None] = None, 
                     outputsCriterions: Union[dict[str, TargetCriterionsLoader], None] = None,
                     patch : Union[ModelPatch, None] = None,
                     nb_batch_per_step : int = 1,
@@ -556,7 +541,7 @@ class Network(ModuleArgsDict, ABC):
         self.optimizer : Union[torch.optim.Optimizer, None] = None
 
         self.LRSchedulersLoader  = schedulers
-        self.schedulers : Union[dict[torch.optim.lr_scheduler._LRScheduler, int], None] = None
+        self.schedulers : Union[dict[torch.optim.lr_scheduler._LRScheduler, int], None] = {}
 
         self.outputsCriterionsLoader = outputsCriterions
         self.measure : Union[Measure, None] = None
@@ -669,8 +654,8 @@ class Network(ModuleArgsDict, ABC):
             self._it = int(state_dict["{}_it".format(self.getName())])
         if "{}_nb_lr_update".format(self.getName()) in state_dict:
             self._nb_lr_update = int(state_dict["{}_nb_lr_update".format(self.getName())])
-        if self.schedulers:
-            for scheduler in self.schedulers:
+        for scheduler in self.schedulers:
+            if scheduler.last_epoch == -1:
                 scheduler.last_epoch = self._nb_lr_update
         self.initialized()
 
@@ -744,7 +729,8 @@ class Network(ModuleArgsDict, ABC):
                 self.optimizer.zero_grad()
 
             if self.LRSchedulersLoader and self.optimizer:
-                self.schedulers = self.LRSchedulersLoader.getschedulers(key, self.optimizer)
+                for schedulers_classname, schedulers in self.LRSchedulersLoader.items():
+                    self.schedulers[schedulers.getschedulers(key, schedulers_classname, self.optimizer)] = schedulers.nb_step
     
     def initialized(self):
         pass
@@ -892,6 +878,7 @@ class Network(ModuleArgsDict, ABC):
                 model._requires_grad(list(self.measure.outputsCriterions.keys()))
                 for loss in self.measure.getLoss():
                     self.scaler.scale(loss / self.nb_batch_per_step).backward()
+                    
                     if self._it % self.nb_batch_per_step == 0:
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -903,11 +890,10 @@ class Network(ModuleArgsDict, ABC):
         self._nb_lr_update+=1 
         step = 0
         scheduler = None
-        if self.schedulers:
-            for scheduler, value in self.schedulers.items():
-                if value is None or (self._nb_lr_update >= step and self._nb_lr_update < step+value):
-                    break
-                step += value
+        for scheduler, value in self.schedulers.items():
+            if value is None or (self._nb_lr_update >= step and self._nb_lr_update < step+value):
+                break
+            step += value
         if scheduler:
             if scheduler.__class__.__name__ == 'ReduceLROnPlateau':
                 if self.measure:
