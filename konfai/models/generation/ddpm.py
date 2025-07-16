@@ -175,10 +175,9 @@ class DDPM(network.Network):
         def forward(self, input: torch.Tensor, eta: torch.Tensor, eta_hat: torch.Tensor, t: int) -> torch.Tensor:
             return torch.concat((self.v(input, eta, t), self.v(input, eta_hat, t)), dim=1)
 
-    @config("DDPM")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     patch : Union[ModelPatch, None] = None,
                     train_noise_step: int = 1000,

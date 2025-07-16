@@ -23,10 +23,9 @@ class Discriminator(network.Network):
             self.add_module("AdaptiveAvgPool", blocks.getTorchModule("AdaptiveAvgPool", dim)(tuple([1]*dim)))
             self.add_module("Flatten", torch.nn.Flatten(1))
     
-    @config("Discriminator")
     def __init__(self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     nb_batch_per_step: int = 64,
                     dim : int = 3) -> None:
@@ -101,11 +100,10 @@ class Generator(network.Network):
             self.add_module("Encoder", Generator.GeneratorEncoder(channels, dim))
             self.add_module("NResBlock", Generator.GeneratorNResnetBlock(channels=channels[-1], nb_conv=6, dim=dim))
             self.add_module("Decoder", Generator.GeneratorDecoder(channels, dim))
-            
-    @config("Generator")
+        
     def __init__(self, 
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     patch : ModelPatch = ModelPatch(),
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     nb_batch_per_step: int = 64,
@@ -121,7 +119,6 @@ class Generator(network.Network):
 
 class Gan(network.Network):
 
-    @config("Gan")
     def __init__(self, generator : Generator = Generator(), discriminator : Discriminator = Discriminator()) -> None:
         super().__init__()
         self.add_module("Discriminator_B", discriminator, in_branch=[1], out_branch=[-1], requires_grad=True)

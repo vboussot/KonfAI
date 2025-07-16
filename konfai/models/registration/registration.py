@@ -8,10 +8,9 @@ from konfai.models.segmentation import UNet
 
 class VoxelMorph(network.Network):
                 
-    @config("VoxelMorph")
     def __init__(   self,
                     optimizer : network.OptimizerLoader = network.OptimizerLoader(),
-                    schedulers : network.LRSchedulersLoader = network.LRSchedulersLoader(),
+                    schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
                     outputsCriterions: dict[str, network.TargetCriterionsLoader] = {"default" : network.TargetCriterionsLoader()},
                     dim : int = 3,
                     channels : list[int] = [4, 16,32,32,32],

@@ -25,7 +25,6 @@ class VAE(network.Network):
             self.add_module("Conv", blocks.getTorchModule("Conv", dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = 3, stride = 1, padding = 1))
             self.add_module("Tanh", torch.nn.Tanh()) 
 
-    @config("VAE")
     def __init__(self,
                     optimizer: network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers: network.LRSchedulersLoader = network.LRSchedulersLoader(),
@@ -60,7 +59,6 @@ class LinearVAE(network.Network):
             self.add_module("Linear", torch.nn.Linear(in_features, out_features))
             self.add_module("Tanh", torch.nn.Tanh())
 
-    @config("LinearVAE")
     def __init__(self,
                     optimizer: network.OptimizerLoader = network.OptimizerLoader(),
                     schedulers: network.LRSchedulersLoader = network.LRSchedulersLoader(),

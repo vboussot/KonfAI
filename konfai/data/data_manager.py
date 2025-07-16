@@ -24,11 +24,11 @@ from konfai.data.augmentation import DataAugmentationsList
 class GroupTransform:
 
     @config()
-    def __init__(self,  pre_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
-                        post_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
+    def __init__(self,  transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
+                        patch_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
                         isInput: bool = True) -> None:
-        self._pre_transforms = pre_transforms
-        self._post_transforms = post_transforms
+        self._pre_transforms = transforms
+        self._post_transforms = patch_transforms
         self.pre_transforms : list[Transform] = []
         self.post_transforms : list[Transform] = []
         self.isInput = isInput
@@ -37,7 +37,7 @@ class GroupTransform:
         if self._pre_transforms is not None:
             if isinstance(self._pre_transforms, dict):
                 for classpath, transform in self._pre_transforms.items():
-                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.pre_transforms".format(KONFAI_ROOT(), group_src, group_dest))
+                    transform = transform.getTransform(classpath, DL_args =  "{}.Dataset.groups_src.{}.groups_dest.{}.transforms".format(KONFAI_ROOT(), group_src, group_dest))
                     transform.setDatasets(datasets)
                     self.pre_transforms.append(transform)
             else:
@@ -48,7 +48,7 @@ class GroupTransform:
         if self._post_transforms is not None:
             if isinstance(self._post_transforms, dict):
                 for classpath, transform in self._post_transforms.items():
-                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.post_transforms".format(KONFAI_ROOT(), group_src, group_dest))
+                    transform = transform.getTransform(classpath, DL_args = "{}.Dataset.groups_src.{}.groups_dest.{}.patch_transforms".format(KONFAI_ROOT(), group_src, group_dest))
                     transform.setDatasets(datasets)
                     self.post_transforms.append(transform)
             else:
@@ -65,9 +65,8 @@ class GroupTransform:
 class GroupTransformMetric(GroupTransform):
 
     @config()
-    def __init__(self,  pre_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()},
-                        post_transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}):
-        super().__init__(pre_transforms, post_transforms)
+    def __init__(self, transforms : Union[dict[str, TransformLoader], list[Transform]] = {"default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()}):
+        super().__init__(transforms, None)
 
 class Group(dict[str, GroupTransform]):
 
@@ -196,10 +195,9 @@ class DatasetIter(data.Dataset):
 
 class Subset():
     
-    def __init__(self, subset: Union[str, list[int], list[str], None] = None, shuffle: bool = True, filter: str = None) -> None:
+    def __init__(self, subset: Union[str, list[int], list[str], None] = None, shuffle: bool = True) -> None:
         self.subset = subset
         self.shuffle = shuffle
-        self.filter: list[tuple[str]] = [tuple(a.split(":")) for a in filter.split(";")] if filter is not None else None
 
     def __call__(self, names: list[str], infos: list[dict[str, tuple[np.ndarray, Attribute]]]) -> set[str]:
         inter_name = set(names[0])
@@ -207,16 +205,7 @@ class Subset():
             inter_name = inter_name.intersection(set(n))
         names = sorted(list(inter_name))
         
-        names_filtred = []
-        if self.filter is not None:
-            for name in names:
-                for info in infos:
-                    if all([info[name][1].isInfo(f[0], f[1]) for f in self.filter]):
-                        names_filtred.append(name)
-                        continue
-        else:
-            names_filtred = names
-        size = len(names_filtred)
+        size = len(names)
         index = []
         if self.subset is None:
             index = list(range(0, size))
@@ -230,7 +219,7 @@ class Subset():
                     for name in f:
                         train_names.append(name.strip())
                 index = []
-                for i, name in enumerate(names_filtred):
+                for i, name in enumerate(names):
                     if name in train_names:
                         index.append(i)
             elif self.subset.startswith("~") and os.path.exists(self.subset[1:]):
@@ -239,7 +228,7 @@ class Subset():
                     for name in f:
                         exclude_names.append(name.strip())
                 index = []
-                for i, name in enumerate(names_filtred):
+                for i, name in enumerate(names):
                     if name not in exclude_names:
                         index.append(i)
 
@@ -252,26 +241,27 @@ class Subset():
                         index = self.subset
                 if isinstance(self.subset[0], str):
                     index = []
-                    for i, name in enumerate(names_filtred):
+                    for i, name in enumerate(names):
                         if name in self.subset:
                             index.append(i)
         if self.shuffle:
             index = random.sample(index, len(index))
-        return set([names_filtred[i] for i in index])
+        return set([names[i] for i in index])
     
     def __str__(self):
-        return "Subset : " + str(self.subset) + " shuffle : "+ str(self.shuffle) + " filter : "+ str(self.filter)
+        return "Subset : " + str(self.subset) + " shuffle : "+ str(self.shuffle)
+    
 class TrainSubset(Subset):
 
     @config()
-    def __init__(self, subset: Union[str, list[int], list[str], None] = None, shuffle: bool = True, filter: str = None) -> None:
-        super().__init__(subset, shuffle, filter)
+    def __init__(self, subset: Union[str, list[int], list[str], None] = None, shuffle: bool = True) -> None:
+        super().__init__(subset, shuffle)
 
 class PredictionSubset(Subset):
 
     @config()
-    def __init__(self, subset: Union[str, list[int], list[str], None] = None, filter: str = None) -> None:
-        super().__init__(subset, False, filter)
+    def __init__(self, subset: Union[str, list[int], list[str], None] = None) -> None:
+        super().__init__(subset, False)
 
 class Data(ABC):
     
@@ -280,7 +270,6 @@ class Data(ABC):
                         patch : Union[DatasetPatch, None],
                         use_cache : bool,
                         subset : Subset,
-                        num_workers : int,
                         batch_size : int,
                         validation: Union[float, str, list[int], list[str], None] = None,
                         inlineAugmentations: bool = False,
@@ -293,7 +282,7 @@ class Data(ABC):
         self.dataAugmentationsList = dataAugmentationsList
         self.batch_size = batch_size
         self.dataSet_args = dict(groups_src=self.groups_src, inlineAugmentations=inlineAugmentations, dataAugmentationsList = list(self.dataAugmentationsList.values()), use_cache = use_cache, buffer_size=batch_size+1, patch_size=self.patch.patch_size if self.patch is not None else None, overlap=self.patch.overlap if self.patch is not None else None)
-        self.dataLoader_args = dict(num_workers=num_workers if use_cache else 0, pin_memory=True)
+        self.dataLoader_args = dict(num_workers=int(os.environ["KONFAI_WORKERS"]), pin_memory=True)
         self.data : list[list[dict[str, list[DatasetManager]]], dict[str, list[DatasetManager]]] = []
         self.map : list[list[list[tuple[int, int, int]]], list[tuple[int, int, int]]] = []
         self.datasets: dict[str, Dataset] = {}
@@ -547,10 +536,9 @@ class DataTrain(Data):
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
                         use_cache : bool = True,
                         subset : Union[TrainSubset, dict[str, TrainSubset]] = TrainSubset(),
-                        num_workers : int = 4,
                         batch_size : int = 1,
                         validation : Union[float, str, list[int], list[str]] = 0.2) -> None:
-        super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, num_workers, batch_size, validation, inlineAugmentations, augmentations if augmentations else {})
+        super().__init__(dataset_filenames, groups_src, patch, use_cache, subset, batch_size, validation, inlineAugmentations, augmentations if augmentations else {})
 
 class DataPrediction(Data):
 
@@ -560,10 +548,9 @@ class DataPrediction(Data):
                         augmentations : Union[dict[str, DataAugmentationsList], None] = {"DataAugmentation_0" : DataAugmentationsList()},
                         patch : Union[DatasetPatch, None] = DatasetPatch(),
                         subset : Union[PredictionSubset, dict[str, PredictionSubset]] = PredictionSubset(),
-                        num_workers : int = 4,
                         batch_size : int = 1) -> None:
 
-        super().__init__(dataset_filenames, groups_src, patch, False, subset, num_workers, batch_size, dataAugmentationsList=augmentations if augmentations else {})
+        super().__init__(dataset_filenames, groups_src, patch, False, subset, batch_size, dataAugmentationsList=augmentations if augmentations else {})
 
 class DataMetric(Data):
 
@@ -571,7 +558,6 @@ class DataMetric(Data):
     def __init__(self,  dataset_filenames : list[str] = ["default:./Dataset"], 
                         groups_src : dict[str, GroupMetric] = {"default" : GroupMetric()},
                         subset : Union[PredictionSubset, dict[str, PredictionSubset]] = PredictionSubset(),
-                        validation: Union[str, None] = None,
-                        num_workers : int = 4) -> None:
+                        validation: Union[str, None] = None) -> None:
 
-        super().__init__(dataset_filenames=dataset_filenames, groups_src=groups_src, patch=None, use_cache=False, subset=subset, num_workers=num_workers, batch_size=1, validation=validation)
+        super().__init__(dataset_filenames=dataset_filenames, groups_src=groups_src, patch=None, use_cache=False, subset=subset, batch_size=1, validation=validation)

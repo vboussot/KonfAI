@@ -20,6 +20,11 @@ import torch.nn.functional as F
 import sys
 import re
 
+import requests
+from tqdm import tqdm
+import importlib
+from pathlib import Path
+import shutil
 
 def description(model, modelEMA = None, showMemory: bool = True, train: bool = True) -> str:
     values_desc = lambda weights, values: " ".join(["{}({:.2f}) : {:.6f}".format(name.split(":")[-1], weight, value) for (name, value), weight in zip(values.items(), weights.values())])
@@ -35,11 +40,11 @@ def description(model, modelEMA = None, showMemory: bool = True, train: bool = T
 def _getModule(classpath : str, type : str) -> tuple[str, str]:
     if len(classpath.split(":")) > 1:
         module = ".".join(classpath.split(":")[:-1])
-        name = classpath.split(":")[-1] 
+        name = classpath.split(":")[-1]
     else:
         module = type+("." if len(classpath.split(".")) > 2 else "")+".".join(classpath.split(".")[:-1])
         name = classpath.split(".")[-1]
-    return module, name
+    return module, name.split("/")[0]
 
 def cpuInfo() -> str:
     return "CPU ({:.2f} %)".format(psutil.cpu_percent(interval=0.5))
@@ -420,6 +425,8 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
 
     os.environ["CUDA_VISIBLE_DEVICES"] = config["gpu"]
     os.environ["KONFAI_NB_CORES"] = config["cpu"]
+
+    os.environ["KONFAI_WORKERS"] = str(config["num_workers"])
     os.environ["KONFAI_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
     os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
@@ -536,6 +543,37 @@ def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
     return F.grid_sample(data.unsqueeze(0).type(torch.float32), F.affine_grid(matrix[:, :-1,...].type(torch.float32), [1]+list(data.shape), align_corners=True), align_corners=True, mode=mode, padding_mode="reflection").squeeze(0).type(data.dtype)
 
 
+
+def download_url(model_name: str, url: str) -> str:
+    spec = importlib.util.find_spec("konfai")
+    base_path = Path(spec.submodule_search_locations[0]) / "metric" / "models"
+    subdirs = Path(model_name).parent
+    model_dir = base_path / subdirs
+    model_dir.mkdir(exist_ok=True)
+    filetmp = model_dir / ("tmp_"+str(Path(model_name).name))
+    file = model_dir / Path(model_name).name
+    if file.exists():
+        return str(file)
+    
+    try:
+        print(f"[FOCUS] Downloading {model_name} to {file}")
+        with requests.get(url+model_name, stream=True) as r:
+            r.raise_for_status()
+            total = int(r.headers.get('content-length', 0))
+            with open(filetmp, 'wb') as f:
+                with tqdm(total=total, unit='B', unit_scale=True, desc=f"Downloading {model_name}") as pbar:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+        shutil.copy2(filetmp, file)
+        print("Download finished.")
+    except Exception as e:
+        raise e
+    finally:
+        if filetmp.exists():
+            os.remove(filetmp)
+    return str(file)
+    
 SUPPORTED_EXTENSIONS = [
     "mha", "mhd",         # MetaImage
     "nii", "nii.gz",      # NIfTI
