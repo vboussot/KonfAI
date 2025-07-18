@@ -1,17 +1,19 @@
-from enum import Enum
+import ast
 import importlib
-from typing import Callable
+from collections.abc import Callable
+from enum import Enum
+
+import numpy as np
+import SimpleITK as sitk  # noqa: N813
 import torch
 from scipy.interpolate import interp1d
-import numpy as np
-import ast
-from typing import Union
 
-from konfai.utils.config import config
 from konfai.network import network
+from konfai.utils.config import config
+
 
 class NormMode(Enum):
-    NONE = 0,
+    NONE = (0,)
     BATCH = 1
     INSTANCE = 2
     GROUP = 3
@@ -19,227 +21,327 @@ class NormMode(Enum):
     SYNCBATCH = 5
     INSTANCE_AFFINE = 6
 
-def getNorm(normMode: Enum, channels : int, dim: int) -> Union[torch.nn.Module, None]:
-    if normMode == NormMode.BATCH:
-        return getTorchModule("BatchNorm", dim = dim)(channels, affine=True, track_running_stats=True)
-    if normMode == NormMode.INSTANCE:
-        return getTorchModule("InstanceNorm", dim = dim)(channels, affine=False, track_running_stats=False)
-    if normMode == NormMode.INSTANCE_AFFINE:
-        return getTorchModule("InstanceNorm", dim = dim)(channels, affine=True, track_running_stats=False)
-    if normMode == NormMode.SYNCBATCH:
+
+def get_norm(norm_mode: Enum, channels: int, dim: int) -> torch.nn.Module | None:
+    if norm_mode == NormMode.BATCH:
+        return get_torch_module("BatchNorm", dim=dim)(channels, affine=True, track_running_stats=True)
+    if norm_mode == NormMode.INSTANCE:
+        return get_torch_module("InstanceNorm", dim=dim)(channels, affine=False, track_running_stats=False)
+    if norm_mode == NormMode.INSTANCE_AFFINE:
+        return get_torch_module("InstanceNorm", dim=dim)(channels, affine=True, track_running_stats=False)
+    if norm_mode == NormMode.SYNCBATCH:
         return torch.nn.SyncBatchNorm(channels, affine=True, track_running_stats=True)
-    if normMode == NormMode.GROUP:
+    if norm_mode == NormMode.GROUP:
         return torch.nn.GroupNorm(num_groups=32, num_channels=channels)
-    if normMode == NormMode.LAYER:
+    if norm_mode == NormMode.LAYER:
         return torch.nn.GroupNorm(num_groups=1, num_channels=channels)
     return None
 
-class UpSampleMode(Enum):
-    CONV_TRANSPOSE = 0,
-    UPSAMPLE = 1,
 
-class DownSampleMode(Enum):
-    MAXPOOL = 0,
-    AVGPOOL = 1,
+class UpsampleMode(Enum):
+    CONV_TRANSPOSE = (0,)
+    UPSAMPLE = (1,)
+
+
+class DownsampleMode(Enum):
+    MAXPOOL = (0,)
+    AVGPOOL = (1,)
     CONV_STRIDE = 2
 
-def getTorchModule(name_fonction : str, dim : Union[int, None] = None) -> torch.nn.Module:
-    return getattr(importlib.import_module("torch.nn"), "{}".format(name_fonction) + ("{}d".format(dim) if dim is not None else ""))
 
-class BlockConfig():
+def get_torch_module(name_fonction: str, dim: int | None = None) -> torch.nn.Module:
+    return getattr(
+        importlib.import_module("torch.nn"),
+        f"{name_fonction}" + (f"{dim}d" if dim is not None else ""),
+    )
+
+
+class BlockConfig:
 
     @config("BlockConfig")
-    def __init__(self, kernel_size : int = 3, stride : int = 1, padding : int = 1, bias = True, activation : Union[str, Callable[[], torch.nn.Module]] = "ReLU", normMode : Union[str, NormMode, Callable[[int], torch.nn.Module]] = "NONE") -> None:
+    def __init__(
+        self,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        bias=True,
+        activation: str | Callable[[], torch.nn.Module] = "ReLU",
+        norm_mode: str | NormMode | Callable[[int], torch.nn.Module] = "NONE",
+    ) -> None:
         self.kernel_size = kernel_size
         self.bias = bias
         self.stride = stride
         self.padding = padding
         self.activation = activation
-        if normMode is None:
-            self.norm = None
-        elif isinstance(normMode, str):
-            self.norm = NormMode._member_map_[normMode]
-        elif isinstance(normMode, NormMode):
-            self.norm = normMode
+        self.norm_mode = norm_mode
+        self.norm: NormMode | Callable[[int], torch.nn.Module] | None = None
+        if isinstance(norm_mode, str):
+            self.norm = NormMode[norm_mode]
+        else:
+            self.norm = norm_mode
 
-    def getConv(self, in_channels : int, out_channels : int, dim : int) -> torch.nn.Conv3d:
-        return getTorchModule("Conv", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = self.kernel_size, stride = self.stride, padding = self.padding, bias=self.bias)
-    
-    def getNorm(self, channels : int, dim: int) -> torch.nn.Module:
+    def get_conv(self, in_channels: int, out_channels: int, dim: int) -> torch.nn.Conv3d:
+        return get_torch_module("Conv", dim=dim)(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
+            padding=self.padding,
+            bias=self.bias,
+        )
+
+    def get_norm(self, channels: int, dim: int) -> torch.nn.Module:
         if self.norm is None:
             return None
-        return getNorm(self.norm, channels, dim) if isinstance(self.norm, NormMode) else self.norm(channels)
+        return get_norm(self.norm, channels, dim) if isinstance(self.norm, NormMode) else self.norm(channels)
 
-    def getActivation(self) -> torch.nn.Module:
+    def get_activation(self) -> torch.nn.Module:
         if self.activation is None:
             return None
         if isinstance(self.activation, str):
-            return getTorchModule(self.activation.split(";")[0])(*[ast.literal_eval(value) for value in self.activation.split(";")[1:]]) if self.activation != "None" else torch.nn.Identity()
+            return (
+                get_torch_module(self.activation.split(";")[0])(
+                    *[ast.literal_eval(value) for value in self.activation.split(";")[1:]]
+                )
+                if self.activation != "None"
+                else torch.nn.Identity()
+            )
         return self.activation()
-    
+
+
 class ConvBlock(network.ModuleArgsDict):
-    
-    def __init__(self, in_channels : int, out_channels : int, blockConfigs : list[BlockConfig], dim : int, alias : list[list[str]]=[[], [], []]) -> None:
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        block_configs: list[BlockConfig],
+        dim: int,
+        alias: list[list[str]] = [[], [], []],
+    ) -> None:
         super().__init__()
-        for i, blockConfig in enumerate(blockConfigs):
-            self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
-            norm = blockConfig.getNorm(out_channels, dim)
+        for i, block_config in enumerate(block_configs):
+            self.add_module(
+                f"Conv_{i}",
+                block_config.get_conv(in_channels, out_channels, dim),
+                alias=alias[0],
+            )
+            norm = block_config.get_norm(out_channels, dim)
             if norm is not None:
-                self.add_module("Norm_{}".format(i), norm, alias=alias[1])
-            activation = blockConfig.getActivation()
+                self.add_module(f"Norm_{i}", norm, alias=alias[1])
+            activation = block_config.get_activation()
             if activation is not None:
-                self.add_module("Activation_{}".format(i), activation, alias=alias[2])
+                self.add_module(f"Activation_{i}", activation, alias=alias[2])
             in_channels = out_channels
+
 
 class ResBlock(network.ModuleArgsDict):
-    
-    def __init__(self, in_channels : int, out_channels : int, blockConfigs : list[BlockConfig], dim : int, alias : list[list[str]]=[[], [], [], [], []]) -> None:
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        block_configs: list[BlockConfig],
+        dim: int,
+        alias: list[list[str]] = [[], [], [], [], []],
+    ) -> None:
         super().__init__()
-        for i, blockConfig in enumerate(blockConfigs):
-            self.add_module("Conv_{}".format(i), blockConfig.getConv(in_channels, out_channels, dim), alias=alias[0])
-            norm = blockConfig.getNorm(out_channels, dim)
+        for i, block_config in enumerate(block_configs):
+            self.add_module(
+                f"Conv_{i}",
+                block_config.get_conv(in_channels, out_channels, dim),
+                alias=alias[0],
+            )
+            norm = block_config.get_norm(out_channels, dim)
             if norm is not None:
-                self.add_module("Norm_{}".format(i), norm, alias=alias[1])
-            activation = blockConfig.getActivation()
+                self.add_module(f"Norm_{i}", norm, alias=alias[1])
+            activation = block_config.get_activation()
             if activation is not None:
-                self.add_module("Activation_{}".format(i), activation, alias=alias[2])
+                self.add_module(f"Activation_{i}", activation, alias=alias[2])
 
             if in_channels != out_channels:
-                self.add_module("Conv_skip", getTorchModule("Conv", dim)(in_channels, out_channels, 1, blockConfig.stride, bias=blockConfig.bias), alias=alias[3], in_branch=[1], out_branch=[1])    
-                self.add_module("Norm_skip", blockConfig.getNorm(out_channels, dim), alias=alias[4], in_branch=[1], out_branch=[1])    
+                self.add_module(
+                    "Conv_skip",
+                    get_torch_module("Conv", dim)(
+                        in_channels,
+                        out_channels,
+                        1,
+                        block_config.stride,
+                        bias=block_config.bias,
+                    ),
+                    alias=alias[3],
+                    in_branch=[1],
+                    out_branch=[1],
+                )
+                self.add_module(
+                    "Norm_skip",
+                    block_config.get_norm(out_channels, dim),
+                    alias=alias[4],
+                    in_branch=[1],
+                    out_branch=[1],
+                )
             in_channels = out_channels
-            
-        self.add_module("Add", Add(), in_branch=[0,1])
-        self.add_module("Norm_{}".format(i+1), torch.nn.ReLU(inplace=True))
-            
-def downSample(in_channels: int, out_channels: int, downSampleMode: DownSampleMode, dim: int) -> torch.nn.Module:
-    if downSampleMode == DownSampleMode.MAXPOOL:
-        return getTorchModule("MaxPool", dim = dim)(2)
-    if downSampleMode == DownSampleMode.AVGPOOL:
-        return getTorchModule("AvgPool", dim = dim)(2)
-    if downSampleMode == DownSampleMode.CONV_STRIDE:
-        return getTorchModule("Conv", dim)(in_channels, out_channels, kernel_size=2, stride=2, padding=0)
 
-def upSample(in_channels: int, out_channels: int, upSampleMode: UpSampleMode, dim: int, kernel_size: Union[int, list[int]] = 2, stride: Union[int, list[int]] = 2):
-    if upSampleMode == UpSampleMode.CONV_TRANSPOSE:
-        return getTorchModule("ConvTranspose", dim = dim)(in_channels = in_channels, out_channels = out_channels, kernel_size = kernel_size, stride = stride, padding = 0)
+        self.add_module("Add", Add(), in_branch=[0, 1])
+        self.add_module(f"Norm_{i + 1}", torch.nn.ReLU(inplace=True))
+
+
+def downsample(in_channels: int, out_channels: int, downsample_mode: DownsampleMode, dim: int) -> torch.nn.Module:
+    if downsample_mode == DownsampleMode.MAXPOOL:
+        return get_torch_module("MaxPool", dim=dim)(2)
+    if downsample_mode == DownsampleMode.AVGPOOL:
+        return get_torch_module("AvgPool", dim=dim)(2)
+    if downsample_mode == DownsampleMode.CONV_STRIDE:
+        return get_torch_module("Conv", dim)(in_channels, out_channels, kernel_size=2, stride=2, padding=0)
+
+
+def upsample(
+    in_channels: int,
+    out_channels: int,
+    upsample_mode: UpsampleMode,
+    dim: int,
+    kernel_size: int | list[int] = 2,
+    stride: int | list[int] = 2,
+):
+    if upsample_mode == UpsampleMode.CONV_TRANSPOSE:
+        return get_torch_module("ConvTranspose", dim=dim)(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=0,
+        )
     else:
         if dim == 3:
-            upsampleMethod = "trilinear" 
+            upsample_method = "trilinear"
         if dim == 2:
-            upsampleMethod = "bilinear"
+            upsample_method = "bilinear"
         if dim == 1:
-            upsampleMethod = "linear"
-        return torch.nn.Upsample(scale_factor=2, mode=upsampleMethod.lower(), align_corners=False)
+            upsample_method = "linear"
+        return torch.nn.Upsample(scale_factor=2, mode=upsample_method.lower(), align_corners=False)
+
 
 class Unsqueeze(torch.nn.Module):
 
     def __init__(self, dim: int = 0):
         super().__init__()
         self.dim = dim
-    
-    def forward(self, *input : torch.Tensor) -> torch.Tensor:
-        return torch.unsqueeze(input, self.dim)
-    
+
+    def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
+        return torch.unsqueeze(tensor, self.dim)
+
     def extra_repr(self):
-        return "dim={}".format(self.dim)
+        return f"dim={self.dim}"
+
 
 class Permute(torch.nn.Module):
 
-    def __init__(self, dims : list[int]):
+    def __init__(self, dims: list[int]):
         super().__init__()
         self.dims = dims
 
-    def forward(self, input : torch.Tensor) -> torch.Tensor:
-        return torch.permute(input, self.dims)
-    
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return torch.permute(tensor, self.dims)
+
     def extra_repr(self):
-        return "dims={}".format(self.dims)
+        return f"dims={self.dims}"
+
 
 class ToChannels(Permute):
 
-    def __init__(self, dim):
-        super().__init__([0, dim+1, *[i+1 for i in range(dim)]])
-        
+    def __init__(self, dim: int):
+        super().__init__([0, dim + 1, *[i + 1 for i in range(dim)]])
+
+
 class ToFeatures(Permute):
 
-    def __init__(self, dim):
-        super().__init__([0, *[i+2 for i in range(dim)], 1])        
+    def __init__(self, dim: int):
+        super().__init__([0, *[i + 2 for i in range(dim)], 1])
+
 
 class Add(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-    
-    def forward(self, *input : torch.Tensor) -> torch.Tensor:
-        return torch.sum(torch.stack(input), dim=0)
-    
+
+    def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
+        return torch.sum(torch.stack(tensor), dim=0)
+
+
 class Multiply(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, *input : torch.Tensor) -> torch.Tensor:
-        return torch.mul(*input)
+    def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
+        return torch.mul(*tensor)
+
 
 class Concat(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, *input : torch.Tensor) -> torch.Tensor:
-        return torch.cat(input, dim=1)
+    def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
+        return torch.cat(tensor, dim=1)
+
 
 class Print(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        print(input.shape)
-        return input
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        print(tensor.shape)
+        return tensor
+
 
 class Write(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        import SimpleITK as sitk
-        sitk.WriteImage(sitk.GetImageFromArray(input.clone()[0][0].cpu().numpy()), "./Data.mha")
-        return input
-    
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+
+        sitk.WriteImage(sitk.GetImageFromArray(tensor.clone()[0][0].cpu().numpy()), "./Data.mha")
+        return tensor
+
+
 class Exit(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         exit(0)
-    
+
+
 class Detach(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return input.detach()
-    
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.detach()
+
+
 class Negative(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return -input
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return -tensor
+
 
 class GetShape(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.tensor(input.shape)
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return torch.tensor(tensor.shape)
+
 
 class ArgMax(torch.nn.Module):
 
@@ -247,42 +349,46 @@ class ArgMax(torch.nn.Module):
         super().__init__()
         self.dim = dim
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.argmax(input, dim=self.dim).unsqueeze(self.dim)
-    
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
+
+
 class Select(torch.nn.Module):
 
     def __init__(self, slices: list[slice]) -> None:
         super().__init__()
         self.slices = tuple(slices)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        result = input[self.slices]
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        result = tensor[self.slices]
         for i, s in enumerate(range(len(result.shape))):
             if s == 1:
-              result = result.squeeze(dim=i)  
+                result = result.squeeze(dim=i)
         return result
+
 
 class NormalNoise(torch.nn.Module):
 
-    def __init__(self, dim: Union[int, None] = None) -> None:
+    def __init__(self, dim: int | None = None) -> None:
         super().__init__()
         self.dim = dim
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.dim is not None:
-            return torch.randn(self.dim).to(input.device)
+            return torch.randn(self.dim).to(tensor.device)
         else:
-            return torch.randn_like(input).to(input.device)
-    
+            return torch.randn_like(tensor).to(tensor.device)
+
+
 class Const(torch.nn.Module):
 
     def __init__(self, shape: list[int], std: float) -> None:
         super().__init__()
-        self.noise = torch.nn.parameter.Parameter(torch.randn(shape)*std)
-        
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self.noise.to(input.device)
+        self.noise = torch.nn.parameter.Parameter(torch.randn(shape) * std)
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self.noise.to(tensor.device)
+
 
 class HistogramNoise(torch.nn.Module):
 
@@ -290,80 +396,118 @@ class HistogramNoise(torch.nn.Module):
         super().__init__()
         self.x = np.linspace(0, 1, num=n, endpoint=True)
         self.sigma = sigma
-    
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        self.function = interp1d(self.x, self.x+np.random.normal(0, self.sigma, self.x.shape[0]), kind='cubic')
-        result = torch.empty_like(input)
 
-        for value in torch.unique(input):
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        self.function = interp1d(
+            self.x,
+            self.x + np.random.normal(0, self.sigma, self.x.shape[0]),
+            kind="cubic",
+        )
+        result = torch.empty_like(tensor)
+
+        for value in torch.unique(tensor):
             x = self.function(value.cpu())
-            result[torch.where(input == value)] = torch.tensor(x, device=input.device).float()
+            result[torch.where(tensor == value)] = torch.tensor(x, device=tensor.device).float()
         return result
 
-class Subset(torch.nn.Module):
-	def __init__(self, slices: list[slice]):
-		super().__init__()
-		self.slices = [slice(None, None), slice(None, None)] + slices
 
-	def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-		return tensor[self.slices]
+class Subset(torch.nn.Module):
+    def __init__(self, slices: list[slice]):
+        super().__init__()
+        self.slices = [slice(None, None), slice(None, None)] + slices
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor[self.slices]
+
 
 class View(torch.nn.Module):
-	def __init__(self, size: list[int]):
-		super().__init__()
-		self.size = size
+    def __init__(self, size: list[int]):
+        super().__init__()
+        self.size = size
 
-	def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-		return tensor.view(self.size)
-        
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.view(self.size)
+
+
 class LatentDistribution(network.ModuleArgsDict):
 
-    class LatentDistribution_Linear(torch.nn.Module):
+    class LatentDistributionLinear(torch.nn.Module):
 
-        def __init__(self, shape: list[int], latentDim: int) -> None:
+        def __init__(self, shape: list[int], latent_dim: int) -> None:
             super().__init__()
-            self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), latentDim)
+            self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), latent_dim)
 
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return torch.unsqueeze(self.linear(input), 1)
-        
-    class LatentDistribution_Decoder(torch.nn.Module):
-        
-        def __init__(self, shape: list[int], latentDim: int) -> None:
+        def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+            return torch.unsqueeze(self.linear(tensor), 1)
+
+    class LatentDistributionDecoder(torch.nn.Module):
+
+        def __init__(self, shape: list[int], latent_dim: int) -> None:
             super().__init__()
-            self.linear = torch.nn.Linear(latentDim, torch.prod(torch.tensor(shape)))
+            self.linear = torch.nn.Linear(latent_dim, torch.prod(torch.tensor(shape)))
             self.shape = shape
 
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self.linear(input).view(-1, *[int(i) for i in self.shape])
-    
-    class LatentDistribution_Z(torch.nn.Module):
+        def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+            return self.linear(tensor).view(-1, *[int(i) for i in self.shape])
+
+    class LatentDistributionZ(torch.nn.Module):
 
         def __init__(self) -> None:
             super().__init__()
 
         def forward(self, mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
-            return torch.exp(log_std/2)*torch.rand_like(mu)+mu
-    
-    def __init__(self, shape: list[int], latentDim: int) -> None:
-        super().__init__()        
-        self.add_module("Flatten", torch.nn.Flatten(1))
-        self.add_module("mu", LatentDistribution.LatentDistribution_Linear(shape, latentDim), out_branch = [1])
-        self.add_module("log_std", LatentDistribution.LatentDistribution_Linear(shape, latentDim), out_branch = [2])
+            return torch.exp(log_std / 2) * torch.rand_like(mu) + mu
 
-        self.add_module("z", LatentDistribution.LatentDistribution_Z(), in_branch=[1,2], out_branch=[3])
-        self.add_module("Concat", Concat(), in_branch=[1,2,3])
-        self.add_module("DecoderInput", LatentDistribution.LatentDistribution_Decoder(shape, latentDim), in_branch=[3])
+    def __init__(self, shape: list[int], latent_dim: int) -> None:
+        super().__init__()
+        self.add_module("Flatten", torch.nn.Flatten(1))
+        self.add_module(
+            "mu",
+            LatentDistribution.LatentDistributionLinear(shape, latent_dim),
+            out_branch=[1],
+        )
+        self.add_module(
+            "log_std",
+            LatentDistribution.LatentDistributionLinear(shape, latent_dim),
+            out_branch=[2],
+        )
+
+        self.add_module(
+            "z",
+            LatentDistribution.LatentDistributionZ(),
+            in_branch=[1, 2],
+            out_branch=[3],
+        )
+        self.add_module("Concat", Concat(), in_branch=[1, 2, 3])
+        self.add_module(
+            "DecoderInput",
+            LatentDistribution.LatentDistributionDecoder(shape, latent_dim),
+            in_branch=[3],
+        )
+
 
 class Attention(network.ModuleArgsDict):
 
-    def __init__(self, F_g : int, F_l : int, F_int : int, dim : int):
+    def __init__(self, f_g: int, f_l: int, f_int: int, dim: int):
         super().__init__()
-        self.add_module("W_x", getTorchModule("Conv", dim = dim)(in_channels = F_l, out_channels = F_int, kernel_size=1, stride=2, padding=0), in_branch=[0], out_branch=[0])
-        self.add_module("W_g", getTorchModule("Conv", dim = dim)(in_channels = F_g, out_channels = F_int, kernel_size=1, stride=1, padding=0), in_branch=[1], out_branch=[1])
-        self.add_module("Add", Add(), in_branch=[0,1])
+        self.add_module(
+            "W_x",
+            get_torch_module("Conv", dim=dim)(in_channels=f_l, out_channels=f_int, kernel_size=1, stride=2, padding=0),
+            in_branch=[0],
+            out_branch=[0],
+        )
+        self.add_module(
+            "W_g",
+            get_torch_module("Conv", dim=dim)(in_channels=f_g, out_channels=f_int, kernel_size=1, stride=1, padding=0),
+            in_branch=[1],
+            out_branch=[1],
+        )
+        self.add_module("Add", Add(), in_branch=[0, 1])
         self.add_module("ReLU", torch.nn.ReLU(inplace=True))
-        self.add_module("Conv", getTorchModule("Conv", dim = dim)(in_channels = F_int, out_channels = 1, kernel_size=1,stride=1, padding=0))
+        self.add_module(
+            "Conv",
+            get_torch_module("Conv", dim=dim)(in_channels=f_int, out_channels=1, kernel_size=1, stride=1, padding=0),
+        )
         self.add_module("Sigmoid", torch.nn.Sigmoid())
         self.add_module("Upsample", torch.nn.Upsample(scale_factor=2))
-        self.add_module("Multiply", Multiply(), in_branch=[2,0])
+        self.add_module("Multiply", Multiply(), in_branch=[2, 0])

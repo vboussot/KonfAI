@@ -1,16 +1,61 @@
-import os
 import datetime
+import os
 
-MODELS_DIRECTORY = lambda : os.environ["KONFAI_MODELS_DIRECTORY"]
-CHECKPOINTS_DIRECTORY =lambda : os.environ["KONFAI_CHECKPOINTS_DIRECTORY"]
-MODEL = lambda : os.environ["KONFAI_MODEL"]
-PREDICTIONS_DIRECTORY =lambda : os.environ["KONFAI_PREDICTIONS_DIRECTORY"]
-EVALUATIONS_DIRECTORY =lambda : os.environ["KONFAI_EVALUATIONS_DIRECTORY"]
-STATISTICS_DIRECTORY = lambda : os.environ["KONFAI_STATISTICS_DIRECTORY"]
-SETUPS_DIRECTORY = lambda : os.environ["KONFAI_SETUPS_DIRECTORY"]
-CONFIG_FILE = lambda : os.environ["KONFAI_CONFIG_FILE"]
-KONFAI_STATE = lambda : os.environ["KONFAI_STATE"]
-KONFAI_ROOT = lambda : os.environ["KONFAI_ROOT"]
-CUDA_VISIBLE_DEVICES = lambda : os.environ["CUDA_VISIBLE_DEVICES"]
-KONFAI_NB_CORES = lambda : os.environ["KONFAI_NB_CORES"]
-DATE = lambda : datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+
+def models_directory() -> str:
+    return _get_env("KONFAI_MODELS_DIRECTORY")
+
+
+def checkpoints_directory() -> str:
+    return _get_env("KONFAI_CHECKPOINTS_DIRECTORY")
+
+
+def path_to_models() -> str:
+    return _get_env("KONFAI_MODEL")
+
+
+def predictions_directory() -> str:
+    return _get_env("KONFAI_PREDICTIONS_DIRECTORY")
+
+
+def evaluations_directory() -> str:
+    return _get_env("KONFAI_EVALUATIONS_DIRECTORY")
+
+
+def statistics_directory() -> str:
+    return _get_env("KONFAI_STATISTICS_DIRECTORY")
+
+
+def setups_directory() -> str:
+    return _get_env("KONFAI_SETUPS_DIRECTORY")
+
+
+def config_file() -> str:
+    return _get_env("KONFAI_config_file")
+
+
+def konfai_state() -> str:
+    return _get_env("KONFAI_STATE")
+
+
+def konfai_root() -> str:
+    return _get_env("konfai_root")
+
+
+def cuda_visible_devices() -> str:
+    return _get_env("CUDA_VISIBLE_DEVICES")
+
+
+def konfai_nb_cores() -> str:
+    return _get_env("KONFAI_NB_CORES")
+
+
+def current_date() -> str:
+    return datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+
+
+def _get_env(var: str) -> str:
+    value = os.environ.get(var)
+    if value is None:
+        raise RuntimeError(f"Environment variable '{var}' is not set.")
+    return value

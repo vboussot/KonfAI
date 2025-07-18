@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "konfai"
-version = "1.1.6"
+version = "1.1.8"
 description = "Modular and configurable Deep Learning framework with YAML and PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -41,7 +41,6 @@ konfai-cluster = "konfai.main:cluster"
 vtk = ["vtk"]
 lpips = ["lpips"]
 cluster = ["submitit"]
-plot = ["matplotlib"]
 
 [tool.poetry.dev-dependencies]
 pytest = "^8.0"
