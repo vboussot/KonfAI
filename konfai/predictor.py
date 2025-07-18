@@ -1,109 +1,38 @@
-from abc import ABC, abstractmethod
 import builtins
-import importlib
-import shutil
-import torch
-import tqdm
-import os
-
-from konfai import MODELS_DIRECTORY, PREDICTIONS_DIRECTORY, CONFIG_FILE, MODEL, KONFAI_ROOT
-from konfai.utils.config import config
-from konfai.utils.utils import State, get_patch_slices_from_nb_patch_per_dim, NeedDevice, _getModule, DistributedObject, DataLog, description, PredictorError
-from konfai.utils.dataset import Dataset, Attribute
-from konfai.data.data_manager import DataPrediction, DatasetIter
-from konfai.data.patching import Accumulator, PathCombine
-from konfai.network.network import ModelLoader, Network, NetState, CPU_Model
-from konfai.data.transform import Transform, TransformLoader
-
-from torch.utils.tensorboard.writer import SummaryWriter
-from typing import Union
-import numpy as np
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-import importlib
 import copy
+import importlib
+import os
+import shutil
+from abc import ABC, abstractmethod
 from collections import defaultdict
 
-class OutDataset(Dataset, NeedDevice, ABC):
+import numpy as np
+import torch
+import tqdm
+from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard.writer import SummaryWriter
 
-    def __init__(self, filename: str, group: str, before_reduction_transforms : dict[str, TransformLoader], after_reduction_transforms : dict[str, TransformLoader], final_transforms : dict[str, TransformLoader], patchCombine: Union[str, None], reduction: str) -> None: 
-        filename, format = filename.split(":")
-        super().__init__(filename, format)
-        self.group = group
-        self._before_reduction_transforms = before_reduction_transforms
-        self._after_reduction_transforms = after_reduction_transforms
-        self._final_transforms = final_transforms
-        self._patchCombine = patchCombine
-        self.reduction_classpath = reduction
-        self.reduction = None
-       
-        self.before_reduction_transforms : list[Transform] = []
-        self.after_reduction_transforms : list[Transform] = []
-        self.final_transforms : list[Transform] = []
-        self.patchCombine: PathCombine = None
+from konfai import config_file, konfai_root, models_directory, path_to_models, predictions_directory
+from konfai.data.data_manager import DataPrediction, DatasetIter
+from konfai.data.patching import Accumulator, PathCombine
+from konfai.data.transform import Transform, TransformLoader
+from konfai.network.network import CPUModel, ModelLoader, NetState, Network
+from konfai.utils.config import config
+from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.utils import DataLog, DistributedObject, NeedDevice, PredictorError, State, description, get_module
 
-        self.output_layer_accumulator: dict[int, dict[int, Accumulator]] = {}
-        self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
-        self.names: dict[int, str] = {}
-        self.nb_data_augmentation = 0
 
-    def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
-        transforms_type = ["before_reduction_transforms", "after_reduction_transforms", "final_transforms"]
-        for name, _transform_type, transform_type in [(k, getattr(self, "_{}".format(k)), getattr(self, k)) for k in transforms_type]:
-            
-            if _transform_type is not None:
-                for classpath, transform in _transform_type.items():
-                    transform = transform.getTransform(classpath, DL_args =  "{}.outsDataset.{}.OutDataset.{}".format(KONFAI_ROOT(), name_layer, name))
-                    transform.setDatasets(datasets)
-                    transform_type.append(transform)
-
-        if self._patchCombine is not None:
-            module, name = _getModule(self._patchCombine, "konfai.data.patching")                                                      
-            self.patchCombine = config("{}.outsDataset.{}.OutDataset".format(KONFAI_ROOT(), name_layer))(getattr(importlib.import_module(module), name))(config = None)
-
-        module, name = _getModule(self.reduction_classpath, "konfai.predictor")
-        if module == "konfai.predictor":
-            self.reduction = getattr(importlib.import_module(module), name)
-        else:
-            self.reduction = config("{}.outsDataset.{}.OutDataset.{}".format(KONFAI_ROOT(), name_layer, self.reduction_classpath))(getattr(importlib.import_module(module), name))(config = None)
-       
-    
-    def setPatchConfig(self, patchSize: Union[list[int], None], overlap: Union[int, None], nb_data_augmentation: int) -> None:
-        if patchSize is not None and overlap is not None:
-            if self.patchCombine is not None:
-                self.patchCombine.setPatchConfig(patchSize, overlap)
-        else:
-            self.patchCombine = None
-        self.nb_data_augmentation = nb_data_augmentation
-    
-    def setDevice(self, device: torch.device):
-        super().setDevice(device)
-        transforms_type = ["before_reduction_transforms", "after_reduction_transforms", "final_transforms"]
-        for transform_type in [(getattr(self, k)) for k in transforms_type]:
-            if transform_type is not None:
-                for transform in transform_type:
-                    transform.setDevice(device)       
+class Reduction(ABC):
 
     @abstractmethod
-    def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
-        pass
-
-    def isDone(self, index: int) -> bool:
-        return len(self.output_layer_accumulator[index]) == self.nb_data_augmentation and all([acc.isFull() for acc in self.output_layer_accumulator[index].values()])
-
-    @abstractmethod
-    def getOutput(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        pass
-
-    def write(self, index: int, name: str, layer: torch.Tensor):
-        super().write(self.group, name, layer.numpy(), self.attributes[index][0][0])
-        self.attributes.pop(index)
-
-class Reduction():
-
     def __init__(self):
         pass
+
+    @abstractmethod
+    def __call__(self, result: torch.Tensor) -> torch.Tensor:
+        pass
+
 
 class Mean(Reduction):
 
@@ -112,193 +41,554 @@ class Mean(Reduction):
 
     def __call__(self, result: torch.Tensor) -> torch.Tensor:
         return torch.mean(result.float(), dim=0)
-        
+
+
 class Median(Reduction):
 
     def __init__(self):
         pass
-    
+
     def __call__(self, result: torch.Tensor) -> torch.Tensor:
         return torch.median(result.float(), dim=0).values
 
-class OutSameAsGroupDataset(OutDataset):
 
-    @config("OutDataset")
-    def __init__(self, sameAsGroup: str = "default", dataset_filename: str = "default:./Dataset:mha", group: str = "default", before_reduction_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, after_reduction_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, final_transforms : dict[str, TransformLoader] = {"default:Normalize": TransformLoader()}, patchCombine: Union[str, None] = None, reduction: str = "mean", inverse_transform: bool = True) -> None:
-        super().__init__(dataset_filename, group, before_reduction_transforms, after_reduction_transforms, final_transforms, patchCombine, reduction)
-        self.group_src, self.group_dest = sameAsGroup.split(":")
+class OutputDataset(Dataset, NeedDevice, ABC):
+
+    def __init__(
+        self,
+        filename: str,
+        group: str,
+        before_reduction_transforms: dict[str, TransformLoader],
+        after_reduction_transforms: dict[str, TransformLoader],
+        final_transforms: dict[str, TransformLoader],
+        patch_combine: str | None,
+        reduction: str,
+    ) -> None:
+        filename, file_format = filename.split(":")
+        super().__init__(filename, file_format)
+        self.group = group
+        self._before_reduction_transforms = before_reduction_transforms
+        self._after_reduction_transforms = after_reduction_transforms
+        self._final_transforms = final_transforms
+        self._patch_combine = patch_combine
+        self.reduction_classpath = reduction
+        self.reduction: Reduction
+
+        self.before_reduction_transforms: list[Transform] = []
+        self.after_reduction_transforms: list[Transform] = []
+        self.final_transforms: list[Transform] = []
+        self.patch_combine: PathCombine | None = None
+
+        self.output_layer_accumulator: dict[int, dict[int, Accumulator]] = {}
+        self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
+        self.names: dict[int, str] = {}
+        self.nb_data_augmentation = 0
+
+    @abstractmethod
+    def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
+        transforms_type = [
+            "before_reduction_transforms",
+            "after_reduction_transforms",
+            "final_transforms",
+        ]
+        for name, _transform_type, transform_type in [
+            (k, getattr(self, f"_{k}"), getattr(self, k)) for k in transforms_type
+        ]:
+
+            if _transform_type is not None:
+                for classpath, transform in _transform_type.items():
+                    transform = transform.get_transform(
+                        classpath,
+                        konfai_args=f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{name}",
+                    )
+                    transform.set_datasets(datasets)
+                    transform_type.append(transform)
+
+        if self._patch_combine is not None:
+            module, name = get_module(self._patch_combine, "konfai.data.patching")
+            self.patch_combine = config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
+                getattr(importlib.import_module(module), name)
+            )(config=None)
+
+        module, name = get_module(self.reduction_classpath, "konfai.predictor")
+        if module == "konfai.predictor":
+            self.reduction = getattr(importlib.import_module(module), name)()
+        else:
+            self.reduction = config(
+                f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{self.reduction_classpath}"
+            )(getattr(importlib.import_module(module), name))(config=None)
+
+    def set_patch_config(
+        self,
+        patch_size: list[int] | None,
+        overlap: int | None,
+        nb_data_augmentation: int,
+    ) -> None:
+        if patch_size is not None and overlap is not None:
+            if self.patch_combine is not None:
+                self.patch_combine.set_patch_config(patch_size, overlap)
+        else:
+            self.patch_combine = None
+        self.nb_data_augmentation = nb_data_augmentation
+
+    def to(self, device: torch.device):
+        super().to(device)
+        transforms_type = [
+            "before_reduction_transforms",
+            "after_reduction_transforms",
+            "final_transforms",
+        ]
+        for transform_type in [(getattr(self, k)) for k in transforms_type]:
+            if transform_type is not None:
+                for transform in transform_type:
+                    transform.to(device)
+
+    @abstractmethod
+    def add_layer(
+        self,
+        index_dataset: int,
+        index_augmentation: int,
+        index_patch: int,
+        layer: torch.Tensor,
+        dataset: DatasetIter,
+    ):
+        pass
+
+    def is_done(self, index: int) -> bool:
+        return len(self.output_layer_accumulator[index]) == self.nb_data_augmentation and all(
+            acc.is_full() for acc in self.output_layer_accumulator[index].values()
+        )
+
+    @abstractmethod
+    def get_output(self, index: int, dataset: DatasetIter) -> torch.Tensor:
+        pass
+
+    def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
+        super().write(self.group, name, layer.numpy(), self.attributes[index][0][0])
+        self.attributes.pop(index)
+
+
+class OutSameAsGroupDataset(OutputDataset):
+
+    @config("OutputDataset")
+    def __init__(
+        self,
+        same_as_group: str = "default",
+        dataset_filename: str = "default:./Dataset:mha",
+        group: str = "default",
+        before_reduction_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
+        after_reduction_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
+        final_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
+        patch_combine: str | None = None,
+        reduction: str = "Mean",
+        inverse_transform: bool = True,
+    ) -> None:
+        super().__init__(
+            dataset_filename,
+            group,
+            before_reduction_transforms,
+            after_reduction_transforms,
+            final_transforms,
+            patch_combine,
+            reduction,
+        )
+        self.group_src, self.group_dest = same_as_group.split(":")
         self.inverse_transform = inverse_transform
 
-    def addLayer(self, index_dataset: int, index_augmentation: int, index_patch: int, layer: torch.Tensor, dataset: DatasetIter):
-        if index_dataset not in self.output_layer_accumulator or index_augmentation not in self.output_layer_accumulator[index_dataset]:
-            input_dataset = dataset.getDatasetFromIndex(self.group_dest, index_dataset)
+    def add_layer(
+        self,
+        index_dataset: int,
+        index_augmentation: int,
+        index_patch: int,
+        layer: torch.Tensor,
+        dataset: DatasetIter,
+    ):
+        if (
+            index_dataset not in self.output_layer_accumulator
+            or index_augmentation not in self.output_layer_accumulator[index_dataset]
+        ):
+            input_dataset = dataset.get_dataset_from_index(self.group_dest, index_dataset)
             if index_dataset not in self.output_layer_accumulator:
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
                 self.names[index_dataset] = input_dataset.name
             self.attributes[index_dataset][index_augmentation] = {}
 
-            self.output_layer_accumulator[index_dataset][index_augmentation] = Accumulator(input_dataset.patch.getPatch_slices(index_augmentation), input_dataset.patch.patch_size, self.patchCombine, batch=False)
+            self.output_layer_accumulator[index_dataset][index_augmentation] = Accumulator(
+                input_dataset.patch.get_patch_slices(index_augmentation),
+                input_dataset.patch.patch_size,
+                self.patch_combine,
+                batch=False,
+            )
 
-            for i in range(len(input_dataset.patch.getPatch_slices(index_augmentation))):
+            for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
                 self.attributes[index_dataset][index_augmentation][i] = Attribute(input_dataset.cache_attributes[0])
 
         if self.inverse_transform:
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].post_transforms):
-                layer = transform.inverse(self.names[index_dataset], layer, self.attributes[index_dataset][index_augmentation][index_patch])
-        self.output_layer_accumulator[index_dataset][index_augmentation].addLayer(index_patch, layer)
-
+            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
+                layer = transform.inverse(
+                    self.names[index_dataset],
+                    layer,
+                    self.attributes[index_dataset][index_augmentation][index_patch],
+                )
+        self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
     def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
         super().load(name_layer, datasets, groups)
-        
+
         if self.group_src not in groups.keys():
-            raise PredictorError(
-                f"Source group '{self.group_src}' not found. Available groups: {list(groups.keys())}."
-            )
+            raise PredictorError(f"Source group '{self.group_src}' not found. Available groups: {list(groups.keys())}.")
 
         if self.group_dest not in groups[self.group_src]:
             raise PredictorError(
                 f"Destination group '{self.group_dest}' not found. Available groups: {groups[self.group_src]}."
             )
-    
-    def _getOutput(self, index: int, index_augmentation: int, dataset: DatasetIter) -> torch.Tensor:
+
+    def _get_output(self, index: int, index_augmentation: int, dataset: DatasetIter) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()
         if index_augmentation > 0:
-            
+
             i = 0
-            index_augmentation_tmp = index_augmentation-1
-            for dataAugmentations in dataset.dataAugmentationsList:
-                if index_augmentation_tmp >= i and index_augmentation_tmp < i+dataAugmentations.nb:
-                    for dataAugmentation in reversed(dataAugmentations.dataAugmentations):
-                        layer = dataAugmentation.inverse(index, index_augmentation_tmp-i, layer)
+            index_augmentation_tmp = index_augmentation - 1
+            for data_augmentations in dataset.data_augmentations_list:
+                if index_augmentation_tmp >= i and index_augmentation_tmp < i + data_augmentations.nb:
+                    for data_augmentation in reversed(data_augmentations.data_augmentations):
+                        layer = data_augmentation.inverse(index, index_augmentation_tmp - i, layer)
                     break
-                i += dataAugmentations.nb
+                i += data_augmentations.nb
 
         for transform in self.before_reduction_transforms:
             layer = transform(self.names[index], layer, self.attributes[index][index_augmentation][0])
-        
+
         return layer
 
-    def getOutput(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        result = torch.cat([self._getOutput(index, index_augmentation, dataset).unsqueeze(0) for index_augmentation in self.output_layer_accumulator[index].keys()], dim=0)
+    def get_output(self, index: int, dataset: DatasetIter) -> torch.Tensor:
+        result = torch.cat(
+            [
+                self._get_output(index, index_augmentation, dataset).unsqueeze(0)
+                for index_augmentation in self.output_layer_accumulator[index].keys()
+            ],
+            dim=0,
+        )
         self.output_layer_accumulator.pop(index)
         result = self.reduction(result.float()).to(result.dtype)
-            
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
         if self.inverse_transform:
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].pre_transforms):
+            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
                 result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
-        
+
         for transform in self.final_transforms:
-            result = transform(self.names[index], result, self.attributes[index][0][0]) 
+            result = transform(self.names[index], result, self.attributes[index][0][0])
         return result
 
-class OutDatasetLoader():
 
-    @config("OutDataset")
+class OutputDatasetLoader:
+
+    @config("OutputDataset")
     def __init__(self, name_class: str = "OutSameAsGroupDataset") -> None:
         self.name_class = name_class
 
-    def getOutDataset(self, layer_name: str) -> OutDataset:
-        return getattr(importlib.import_module("konfai.predictor"), self.name_class)(config = None, DL_args = "Predictor.outsDataset.{}".format(layer_name))
+    def get_output_dataset(self, layer_name: str) -> OutputDataset:
+        return getattr(importlib.import_module("konfai.predictor"), self.name_class)(
+            config=None, konfai_args=f"Predictor.outputs_dataset.{layer_name}"
+        )
 
-class _Predictor():
 
-    def __init__(self, world_size: int, global_rank: int, local_rank: int, autocast: bool, predict_path: str, data_log: Union[list[str], None], outsDataset: dict[str, OutDataset], modelComposite: DDP, dataloader_prediction: DataLoader) -> None:
-        self.world_size = world_size        
+class _Predictor:
+    """
+    Internal class that runs distributed inference over a dataset using a composite model.
+
+    This class handles patch-wise prediction, output accumulation, logging to TensorBoard, and
+    writing final predictions to disk. It is designed to be used as a context manager and
+    supports model ensembles via `ModelComposite`.
+
+    Args:
+        world_size (int): Total number of processes or GPUs used.
+        global_rank (int): Rank of the current process across all nodes.
+        local_rank (int): Local GPU index within a single node.
+        autocast (bool): Whether to use automatic mixed precision (AMP).
+        predict_path (str): Output directory path where predictions and metrics are saved.
+        data_log (list[str] | None): List of logging targets in the format 'group/DataLogType/N'.
+        outputs_dataset (dict[str, OutputDataset]): Dictionary of output datasets to store predictions.
+        model_composite (DDP): Distributed model container that wraps the prediction model(s).
+        dataloader_prediction (DataLoader): DataLoader that provides prediction batches.
+    """
+
+    def __init__(
+        self,
+        world_size: int,
+        global_rank: int,
+        local_rank: int,
+        autocast: bool,
+        predict_path: str,
+        data_log: list[str] | None,
+        outputs_dataset: dict[str, OutputDataset],
+        model_composite: DDP,
+        dataloader_prediction: DataLoader,
+    ) -> None:
+        self.world_size = world_size
         self.global_rank = global_rank
         self.local_rank = local_rank
 
-        self.modelComposite = modelComposite
+        self.model_composite = model_composite
         self.dataloader_prediction = dataloader_prediction
-        self.outsDataset = outsDataset
+        self.outputs_dataset = outputs_dataset
         self.autocast = autocast
-        
+
         self.it = 0
 
-        self.device = self.modelComposite.device
+        self.device = self.model_composite.device
         self.dataset: DatasetIter = self.dataloader_prediction.dataset
-        patch_size, overlap = self.dataset.getPatchConfig()
-        for outDataset in self.outsDataset.values():
-            outDataset.setPatchConfig([size for size in patch_size if size > 1], overlap, np.max([int(np.sum([data_augmentation.nb for data_augmentation in self.dataset.dataAugmentationsList])+1), 1]))
-        self.data_log : dict[str, tuple[DataLog, int]] = {}
+        patch_size, overlap = self.dataset.get_patch_config()
+        for output_dataset in self.outputs_dataset.values():
+            output_dataset.set_patch_config(
+                [size for size in patch_size if size > 1] if patch_size else None,
+                overlap,
+                np.max(
+                    [
+                        int(
+                            np.sum([data_augmentation.nb for data_augmentation in self.dataset.data_augmentations_list])
+                            + 1
+                        ),
+                        1,
+                    ]
+                ),
+            )
+        self.data_log: dict[str, tuple[DataLog, int]] = {}
         if data_log is not None:
             for data in data_log:
-                self.data_log[data.split("/")[0].replace(":", ".")] = (DataLog.__getitem__(data.split("/")[1]).value[0], int(data.split("/")[2]))
-        self.tb = SummaryWriter(log_dir = predict_path+"Metric/") if len([network for network in self.modelComposite.module.getNetworks().values() if network.measure is not None]) or len(self.data_log) else None
-        
+                self.data_log[data.split("/")[0].replace(":", ".")] = (
+                    DataLog[data.split("/")[1]],
+                    int(data.split("/")[2]),
+                )
+        self.tb = (
+            SummaryWriter(log_dir=predict_path + "Metric/")
+            if len(
+                [
+                    network
+                    for network in self.model_composite.module.get_networks().values()
+                    if network.measure is not None
+                ]
+            )
+            or len(self.data_log)
+            else None
+        )
+
     def __enter__(self):
+        """
+        Enters the prediction context and returns the predictor instance.
+        """
         return self
-    
-    def __exit__(self, type, value, traceback):
+
+    def __exit__(self, exc_type, value, traceback):
+        """
+        Closes the TensorBoard writer upon exit.
+        """
         if self.tb:
             self.tb.close()
 
-    def getInput(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int, str, bool]]) -> dict[tuple[str, bool], torch.Tensor]:
-        return {(k, v[5][0].item()) : v[0] for k, v in data_dict.items()}
-    
+    def get_input(
+        self,
+        data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
+    ) -> dict[tuple[str, bool], torch.Tensor]:
+        return {(k, v[5][0]): v[0] for k, v in data_dict.items()}
+
     @torch.no_grad()
     def run(self):
-        self.modelComposite.eval()  
-        self.modelComposite.module.setState(NetState.PREDICTION)
-        desc = lambda : "Prediction : {}".format(description(self.modelComposite))
-        self.dataloader_prediction.dataset.load("Prediction")
-        with tqdm.tqdm(iterable = enumerate(self.dataloader_prediction), leave=True, desc = desc(), total=len(self.dataloader_prediction), ncols=0) as batch_iter:
-            for it, data_dict in batch_iter:
-                with torch.amp.autocast('cuda', enabled=self.autocast):
-                    input = self.getInput(data_dict)
-                    for name, output in self.modelComposite(input, list(self.outsDataset.keys())):
-                        self._predict_log(data_dict)
-                        outDataset = self.outsDataset[name]
-                        for i, (index, patch_augmentation, patch_index) in enumerate([(int(index), int(patch_augmentation), int(patch_index)) for index, patch_augmentation, patch_index in zip(list(data_dict.values())[0][1], list(data_dict.values())[0][2], list(data_dict.values())[0][3])]):
-                            outDataset.addLayer(index, patch_augmentation, patch_index, output[i].cpu(), self.dataset)
-                            if outDataset.isDone(index):
-                                outDataset.write(index, self.dataset.getDatasetFromIndex(list(data_dict.keys())[0], index).name.split("/")[-1], outDataset.getOutput(index, self.dataset))
+        """
+        Run the full prediction loop.
 
-                    batch_iter.set_description(desc())
+        Iterates over the prediction DataLoader, performs inference using the composite model,
+        applies reduction (e.g., mean), and writes the final results using each `OutputDataset`.
+
+        Also logs intermediate data and metrics to TensorBoard if enabled.
+        """
+
+        self.model_composite.eval()
+        self.model_composite.module.set_state(NetState.PREDICTION)
+        self.dataloader_prediction.dataset.load("Prediction")
+        with tqdm.tqdm(
+            iterable=enumerate(self.dataloader_prediction),
+            leave=True,
+            desc=f"Prediction : {description(self.model_composite)}",
+            total=len(self.dataloader_prediction),
+            ncols=0,
+        ) as batch_iter:
+            for _, data_dict in batch_iter:
+                with torch.amp.autocast("cuda", enabled=self.autocast):
+                    input_tensor = self.get_input(data_dict)
+                    for name, output in self.model_composite(input_tensor, list(self.outputs_dataset.keys())):
+                        self._predict_log(data_dict)
+                        output_dataset = self.outputs_dataset[name]
+                        for i, (index, patch_augmentation, patch_index) in enumerate(
+                            [
+                                (int(index), int(patch_augmentation), int(patch_index))
+                                for index, patch_augmentation, patch_index in zip(
+                                    list(data_dict.values())[0][1],
+                                    list(data_dict.values())[0][2],
+                                    list(data_dict.values())[0][3],
+                                )
+                            ]
+                        ):
+                            output_dataset.add_layer(
+                                index,
+                                patch_augmentation,
+                                patch_index,
+                                output[i].cpu(),
+                                self.dataset,
+                            )
+                            if output_dataset.is_done(index):
+                                output_dataset.write_prediction(
+                                    index,
+                                    self.dataset.get_dataset_from_index(list(data_dict.keys())[0], index).name.split(
+                                        "/"
+                                    )[-1],
+                                    output_dataset.get_output(index, self.dataset),
+                                )
+
+                    batch_iter.set_description(f"Prediction : {description(self.model_composite)}")
                     self.it += 1
-        
-    def _predict_log(self, data_dict : dict[str, tuple[torch.Tensor, int, int, int]]):
-        measures = DistributedObject.getMeasure(self.world_size, self.global_rank, self.local_rank, {"" : self.modelComposite.module}, 1)
-        
-        if self.global_rank == 0:
-            images_log = []
-            if len(self.data_log):    
+
+    def _predict_log(
+        self,
+        data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
+    ):
+        """
+        Log prediction results to TensorBoard, including images and metrics.
+
+        This method handles:
+        - Logging image-like data (e.g., inputs, outputs, masks) using `DataLog` instances,
+        based on the `data_log` configuration.
+        - Logging scalar loss and metric values (if present in the network) under the `Prediction/` namespace.
+        - Dynamically retrieving additional feature maps or intermediate layers if requested via `data_log`.
+
+        Logging is performed only on the global rank 0 process and only if `TensorBoard` is active.
+
+        Args:
+            data_dict (dict): Dictionary mapping group names to 6-tuples containing:
+                - input tensor,
+                - index,
+                - patch_augmentation,
+                - patch_index,
+                - metadata (list of strings),
+                - `requires_grad` flag (as a tensor).
+        """
+        measures = DistributedObject.get_measure(
+            self.world_size,
+            self.global_rank,
+            self.local_rank,
+            {"": self.model_composite.module},
+            1,
+        )
+
+        if self.global_rank == 0 and self.tb is not None:
+            data_log = []
+            if len(self.data_log):
                 for name, data_type in self.data_log.items():
                     if name in data_dict:
-                        data_type[0](self.tb, "Prediction/{}".format(name), data_dict[name][0][:self.data_log[name][1]].detach().cpu().numpy(), self.it)
+                        data_type[0](
+                            self.tb,
+                            f"Prediction/{name}",
+                            data_dict[name][0][: self.data_log[name][1]].detach().cpu().numpy(),
+                            self.it,
+                        )
                     else:
-                        images_log.append(name.replace(":", "."))
+                        data_log.append(name.replace(":", "."))
 
-            for name, network in self.modelComposite.module.getNetworks().items():
+            for name, network in self.model_composite.module.get_networks().items():
                 if network.measure is not None:
-                    self.tb.add_scalars("Prediction/{}/Loss".format(name), {k : v[1] for k, v in measures["{}{}".format(name, "")][0].items()}, self.it)
-                    self.tb.add_scalars("Prediction/{}/Metric".format(name), {k : v[1] for k, v in measures["{}{}".format(name, "")][1].items()}, self.it)
-                if len(images_log):
-                    for name, layer, _ in self.model.module.get_layers([v.to(0) for k, v in self.getInput(data_dict).items() if k[1]], images_log):
-                        self.data_log[name][0](self.tb, "Prediction/{}".format(name), layer[:self.data_log[name][1]].detach().cpu().numpy(), self.it)
+                    self.tb.add_scalars(
+                        f"Prediction/{name}/Loss",
+                        {k: v[1] for k, v in measures[name][0].items()},
+                        self.it,
+                    )
+                    self.tb.add_scalars(
+                        f"Prediction/{name}/Metric",
+                        {k: v[1] for k, v in measures[name][1].items()},
+                        self.it,
+                    )
+                if len(data_log):
+                    for name, layer, _ in self.model_composite.module.get_layers(
+                        [v.to(0) for k, v in self.get_input(data_dict).items() if k[1]], data_log
+                    ):
+                        self.data_log[name][0](
+                            self.tb,
+                            f"Prediction/{name}",
+                            layer[: self.data_log[name][1]].detach().cpu().numpy(),
+                            self.it,
+                        )
+
 
 class ModelComposite(Network):
+    """
+    A composite model that replicates a given base network multiple times and combines their outputs.
+
+    This class is designed to handle model ensembles or repeated predictions from the same architecture.
+    It creates `nb_models` deep copies of the input `model`, each with its own name and output branch,
+    and aggregates their outputs using a provided `Reduction` strategy (e.g., mean, median).
+
+    Args:
+        model (Network): The base network to replicate.
+        nb_models (int): Number of copies of the model to create.
+        combine (Reduction): The reduction method used to combine outputs from all model replicas.
+
+    Attributes:
+        combine (Reduction): The reduction method used during forward inference.
+    """
 
     def __init__(self, model: Network, nb_models: int, combine: Reduction):
-        super().__init__(model.in_channels, model.optimizer, model.schedulers, model.outputsCriterionsLoader, model.patch, model.nb_batch_per_step, model.init_type, model.init_gain, model.dim)
+        super().__init__(
+            model.in_channels,
+            model.optimizer,
+            model.lr_schedulers_loader,
+            model.outputs_criterions_loader,
+            model.patch,
+            model.nb_batch_per_step,
+            model.init_type,
+            model.init_gain,
+            model.dim,
+        )
         self.combine = combine
         for i in range(nb_models):
-            self.add_module("Model_{}".format(i), copy.deepcopy(model), in_branch=[0], out_branch=["output_{}".format(i)])
+            self.add_module(
+                f"Model_{i}",
+                copy.deepcopy(model),
+                in_branch=[0],
+                out_branch=[f"output_{i}"],
+            )
 
-    def load(self, state_dicts : list[dict[str, dict[str, torch.Tensor]]]):
+    def load(self, state_dicts: list[dict[str, dict[str, torch.Tensor]]]):
+        """
+        Load weights for each sub-model in the composite from the corresponding state dictionaries.
+
+        Args:
+            state_dicts (list): A list of state dictionaries, one for each model replica.
+        """
         for i, state_dict in enumerate(state_dicts):
-            self["Model_{}".format(i)].load(state_dict, init=False)
-            self["Model_{}".format(i)].setName("{}_{}".format(self["Model_{}".format(i)].getName(), i))
-            
-    def forward(self, data_dict: dict[tuple[str, bool], torch.Tensor], output_layers: list[str] = []) -> list[tuple[str, torch.Tensor]]:
+            self[f"Model_{i}"].load(state_dict, init=False)
+            self[f"Model_{i}"].set_name(f"{self[f'Model_{i}'].get_name()}_{i}")
+
+    def forward(
+        self,
+        data_dict: dict[tuple[str, bool], torch.Tensor],
+        output_layers: list[str] = [],
+    ) -> list[tuple[str, torch.Tensor]]:
+        """
+        Perform a forward pass on all model replicas and aggregate their outputs.
+
+        Args:
+            data_dict (dict): A dictionary mapping (group_name, requires_grad) to input tensors.
+            output_layers (list): List of output layer names to extract from each sub-model.
+
+        Returns:
+            list[tuple[str, torch.Tensor]]: Aggregated output for each layer, after applying the reduction.
+        """
         result = {}
         for name, module in self.items():
             result[name] = module(data_dict, output_layers)
-        
+
         aggregated = defaultdict(list)
         for module_outputs in result.values():
             for key, tensor in module_outputs:
@@ -309,21 +599,41 @@ class ModelComposite(Network):
             final_outputs.append((key, self.combine(torch.stack(tensors, dim=0))))
 
         return final_outputs
-    
+
 
 class Predictor(DistributedObject):
+    """
+    KonfAI's main prediction controller.
+
+    This class orchestrates the prediction phase by:
+    - Loading model weights from checkpoint(s) or URL(s)
+    - Preparing datasets and output configurations
+    - Managing distributed inference with optional multi-GPU support
+    - Applying transformations and saving predictions
+    - Optionally logging results to TensorBoard
+
+    Attributes:
+        model (Network): The neural network model to use for prediction.
+        dataset (DataPrediction): Dataset manager for prediction data.
+        combine_classpath (str): Path to the reduction strategy (e.g., "Mean").
+        autocast (bool): Whether to enable AMP inference.
+        outputs_dataset (dict[str, OutputDataset]): Mapping from layer names to output writers.
+        data_log (list[str] | None): List of tensors to log during inference.
+    """
 
     @config("Predictor")
-    def __init__(self, 
-                    model: ModelLoader = ModelLoader(),
-                    dataset: DataPrediction = DataPrediction(),
-                    combine: str = "mean",
-                    train_name: str = "name",
-                    manual_seed : Union[int, None] = None,
-                    gpu_checkpoints: Union[list[str], None] = None,
-                    autocast : bool = False,
-                    outsDataset: Union[dict[str, OutDatasetLoader], None] = {"default:Default" : OutDatasetLoader()},
-                    images_log: list[str] = []) -> None:
+    def __init__(
+        self,
+        model: ModelLoader = ModelLoader(),
+        dataset: DataPrediction = DataPrediction(),
+        combine: str = "Mean",
+        train_name: str = "name",
+        manual_seed: int | None = None,
+        gpu_checkpoints: list[str] | None = None,
+        autocast: bool = False,
+        outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default:Default": OutputDatasetLoader()},
+        data_log: list[str] | None = None,
+    ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             exit(0)
         super().__init__(train_name)
@@ -332,99 +642,194 @@ class Predictor(DistributedObject):
         self.combine_classpath = combine
         self.autocast = autocast
 
-        self.model = model.getModel(train=False)
+        self.model = model.get_model(train=False)
         self.it = 0
-        self.outsDatasetLoader = outsDataset if outsDataset else {}
-        self.outsDataset = {name.replace(":", ".") : value.getOutDataset(name) for name, value in self.outsDatasetLoader.items()}
+        self.outputs_dataset_loader = outputs_dataset if outputs_dataset else {}
+        self.outputs_dataset = {
+            name.replace(":", "."): value.get_output_dataset(name)
+            for name, value in self.outputs_dataset_loader.items()
+        }
 
         self.datasets_filename = []
-        self.predict_path = PREDICTIONS_DIRECTORY()+self.name+"/"
-        self.images_log = images_log
-        for outDataset in self.outsDataset.values():
-            self.datasets_filename.append(outDataset.filename)
-            outDataset.filename = "{}{}".format(self.predict_path, outDataset.filename)
-            
-        
+        self.predict_path = predictions_directory() + self.name + "/"
+        for output_dataset in self.outputs_dataset.values():
+            self.datasets_filename.append(output_dataset.filename)
+            output_dataset.filename = f"{self.predict_path}{output_dataset.filename}"
+
+        self.data_log = data_log
+        modules = []
+        for i, _ in self.model.named_modules():
+            modules.append(i)
+        if self.data_log is not None:
+            for k in self.data_log:
+                tmp = k.split("/")[0].replace(":", ".")
+                if tmp not in self.dataset.get_groups_dest() and tmp not in modules:
+                    raise PredictorError(
+                        f"Invalid key '{tmp}' in `data_log`.",
+                        f"This key is neither a destination group from the dataset ({self.dataset.get_groups_dest()})",
+                        f"nor a valid module name in the model ({modules}).",
+                        "Please check your `data_log` configuration,"
+                        " it should reference either a model output or a dataset group.",
+                    )
+
         self.gpu_checkpoints = gpu_checkpoints
 
     def _load(self) -> list[dict[str, dict[str, torch.Tensor]]]:
-        model_paths = MODEL().split(":")
+        """
+        Load pretrained model weights from configured paths or URLs.
+
+        This method handles both remote and local model sources:
+        - If the model path is a URL (starting with "https://"), it uses `torch.hub.load_state_dict_from_url`
+        to download and load the state dict.
+        - If the model path is local:
+            - It either loads the explicit file or resolves the latest model file in a default directory
+            based on the prediction name.
+        - All loaded state dicts are returned as a list of nested dictionaries mapping module names
+        to parameter tensors.
+
+        Returns:
+            list[dict[str, dict[str, torch.Tensor]]]: A list of state dictionaries, one per model.
+
+        Raises:
+            Exception: If a model path does not exist or cannot be loaded.
+        """
+        model_paths = path_to_models().split(":")
         state_dicts = []
         for model_path in model_paths:
             if model_path.startswith("https://"):
                 try:
-                    state_dicts.append(torch.hub.load_state_dict_from_url(url=model_path, map_location="cpu", check_hash=True))
-                except:
-                    raise Exception("Model : {} does not exist !".format(model_path)) 
+                    state_dicts.append(
+                        torch.hub.load_state_dict_from_url(url=model_path, map_location="cpu", check_hash=True)
+                    )
+                except Exception:
+                    raise Exception(f"Model : {model_path} does not exist !")
             else:
                 if model_path != "":
                     path = ""
                     name = model_path
                 else:
                     if self.name.endswith(".pt"):
-                        path = MODELS_DIRECTORY()+"/".join(self.name.split("/")[:-1])+"/StateDict/"
+                        path = models_directory() + "/".join(self.name.split("/")[:-1]) + "/StateDict/"
                         name = self.name.split("/")[-1]
                     else:
-                        path = MODELS_DIRECTORY()+self.name+"/StateDict/"
+                        path = models_directory() + self.name + "/StateDict/"
                         name = sorted(os.listdir(path))[-1]
-                if os.path.exists(path+name):
-                    state_dicts.append(torch.load(path+name, weights_only=False))
+                if os.path.exists(path + name):
+                    state_dicts.append(torch.load(path + name, weights_only=True))
                 else:
-                    raise Exception("Model : {} does not exist !".format(path+name))
+                    raise Exception(f"Model : {path + name} does not exist !")
         return state_dicts
-    
+
     def setup(self, world_size: int):
+        """
+        Set up the predictor for inference.
+
+        This method performs all necessary initialization steps before running predictions:
+        - Ensures output directories exist, and optionally prompts the user before overwriting existing predictions.
+        - Copies the current configuration file (Prediction.yml) into the output directory for reproducibility.
+        - Initializes the model in prediction mode, including output configuration and channel tracing.
+        - Validates that the configured output groups match existing modules in the model architecture.
+        - Dynamically loads pretrained weights from local files or remote URLs.
+        - Wraps the base model into a `ModelComposite` to support ensemble inference.
+        - Initializes the prediction dataloader, with proper distribution across available GPUs.
+        - Loads and prepares each configured `OutputDataset` object for storing predictions.
+
+        Args:
+            world_size (int): Total number of processes or GPUs used for distributed prediction.
+
+        Raises:
+            PredictorError: If an output group does not match any module in the model.
+            Exception: If a specified model file or URL is invalid or inaccessible.
+        """
         for dataset_filename in self.datasets_filename:
-            path = self.predict_path +dataset_filename
+            path = self.predict_path + dataset_filename
             if os.path.exists(path):
                 if os.environ["KONFAI_OVERWRITE"] != "True":
-                    accept = builtins.input("The prediction {} already exists ! Do you want to overwrite it (yes,no) : ".format(path))
+                    accept = builtins.input(
+                        f"The prediction {path} already exists ! Do you want to overwrite it (yes,no) : "
+                    )
                     if accept != "yes":
                         return
-                    
+
             if not os.path.exists(path):
                 os.makedirs(path)
 
-        shutil.copyfile(CONFIG_FILE(), self.predict_path+"Prediction.yml")
+        shutil.copyfile(config_file(), self.predict_path + "Prediction.yml")
 
-        
-        self.model.init(self.autocast, State.PREDICTION, self.dataset.getGroupsDest())
-        self.model.init_outputsGroup()
+        self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
+        self.model.init_outputs_group()
         self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
-        
+
         modules = []
-        for i,_,_ in self.model.named_ModuleArgsDict():
+        for i, _, _ in self.model.named_module_args_dict():
             modules.append(i)
-        for output_group in self.outsDataset.keys():
-            if output_group not in modules:
-                raise PredictorError("The output group '{}' defined in 'outputsCriterions' does not correspond to any module in the model.".format(output_group),
-                    "Available modules: {}".format(modules),
-                    "Please check that the name matches exactly a submodule or output of your model architecture."
+        for output_group in self.outputs_dataset.keys():
+            if output_group.replace(";accu;", "") not in modules:
+                raise PredictorError(
+                    f"The output group '{output_group}' defined in 'outputs_criterions' "
+                    "does not correspond to any module in the model.",
+                    f"Available modules: {modules}",
+                    "Please check that the name matches exactly a submodule or" "output of your model architecture.",
                 )
-        
-        module, name = _getModule(self.combine_classpath, "konfai.predictor")
+
+        module, name = get_module(self.combine_classpath, "konfai.predictor")
         if module == "konfai.predictor":
-            combine = getattr(importlib.import_module(module), name)
+            combine = getattr(importlib.import_module(module), name)()
         else:
-            combine = config("{}.{}".format(KONFAI_ROOT(), self.combine_classpath))(getattr(importlib.import_module(module), name))(config = None)
-       
-        
-        self.modelComposite = ModelComposite(self.model, len(MODEL().split(":")), combine)
-        self.modelComposite.load(self._load())
+            combine = config(f"{konfai_root()}.{self.combine_classpath}")(
+                getattr(importlib.import_module(module), name)
+            )(config=None)
 
-        if len(list(self.outsDataset.keys())) == 0 and len([network for network in self.modelComposite.getNetworks().values() if network.measure is not None]) == 0:
+        self.model_composite = ModelComposite(self.model, len(path_to_models().split(":")), combine)
+        self.model_composite.load(self._load())
+
+        if (
+            len(list(self.outputs_dataset.keys())) == 0
+            and len(
+                [network for network in self.model_composite.get_networks().values() if network.measure is not None]
+            )
+            == 0
+        ):
             exit(0)
-        
-        self.size = (len(self.gpu_checkpoints)+1 if self.gpu_checkpoints else 1)
-        self.dataloader = self.dataset.getData(world_size//self.size)
-        for name, outDataset in self.outsDataset.items():
-            outDataset.load(name.replace(".", ":"), list(self.dataset.datasets.values()), {src : dest for src, inner in self.dataset.groups_src.items() for dest in inner})
-           
-           
-    def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders: list[DataLoader]):
-        modelComposite = Network.to(self.modelComposite, local_rank*self.size)
-        modelComposite = DDP(modelComposite, static_graph=True) if torch.cuda.is_available() else CPU_Model(modelComposite)
-        with _Predictor(world_size, global_rank, local_rank, self.autocast, self.predict_path, self.images_log, self.outsDataset, modelComposite, *dataloaders) as p:
-            p.run()
 
-        
+        self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
+        self.dataloader = self.dataset.get_data(world_size // self.size)
+        for name, output_dataset in self.outputs_dataset.items():
+            output_dataset.load(
+                name.replace(".", ":"),
+                list(self.dataset.datasets.values()),
+                {src: dest for src, inner in self.dataset.groups_src.items() for dest in inner},
+            )
+
+    def run_process(
+        self,
+        world_size: int,
+        global_rank: int,
+        local_rank: int,
+        dataloaders: list[DataLoader],
+    ):
+        """
+        Launch prediction on the given process rank.
+
+        Args:
+            world_size (int): Total number of processes.
+            global_rank (int): Rank of the current process.
+            local_rank (int): Local device rank.
+            dataloaders (list[DataLoader]): List of data loaders for prediction.
+        """
+        model_composite = Network.to(self.model_composite, local_rank * self.size)
+        model_composite = (
+            DDP(model_composite, static_graph=True) if torch.cuda.is_available() else CPUModel(model_composite)
+        )
+        with _Predictor(
+            world_size,
+            global_rank,
+            local_rank,
+            self.autocast,
+            self.predict_path,
+            self.data_log,
+            self.outputs_dataset,
+            model_composite,
+            *dataloaders,
+        ) as p:
+            p.run()
