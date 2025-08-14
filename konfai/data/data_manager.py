@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
+from typing import cast
 
 import numpy as np
 import torch
@@ -270,50 +271,55 @@ class Subset:
         self.subset = subset
         self.shuffle = shuffle
 
-    def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
-        names = sorted(names)
-
+    def _get_index(self, subset: str | int, names: list[str]) -> list[int]:
         size = len(names)
         index = []
+        if isinstance(subset, int):
+            index.append(subset)
+        elif ":" in subset:
+            r = np.clip(
+                np.asarray([int(subset.split(":")[0]), int(subset.split(":")[1])]),
+                0,
+                size,
+            )
+            index = list(range(r[0], r[1]))
+        elif os.path.exists(subset):
+            train_names = []
+            with open(subset) as f:
+                for name in f:
+                    train_names.append(name.strip())
+            index = []
+            for i, name in enumerate(names):
+                if name in train_names:
+                    index.append(i)
+        elif subset.startswith("~") and os.path.exists(subset[1:]):
+            exclude_names = []
+            with open(subset[1:]) as f:
+                for name in f:
+                    exclude_names.append(name.strip())
+            index = []
+            for i, name in enumerate(names):
+                if name not in exclude_names:
+                    index.append(i)
+        return index
+
+    def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
+        names = sorted(names)
+        size = len(names)
+
         if self.subset is None:
             index = list(range(0, size))
-        elif isinstance(self.subset, str):
-            if ":" in self.subset:
-                r = np.clip(
-                    np.asarray([int(self.subset.split(":")[0]), int(self.subset.split(":")[1])]),
-                    0,
-                    size,
-                )
-                index = list(range(r[0], r[1]))
-            elif os.path.exists(self.subset):
-                train_names = []
-                with open(self.subset) as f:
-                    for name in f:
-                        train_names.append(name.strip())
-                index = []
-                for i, name in enumerate(names):
-                    if name in train_names:
-                        index.append(i)
-            elif self.subset.startswith("~") and os.path.exists(self.subset[1:]):
-                exclude_names = []
-                with open(self.subset[1:]) as f:
-                    for name in f:
-                        exclude_names.append(name.strip())
-                index = []
-                for i, name in enumerate(names):
-                    if name not in exclude_names:
-                        index.append(i)
-
         elif isinstance(self.subset, list):
-            index = []
-            if len(self.subset) > 0:
-                for s in self.subset:
-                    if isinstance(s, int):
-                        index.append(s)
-                    elif isinstance(s, str):
-                        for i, name in enumerate(names):
-                            if name in self.subset:
-                                index.append(i)
+            index_set: set[int] = set()
+            for s in self.subset:
+                if len(index_set) == 0:
+                    index_set.update(set(self._get_index(s, names)))
+                else:
+                    index_set = index_set.intersection(set(self._get_index(s, names)))
+                index = list(index_set)
+                print(index)
+        else:
+            index = self._get_index(self.subset, names)
         if self.shuffle:
             index = random.sample(index, len(index))  # nosec B311
         return {names[i] for i in index}
@@ -456,7 +462,7 @@ class Data(ABC):
                 mappings.append(list(mapping[-offset:]) if itr + offset > len(mapping) else mapping[itr : itr + offset])
         return mappings
 
-    def get_data(self, world_size: int) -> list[list[DataLoader]]:
+    def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
         datasets: dict[str, list[tuple[str, bool]]] = {}
         if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
             raise DatasetManagerError("No dataset filenames were provided")
@@ -502,8 +508,8 @@ class Data(ABC):
                     f"Group source '{group_src}' not found in any dataset.",
                     f"Dataset filenames provided: {self.dataset_filenames}",
                     f"Available groups across all datasets: "
-                    "{[f'{f} {d.get_group()}' for f, d in self.datasets.items()]}"
-                    f"Please check that an entry in the dataset with the name '{group_src}.{format}' exists.",
+                    f"{[f'{f} {d.get_group()}' for f, d in self.datasets.items()]}\n"
+                    f"Please check that an entry in the dataset with the name '{group_src}' exists.",
                 )
 
             for group_dest in self.groups_src[group_src]:
@@ -596,8 +602,7 @@ class Data(ABC):
 
         data, mapping = self._get_datasets(list(subset_names), dataset_name)
 
-        train_mapping = mapping
-        validate_mapping = []
+        index = []
         if isinstance(self.validation, float) or isinstance(self.validation, int):
             if self.validation <= 0 or self.validation >= 1:
                 raise DatasetManagerError(
@@ -605,24 +610,16 @@ class Data(ABC):
                     f"Received: {self.validation}",
                     "Example: validation = 0.2  # for a 20% validation split",
                 )
-
-            train_mapping, validate_mapping = (
-                mapping[: int(math.floor(len(mapping) * (1 - self.validation)))],
-                mapping[int(math.floor(len(mapping) * (1 - self.validation))) :],
-            )
+            index = [m[0] for m in mapping[int(math.floor(len(mapping) * (1 - self.validation))) :]]
         elif isinstance(self.validation, str):
             if ":" in self.validation:
                 index = list(range(int(self.validation.split(":")[0]), int(self.validation.split(":")[1])))
-                train_mapping = [m for m in mapping if m[0] not in index]
-                validate_mapping = [m for m in mapping if m[0] in index]
             elif os.path.exists(self.validation):
                 validation_names = []
                 with open(self.validation) as f:
                     for name in f:
                         validation_names.append(name.strip())
                 index = [i for i, n in enumerate(subset_names) if n in validation_names]
-                train_mapping = [m for m in mapping if m[0] not in index]
-                validate_mapping = [m for m in mapping if m[0] in index]
             else:
                 raise DatasetManagerError(
                     f"Invalid string value for 'validation': '{self.validation}'",
@@ -634,25 +631,23 @@ class Data(ABC):
                     "The provided value is neither a valid slice nor a readable file.",
                     "Please fix your 'validation' setting in the configuration.",
                 )
-
         elif isinstance(self.validation, list):
-            if len(self.validation) > 0:
-                if isinstance(self.validation[0], int):
-                    train_mapping = [m for m in mapping if m[0] not in self.validation]
-                    validate_mapping = [m for m in mapping if m[0] in self.validation]
-                elif isinstance(self.validation[0], str):
-                    index = [i for i, n in enumerate(subset_names) if n in self.validation]
-                    train_mapping = [m for m in mapping if m[0] not in index]
-                    validate_mapping = [m for m in mapping if m[0] in index]
-                else:
-                    raise DatasetManagerError(
-                        "Invalid list type for 'validation': elements of type "
-                        f"'{type(self.validation[0]).__name__}' are not supported.",
-                        "Supported list element types are:",
-                        "\t• int  → list of indices (e.g., [0, 1, 2])",
-                        "\t• str  → list of sample names (e.g., ['patient01', 'patient02'])",
-                        f"Received list: {self.validation}",
-                    )
+            if isinstance(self.validation[0], int):
+                index = cast(list[int], self.validation)
+            elif isinstance(self.validation[0], str):
+                index = [i for i, n in enumerate(subset_names) if n in self.validation]
+            else:
+                raise DatasetManagerError(
+                    "Invalid list type for 'validation': elements of type "
+                    f"'{type(self.validation[0]).__name__}' are not supported.",
+                    "Supported list element types are:",
+                    "\t• int  → list of indices (e.g., [0, 1, 2])",
+                    "\t• str  → list of sample names (e.g., ['patient01', 'patient02'])",
+                    f"Received list: {self.validation}",
+                )
+        train_mapping = [m for m in mapping if m[0] not in index]
+        validate_mapping = [m for m in mapping if m[0] in index]
+
         if len(train_mapping) == 0:
             raise DatasetManagerError(
                 "No data left for training after applying the validation split.",
@@ -668,6 +663,9 @@ class Data(ABC):
                 f"Validation setting: {self.validation}",
                 "Please increase the validation size, increase the dataset, or disable validation.",
             )
+
+        validation_names = [name for i, name in enumerate(subset_names) if i in index]
+        train_names = [name for name in subset_names if name not in validation_names]
         train_mappings = Data._split(train_mapping, world_size)
         validate_mappings = Data._split(validate_mapping, world_size)
 
@@ -701,7 +699,7 @@ class Data(ABC):
                         **self.dataLoader_args,
                     )
                 )
-        return data_loaders
+        return data_loaders, train_names, validation_names
 
 
 class DataTrain(Data):
@@ -773,7 +771,7 @@ class DataMetric(Data):
             dataset_filenames=dataset_filenames,
             groups_src=groups_src,
             patch=None,
-            use_cache=False,
+            use_cache=True,
             subset=subset,
             batch_size=1,
             validation=validation,

@@ -188,11 +188,16 @@ class Measure:
         def reset_loss(self) -> None:
             self._loss.clear()
 
-        def add(self, weight: float, value: torch.Tensor) -> None:
-            if self.is_loss or value != 0:
-                self._loss.append(value if self.is_loss else value.detach())
-                self._values.append(value.item())
-                self._weight.append(weight)
+        def add(self, weight: float, value: torch.Tensor | tuple[torch.Tensor, float]) -> None:
+            if isinstance(value, tuple):
+                loss_value, true_value = value
+            else:
+                loss_value = value
+                true_value = value.item()
+
+            self._loss.append(loss_value if self.is_loss else loss_value.detach())
+            self._values.append(true_value)
+            self._weight.append(weight)
 
         def get_last_loss(self) -> torch.Tensor:
             return self._loss[-1] * self._weight[-1] if len(self._loss) else torch.zeros((1), requires_grad=True)
@@ -239,13 +244,13 @@ class Measure:
                 for target_group_tmp in target_group.split(";"):
                     if target_group_tmp not in group_dest:
                         raise MeasureError(
-                            f"The target_group '{target_group_tmp}' defined in "
+                            f"The target_group {target_group_tmp} defined in "
                             "'outputs_criterions.{output_group}.targets_criterions'"
                             " was not found in the available destination groups.",
                             "This target_group is expected for loss or metric computation, "
                             "but was not loaded in 'group_dest'.",
-                            f"Please make sure that the group '{target_group_tmp}' is defined in "
-                            "'Dataset:groups_src:...:groups_dest:'{target_group_tmp}'' "
+                            f"Please make sure that the group {target_group_tmp} is defined in "
+                            "Dataset:groups_src:...:groups_dest: {target_group_tmp} "
                             "and correctly loaded from the dataset.",
                         )
                 for criterion in self.outputs_criterions[output_group][target_group]:
@@ -868,7 +873,10 @@ class Network(ModuleArgsDict, ABC):
                     init_gain=self.init_gain,
                 )
             )
-        name = "Model" + ("_EMA" if ema else "")
+        name = "Model"
+        if ema:
+            if name + "_EMA" in state_dict:
+                name += "_EMA"
         if name in state_dict:
             value = state_dict[name]
             model_state_dict_tmp = {}

@@ -46,7 +46,7 @@ class MaskedLoss(Criterion):
         self.loss = loss
         self.mode_image_masked = mode_image_masked
 
-    def get_mask(self, *targets: torch.Tensor) -> torch.Tensor:
+    def get_mask(self, targets: list[torch.Tensor]) -> torch.Tensor | None:
         result = None
         if len(targets) > 0:
             result = targets[0]
@@ -54,29 +54,35 @@ class MaskedLoss(Criterion):
                 result = result * mask
         return result
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
         loss = torch.tensor(0, dtype=torch.float32).to(output.device)
-        mask = self.get_mask(targets[1:])
-        for batch in range(output.shape[0]):
-            if mask is not None:
+        true_loss = 0
+        true_nb = 0
+        mask = self.get_mask(list(targets[1:]))
+        if mask is not None:
+            for batch in range(output.shape[0]):
                 if self.mode_image_masked:
-                    for i in torch.unique(mask[batch]):
-                        if i != 0:
-                            loss += self.loss(
-                                output[batch, ...] * torch.where(mask == i, 1, 0),
-                                targets[0][batch, ...] * torch.where(mask == i, 1, 0),
-                            )
+                    loss_b = self.loss(
+                        output[batch, ...] * torch.where(mask == 1, 1, 0),
+                        targets[0][batch, ...] * torch.where(mask == 1, 1, 0),
+                    )
                 else:
-                    for i in torch.unique(mask[batch]):
-                        if i != 0:
-                            index = mask[batch, ...] == i
-                            loss += self.loss(
-                                torch.masked_select(output[batch, ...], index),
-                                torch.masked_select(targets[0][batch, ...], index),
-                            )
-            else:
-                loss += self.loss(output[batch, ...], targets[0][batch, ...])
-        return loss / output.shape[0]
+                    index = mask[batch, ...] == 1
+                    loss_b = self.loss(
+                        torch.masked_select(output[batch, ...], index),
+                        torch.masked_select(targets[0][batch, ...], index),
+                    )
+
+                loss += loss_b
+                if torch.any(mask[batch] == 1):
+                    true_loss += loss_b.item()
+                    true_nb += 1
+        else:
+            loss_tmp = self.loss(output, targets[0])
+            loss += loss_tmp
+            true_loss += loss_tmp.item()
+            true_nb += 1
+        return loss / output.shape[0], np.nan if true_nb == 0 else true_loss / true_nb
 
 
 class MSE(MaskedLoss):
@@ -164,9 +170,9 @@ class LPIPS(MaskedLoss):
 
 class Dice(Criterion):
 
-    def __init__(self, smooth: float = 1e-6) -> None:
+    def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
-        self.smooth = smooth
+        self.labels = labels
 
     def flatten(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor.permute((1, 0) + tuple(range(2, tensor.dim()))).contiguous().view(tensor.size(1), -1)
@@ -174,26 +180,26 @@ class Dice(Criterion):
     def dice_per_channel(self, tensor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         tensor = self.flatten(tensor)
         target = self.flatten(target)
-        return (2.0 * (tensor * target).sum() + self.smooth) / (tensor.sum() + target.sum() + self.smooth)
+        return (2.0 * (tensor * target).sum() + 1e-6) / (tensor.sum() + target.sum() + 1e-6)
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         target = F.interpolate(targets[0], output.shape[2:], mode="nearest")
-        if output.shape[1] == 1:
-            output = (
-                F.one_hot(
-                    output.type(torch.int64),
-                    num_classes=int(torch.max(output).item() + 1),
-                )
-                .permute(0, len(target.shape), *[i + 1 for i in range(len(target.shape) - 1)])
-                .float()
-            )
-        target = (
-            F.one_hot(target.type(torch.int64), num_classes=output.shape[1])
-            .permute(0, len(target.shape), *[i + 1 for i in range(len(target.shape) - 1)])
-            .float()
-            .squeeze(2)
-        )
-        return 1 - torch.mean(self.dice_per_channel(output, target))
+        result = {}
+        loss = torch.tensor(0, dtype=torch.float32).to(output.device)
+        labels = self.labels if self.labels is not None else torch.unique(target)
+        for label in labels:
+            tp = target == label
+            if tp.any().item():
+                if output.shape[1] > 1:
+                    pp = output[:, label].unsqueeze(1)
+                else:
+                    pp = output == label
+                loss_tmp = self.dice_per_channel(pp.float(), tp.float())
+                loss += loss_tmp
+                result[label] = loss_tmp.item()
+            else:
+                result[label] = np.nan
+        return 1 - loss / len(labels), result
 
 
 class GradientImages(Criterion):
@@ -621,23 +627,14 @@ class MutualInformationLoss(torch.nn.Module):
 class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthesis
 
     def __init__(
-        self,
-        model_name: str,
-        shape: list[int] = [0, 0],
-        in_channels: int = 1,
-        losses: dict[str, list[float]] = {"Gram": [1], "torch_nn_L1Loss": [1]},
+        self, model_name: str, shape: list[int] = [0, 0], in_channels: int = 1, weights: list[float] = [1]
     ) -> None:
         super().__init__()
         if model_name is None:
             return
         self.in_channels = in_channels
-        self.losses: dict[torch.nn.Module, list[float]] = {}
-        for loss, weights in losses.items():
-            module, name = get_module(loss, "konfai.metric.measure")
-            self.losses[
-                config(os.environ["KONFAI_CONFIG_PATH"])(getattr(importlib.import_module(module), name))(config=None)
-            ] = weights
-
+        self.loss = torch.nn.L1Loss()
+        self.weights = weights
         self.model_path = download_url(
             model_name,
             "https://huggingface.co/VBoussot/impact-torchscript-models/resolve/main/",
@@ -648,19 +645,17 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
 
         try:
-            dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim)))
+            dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
             out = self.model(dummy_input)
             if not isinstance(out, (list, tuple)):
                 raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
-            if len(self.weight) != len(out):
-                raise ValueError(
-                    f"Mismatch between number of weights ({len(self.weight)}) and model outputs ({len(out)})."
-                )
+            if len(weights) != len(out):
+                raise ValueError(f"Mismatch between number of weights ({len(weights)}) and model outputs ({len(out)}).")
         except Exception as e:
             msg = (
                 f"[Model Sanity Check Failed]\n"
                 f"Input shape attempted: {dummy_input.shape}\n"
-                f"Expected output length: {len(self.weight)}\n"
+                f"Expected output length: {len(weights)}\n"
                 f"Error: {type(e).__name__}: {e}"
             )
             raise RuntimeError(msg) from e
@@ -682,12 +677,14 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         output = self.preprocessing(output)
         targets = [self.preprocessing(target) for target in targets]
         self.model.to(output.device)
-        for zipped_output in zip(self.model(output), *[self.model(target) for target in targets]):
-            output_features = zipped_output[0]
+        for zipped_output in zip(self.weights, self.model(output), *[self.model(target) for target in targets]):
+            weight = zipped_output[0]
+            if weight == 0:
+                continue
+            output_feature = zipped_output[1]
             targets_features = zipped_output[1:]
-            for target_features, (loss_function, weights) in zip(targets_features, self.losses.items()):
-                for output_feature, target_feature, weight in zip(output_features, target_features, weights):
-                    loss += weight * loss_function(output_feature, target_feature)
+            for target_feature in targets_features:
+                loss += weight * self.loss(output_feature, target_feature)
         return loss
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
@@ -696,7 +693,7 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and self.dim == 2:
             for i in range(output.shape[2]):
-                loss = loss + self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets])
+                loss += self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets])
             loss /= output.shape[2]
         else:
             loss = self._compute(output, list(targets))
