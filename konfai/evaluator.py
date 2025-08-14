@@ -152,14 +152,14 @@ class Statistics:
                 - mean and count
         """
         return {
-            "max": np.max(values),
-            "min": np.min(values),
-            "std": np.std(values),
-            "25pc": np.percentile(values, 25),
-            "50pc": np.percentile(values, 50),
-            "75pc": np.percentile(values, 75),
-            "mean": np.mean(values),
-            "count": len(values),
+            "max": np.nanmax(values) if np.any(~np.isnan(values)) else np.nan,
+            "min": np.nanmin(values) if np.any(~np.isnan(values)) else np.nan,
+            "std": np.nanstd(values) if np.any(~np.isnan(values)) else np.nan,
+            "25pc": np.nanpercentile(values, 25) if np.any(~np.isnan(values)) else np.nan,
+            "50pc": np.nanpercentile(values, 50) if np.any(~np.isnan(values)) else np.nan,
+            "75pc": np.nanpercentile(values, 75) if np.any(~np.isnan(values)) else np.nan,
+            "mean": np.nanmean(values) if np.any(~np.isnan(values)) else np.nan,
+            "count": np.count_nonzero(~np.isnan(values)) if np.any(~np.isnan(values)) else np.nan,
         }
 
     def write(self, outputs: list[dict[str, dict[str, Any]]]) -> None:
@@ -269,7 +269,18 @@ class Evaluator(DistributedObject):
                         true_loss = loss[1]
                     else:
                         true_loss = loss.item()
-                    result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = true_loss
+
+                    if isinstance(true_loss, dict):
+                        loss = 0
+                        c = 0
+                        for k, v in true_loss.items():
+                            result[f"{output_group}:{target_group}:{metric.__class__.__name__}:{k}"] = v
+                            if not np.isnan(v):
+                                loss += v
+                                c += 1
+                        result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = loss / c
+                    else:
+                        result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = true_loss
         statistics.add(result, name)
         return result
 

@@ -901,7 +901,9 @@ class Network(ModuleArgsDict, ABC):
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
         if f"{self.get_name()}_optimizer_state_dict" in state_dict and self.optimizer:
+            last_lr = self.optimizer.param_groups[0]["lr"]
             self.optimizer.load_state_dict(state_dict[f"{self.get_name()}_optimizer_state_dict"])
+            self.optimizer.param_groups[0]["lr"] = last_lr
         if f"{self.get_name()}_it" in state_dict:
             _it = state_dict.get(f"{self.get_name()}_it")
             if isinstance(_it, int):
