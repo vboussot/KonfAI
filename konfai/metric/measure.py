@@ -143,7 +143,7 @@ class LPIPS(MaskedLoss):
 
     @staticmethod
     def preprocessing(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.repeat((1, 3, 1, 1))
+        return tensor.repeat((1, 3, 1, 1)).to(0)
 
     @staticmethod
     def _loss(loss_fn_alex, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -165,7 +165,7 @@ class LPIPS(MaskedLoss):
     def __init__(self, model: str = "alex") -> None:
         import lpips
 
-        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model)), True)
+        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model).to(0)), True)
 
 
 class Dice(Criterion):
