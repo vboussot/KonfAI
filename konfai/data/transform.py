@@ -1,4 +1,5 @@
 import importlib
+import tempfile
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -670,3 +671,26 @@ class OneHot(Transform):
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=1).unsqueeze(1)
+
+
+class TotalSegmentator(Transform):
+
+    def __init__(self, task: str = "total"):
+        super().__init__()
+        self.task = task
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        from totalsegmentator.python_api import totalsegmentator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image = data_to_image(tensor.numpy(), cache_attribute)
+            sitk.WriteImage(image, tmpdir + "/image.nii.gz")
+            seg = totalsegmentator(tmpdir + "/image.nii.gz", tmpdir, task=self.task, skip_saving=True, quiet=True)
+        return (
+            torch.from_numpy(np.array(np.asanyarray(seg.dataobj), copy=True).astype(np.uint8, copy=False))
+            .permute(2, 1, 0)
+            .unsqueeze(0)
+        )
+
+    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor

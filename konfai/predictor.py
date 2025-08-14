@@ -793,7 +793,7 @@ class Predictor(DistributedObject):
             exit(0)
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
-        self.dataloader = self.dataset.get_data(world_size // self.size)
+        self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
         for name, output_dataset in self.outputs_dataset.items():
             output_dataset.load(
                 name.replace(".", ":"),

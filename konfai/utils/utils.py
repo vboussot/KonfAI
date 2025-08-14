@@ -41,7 +41,7 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
             "("
             + " ".join(
                 [
-                    f"{name}({network.optimizer.param_groups[0]['lr']:.6f} if network.optimizer else 0) : "
+                    f"{name}({(network.optimizer.param_groups[0]['lr'] if network.optimizer else 0):.6f}) : "
                     + " ".join(
                         f"{k.split(':')[-1]}({w:.2f}) : {v:.6f}"
                         for (k, v), w in zip(
@@ -58,11 +58,11 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
     model_loss_desc = loss_desc(model)
     result = ""
     if len(model_loss_desc) > 2:
-        f"Loss {model_loss_desc} "
+        result += f"Loss {model_loss_desc} "
     if model_ema is not None:
         model_ema_loss_desc = loss_desc(model_ema)
         if len(model_ema_loss_desc) > 2:
-            result += f"Loss EMA {loss_desc(model_ema_loss_desc)} "
+            result += f"Loss EMA {model_ema_loss_desc} "
     result += gpu_info()
     if show_memory:
         result += f" | {get_memory_info()}"
@@ -765,6 +765,8 @@ def download_url(model_name: str, url: str) -> str:
     if not isinstance(locations, list) or not locations:
         raise ImportError("No valid submodule_search_locations found")
     base_path = Path(locations[0]) / "metric" / "models"
+    os.makedirs(base_path, exist_ok=True)
+
     subdirs = Path(model_name).parent
     model_dir = base_path / subdirs
     model_dir.mkdir(exist_ok=True)

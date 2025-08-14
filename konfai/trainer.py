@@ -14,7 +14,6 @@ from konfai import (
     config_file,
     current_date,
     konfai_state,
-    models_directory,
     path_to_models,
     setups_directory,
     statistics_directory,
@@ -147,7 +146,6 @@ class _Trainer:
         self.global_rank = global_rank
         self.local_rank = local_rank
         self.size = size
-
         self.save_checkpoint_mode = save_checkpoint_mode
         self.train_name = train_name
         self.epochs = epochs
@@ -186,6 +184,9 @@ class _Trainer:
         self.dataloader_training.dataset.load("Train")
         if self.dataloader_validation is not None:
             self.dataloader_validation.dataset.load("Validation")
+            if State[konfai_state()] != State.TRAIN:
+                self._validate()
+
         with tqdm.tqdm(
             iterable=range(self.epoch, self.epochs),
             leave=False,
@@ -604,38 +605,7 @@ class Trainer(DistributedObject):
         Serializes model and EMA model (if any) in both state_dict and full model formats.
         Also saves optimizer states and YAML config snapshot.
         """
-        path_checkpoint = checkpoints_directory() + self.name + "/"
-        path_model = models_directory() + self.name + "/"
-        if os.path.exists(path_checkpoint) and os.listdir(path_checkpoint):
-            for directory in [
-                path_model,
-                f"{path_model}Serialized/",
-                f"{path_model}StateDict/",
-            ]:
-                if not os.path.exists(directory):
-                    os.makedirs(directory)
-
-            for name in sorted(os.listdir(path_checkpoint)):
-                checkpoint = torch.load(path_checkpoint + name, weights_only=True, map_location="cpu")
-                self.model.load(checkpoint, init=False, ema=False)
-
-                torch.save(self.model, f"{path_model}Serialized/{name}")
-                torch.save(
-                    {"Model": self.model.state_dict()},
-                    f"{path_model}StateDict/{name}",
-                )
-
-                if self.model_ema is not None:
-                    self.model_ema.module.load(checkpoint, init=False, ema=True)
-                    torch.save(
-                        self.model_ema.module,
-                        f"{path_model}Serialized/{current_date()}_EMA.pt",
-                    )
-                    torch.save(
-                        {"Model_EMA": self.model_ema.module.state_dict()},
-                        f"{path_model}StateDict/{current_date()}_EMA.pt",
-                    )
-
+        if os.path.exists(self.config_namefile):
             os.rename(
                 self.config_namefile,
                 self.config_namefile.replace(".yml", "") + "_" + str(self.it) + ".yml",
@@ -662,6 +632,7 @@ class Trainer(DistributedObject):
             world_size (int): Total number of distributed processes.
         """
         state = State[konfai_state()]
+        print(checkpoints_directory() + self.name + "/")
         if state != State.RESUME and os.path.exists(checkpoints_directory() + self.name + "/"):
             if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = input(f"The model {self.name} already exists ! Do you want to overwrite it (yes,no) : ")
@@ -669,7 +640,6 @@ class Trainer(DistributedObject):
                     return
             for directory_path in [
                 statistics_directory(),
-                models_directory(),
                 checkpoints_directory(),
                 setups_directory(),
             ]:
@@ -698,7 +668,13 @@ class Trainer(DistributedObject):
             os.makedirs(setups_directory() + self.name + "/")
         shutil.copyfile(self.config_namefile_src + ".yml", self.config_namefile)
 
-        self.dataloader = self.dataset.get_data(world_size // self.size)
+        self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
+        with open(setups_directory() + self.name + "/Train_" + str(self.it) + ".txt", "w") as f:
+            for name in train_names:
+                f.write(name + "\n")
+        with open(setups_directory() + self.name + "/Validation_" + str(self.it) + ".txt", "w") as f:
+            for name in validation_names:
+                f.write(name + "\n")
 
     def run_process(
         self,

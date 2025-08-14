@@ -261,10 +261,15 @@ class Evaluator(DistributedObject):
                 ]
                 name = data_dict[output_group][1][0]
                 for metric in self.metrics[output_group][target_group]:
-                    result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = metric(
+                    loss = metric(
                         (data_dict[output_group][0].to(0) if torch.cuda.is_available() else data_dict[output_group][0]),
                         *targets,
-                    ).item()
+                    )
+                    if isinstance(loss, tuple):
+                        true_loss = loss[1]
+                    else:
+                        true_loss = loss.item()
+                    result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = true_loss
         statistics.add(result, name)
         return result
 
@@ -304,7 +309,7 @@ class Evaluator(DistributedObject):
             f"{self.metric_path}{metric_namefile_src}.yml",
         )
 
-        self.dataloader = self.dataset.get_data(world_size)
+        self.dataloader, _, _ = self.dataset.get_data(world_size)
 
         groups_dest = [group for groups in self.dataset.groups_src.values() for group in groups]
 
