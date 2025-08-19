@@ -632,7 +632,6 @@ class Trainer(DistributedObject):
             world_size (int): Total number of distributed processes.
         """
         state = State[konfai_state()]
-        print(checkpoints_directory() + self.name + "/")
         if state != State.RESUME and os.path.exists(checkpoints_directory() + self.name + "/"):
             if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = input(f"The model {self.name} already exists ! Do you want to overwrite it (yes,no) : ")

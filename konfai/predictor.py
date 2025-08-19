@@ -715,7 +715,9 @@ class Predictor(DistributedObject):
                         path = models_directory() + self.name + "/StateDict/"
                         name = sorted(os.listdir(path))[-1]
                 if os.path.exists(path + name):
-                    state_dicts.append(torch.load(path + name, weights_only=True))
+                    state_dicts.append(
+                        torch.load(path + name, map_location=torch.device("cpu"), weights_only=False)  # nosec B614
+                    )  # nosec B614
                 else:
                     raise Exception(f"Model : {path + name} does not exist !")
         return state_dicts
