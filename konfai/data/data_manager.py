@@ -317,7 +317,6 @@ class Subset:
                 else:
                     index_set = index_set.intersection(set(self._get_index(s, names)))
                 index = list(index_set)
-                print(index)
         else:
             index = self._get_index(self.subset, names)
         if self.shuffle:
@@ -380,8 +379,8 @@ class Data(ABC):
             use_cache=use_cache,
         )
         self.dataLoader_args = {
-            "num_workers": int(os.environ["KONFAI_WORKERS"]) if use_cache else 0,
-            "pin_memory": True,
+            "num_workers": 0,
+            "pin_memory": False,
         }
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
