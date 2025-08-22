@@ -48,12 +48,13 @@ class Clip(Transform):
 
     def __init__(
         self,
-        min_value: float = -1024,
-        max_value: float = 1024,
+        min_value: float | str = -1024,
+        max_value: float | str = 1024,
         save_clip_min: bool = False,
         save_clip_max: bool = False,
+        mask: str | None = None,
     ) -> None:
-        if max_value <= min_value:
+        if isinstance(min_value, float) and isinstance(max_value, float) and max_value <= min_value:
             raise ValueError(
                 f"[Clip] Invalid clipping range: max_value ({max_value}) must be greater than min_value ({min_value})"
             )
@@ -61,14 +62,65 @@ class Clip(Transform):
         self.max_value = max_value
         self.save_clip_min = save_clip_min
         self.save_clip_max = save_clip_max
+        self.mask = mask
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        tensor[torch.where(tensor < self.min_value)] = self.min_value
-        tensor[torch.where(tensor > self.max_value)] = self.max_value
+        mask = None
+        if self.mask is not None:
+            for dataset in self.datasets:
+                if dataset.is_dataset_exist(self.mask, name):
+                    mask, _ = dataset.read_data(self.mask, name)
+                    break
+        if mask is None and self.mask is not None:
+            raise ValueError(
+                f"Requested mask '{self.mask}' is not present in any dataset. "
+                "Check your dataset group names or configuration."
+            )
+        if mask is None:
+            tensor_masked = tensor
+        else:
+            tensor_masked = tensor[mask == 1]
+
+        if isinstance(self.min_value, str):
+            if self.min_value == "min":
+                min_value = torch.min(tensor_masked)
+            elif self.min_value.startswith("percentile:"):
+                try:
+                    percentile = float(self.min_value.split(":")[1])
+                    min_value = np.percentile(tensor_masked, percentile)
+                except (IndexError, ValueError):
+                    raise ValueError(f"Invalid format for min_value: '{self.min_value}'. Expected 'percentile:<float>'")
+            else:
+                raise TypeError(
+                    f"Unsupported string for min_value: '{self.min_value}'."
+                    "Must be a float, 'min', or 'percentile:<float>'."
+                )
+        else:
+            min_value = self.min_value
+
+        if isinstance(self.max_value, str):
+            if self.max_value == "max":
+                max_value = torch.max(tensor_masked)
+            elif self.max_value.startswith("percentile:"):
+                try:
+                    percentile = float(self.max_value.split(":")[1])
+                    max_value = np.percentile(tensor_masked, percentile)
+                except (IndexError, ValueError):
+                    raise ValueError(f"Invalid format for max_value: '{self.max_value}'. Expected 'percentile:<float>'")
+            else:
+                raise TypeError(
+                    f"Unsupported string for max_value: '{self.max_value}'."
+                    " Must be a float, 'max', or 'percentile:<float>'."
+                )
+        else:
+            max_value = self.max_value
+
+        tensor[torch.where(tensor < min_value)] = min_value
+        tensor[torch.where(tensor > max_value)] = max_value
         if self.save_clip_min:
-            cache_attribute["Min"] = self.min_value
+            cache_attribute["Min"] = min_value
         if self.save_clip_max:
-            cache_attribute["Max"] = self.max_value
+            cache_attribute["Max"] = max_value
         return tensor
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -143,36 +195,48 @@ class Standardize(Transform):
         lazy: bool = False,
         mean: list[float] | None = None,
         std: list[float] | None = None,
+        mask: str | None = None,
     ) -> None:
         self.lazy = lazy
         self.mean = mean
         self.std = std
+        self.mask = mask
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        mask = None
+        if self.mask is not None:
+            for dataset in self.datasets:
+                if dataset.is_dataset_exist(self.mask, name):
+                    mask, _ = dataset.read_data(self.mask, name)
+                    break
+        if mask is None and self.mask is not None:
+            raise ValueError(
+                f"Requested mask '{self.mask}' is not present in any dataset."
+                " Check your dataset group names or configuration."
+            )
+        if mask is None:
+            tensor_masked = tensor
+        else:
+            tensor_masked = tensor[mask == 1]
+
         if "Mean" not in cache_attribute:
             cache_attribute["Mean"] = (
-                torch.mean(
-                    tensor.type(torch.float32),
-                    dim=[i + 1 for i in range(len(tensor.shape) - 1)],
-                )
+                torch.tensor([torch.mean(tensor_masked.type(torch.float32))])
                 if self.mean is None
                 else torch.tensor([self.mean])
             )
+
         if "Std" not in cache_attribute:
             cache_attribute["Std"] = (
-                torch.std(
-                    tensor.type(torch.float32),
-                    dim=[i + 1 for i in range(len(tensor.shape) - 1)],
-                )
+                torch.tensor([torch.std(tensor_masked.type(torch.float32))])
                 if self.std is None
                 else torch.tensor([self.std])
             )
-
         if self.lazy:
             return tensor
         else:
-            mean = cache_attribute.get_tensor("Mean").view(-1, *[1 for _ in range(len(tensor.shape) - 1)])
-            std = cache_attribute.get_tensor("Std").view(-1, *[1 for _ in range(len(tensor.shape) - 1)])
+            mean = cache_attribute.get_tensor("Mean")
+            std = cache_attribute.get_tensor("Std")
             return (tensor - mean) / std
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
