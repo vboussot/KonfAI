@@ -21,12 +21,19 @@ class Transform(NeedDevice, ABC):
     def set_datasets(self, datasets: list[Dataset]):
         self.datasets = datasets
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
 
     @abstractmethod
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         pass
+
+
+class TransformInverse(Transform, ABC):
+
+    def __init__(self, inverse: bool) -> None:
+        super().__init__()
+        self.apply_inverse = inverse
 
     @abstractmethod
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -54,6 +61,7 @@ class Clip(Transform):
         save_clip_max: bool = False,
         mask: str | None = None,
     ) -> None:
+        super().__init__()
         if isinstance(min_value, float) and isinstance(max_value, float) and max_value <= min_value:
             raise ValueError(
                 f"[Clip] Invalid clipping range: max_value ({max_value}) must be greater than min_value ({min_value})"
@@ -123,11 +131,8 @@ class Clip(Transform):
             cache_attribute["Max"] = max_value
         return tensor
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
 
-
-class Normalize(Transform):
+class Normalize(TransformInverse):
 
     def __init__(
         self,
@@ -135,7 +140,9 @@ class Normalize(Transform):
         channels: list[int] | None = None,
         min_value: float = -1,
         max_value: float = 1,
+        inverse: bool = True,
     ) -> None:
+        super().__init__(inverse)
         if max_value <= min_value:
             raise ValueError(
                 f"[Normalize] Invalid range: max_value ({max_value}) must be greater than min_value ({min_value})"
@@ -188,7 +195,7 @@ class Normalize(Transform):
             return (tensor - self.min_value) * (input_max - input_min) / (self.max_value - self.min_value) + input_min
 
 
-class Standardize(Transform):
+class Standardize(TransformInverse):
 
     def __init__(
         self,
@@ -196,7 +203,9 @@ class Standardize(Transform):
         mean: list[float] | None = None,
         std: list[float] | None = None,
         mask: str | None = None,
+        inverse: bool = True,
     ) -> None:
+        super().__init__(inverse)
         self.lazy = lazy
         self.mean = mean
         self.std = std
@@ -248,9 +257,10 @@ class Standardize(Transform):
             return tensor * std + mean
 
 
-class TensorCast(Transform):
+class TensorCast(TransformInverse):
 
-    def __init__(self, dtype: str = "float32") -> None:
+    def __init__(self, dtype: str = "float32", inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.dtype: torch.dtype = getattr(torch, dtype)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -268,9 +278,10 @@ class TensorCast(Transform):
         return tensor.to(TensorCast.safe_dtype_cast(cache_attribute.pop("dtype")))
 
 
-class Padding(Transform):
+class Padding(TransformInverse):
 
-    def __init__(self, padding: list[int] = [0, 0, 0, 0, 0, 0], mode: str = "constant") -> None:
+    def __init__(self, padding: list[int] = [0, 0, 0, 0, 0, 0], mode: str = "constant", inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.padding = padding
         self.mode = mode
 
@@ -290,7 +301,7 @@ class Padding(Transform):
         ).squeeze(0)
         return result
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         for dim in range(len(self.padding) // 2):
             shape[-dim - 1] += sum(self.padding[dim * 2 : dim * 2 + 2])
         return shape
@@ -301,13 +312,14 @@ class Padding(Transform):
         slices = [slice(0, shape) for shape in tensor.shape]
         for dim in range(len(self.padding) // 2):
             slices[-dim - 1] = slice(self.padding[dim * 2], tensor.shape[-dim - 1] - self.padding[dim * 2 + 1])
-        result = tensor[slices]
+        result = tensor[tuple(slices)]
         return result
 
 
-class Squeeze(Transform):
+class Squeeze(TransformInverse):
 
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int, inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.dim = dim
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -317,10 +329,10 @@ class Squeeze(Transform):
         return tensor.unsqueeze(self.dim)
 
 
-class Resample(Transform, ABC):
+class Resample(TransformInverse, ABC):
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, inverse: bool) -> None:
+        super().__init__(inverse)
 
     def _resample(self, tensor: torch.Tensor, size: list[int]) -> torch.Tensor:
         if tensor.dtype == torch.uint8:
@@ -341,7 +353,7 @@ class Resample(Transform, ABC):
         pass
 
     @abstractmethod
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         pass
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -353,10 +365,11 @@ class Resample(Transform, ABC):
 
 class ResampleToResolution(Resample):
 
-    def __init__(self, spacing: list[float] = [1.0, 1.0, 1.0]) -> None:
+    def __init__(self, spacing: list[float] = [1.0, 1.0, 1.0], inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.spacing = torch.tensor([0 if s < 0 else s for s in spacing])
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
             TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
@@ -364,35 +377,36 @@ class ResampleToResolution(Resample):
             )
         if len(shape) != len(self.spacing):
             TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
-        image_spacing = cache_attribute.get_tensor("Spacing").flip(0)
+        image_spacing = cache_attribute.get_tensor("Spacing")
         spacing = self.spacing
 
         for i, s in enumerate(self.spacing):
             if s == 0:
                 spacing[i] = image_spacing[i]
-        resize_factor = spacing / cache_attribute.get_tensor("Spacing").flip(0)
-        return [int(x) for x in (torch.tensor(shape) * 1 / resize_factor)]
+        resize_factor = spacing / image_spacing
+        return [int(x) for x in (torch.tensor(shape) * 1 / resize_factor.flip(0))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        image_spacing = cache_attribute.get_tensor("Spacing").flip(0)
+        image_spacing = cache_attribute.get_tensor("Spacing")
         spacing = self.spacing
         for i, s in enumerate(self.spacing):
             if s == 0:
                 spacing[i] = image_spacing[i]
-        resize_factor = spacing / cache_attribute.get_tensor("Spacing").flip(0)
-        cache_attribute["Spacing"] = spacing.flip(0)
+        resize_factor = spacing / cache_attribute.get_tensor("Spacing")
+        cache_attribute["Spacing"] = spacing
         cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(tensor.shape[1:])])
-        size = [int(x) for x in (torch.tensor(tensor.shape[1:]) * 1 / resize_factor)]
+        size = [int(x) for x in (torch.tensor(tensor.shape[1:]) * 1 / resize_factor.flip(0))]
         cache_attribute["Size"] = np.asarray(size)
         return self._resample(tensor, size)
 
 
 class ResampleToShape(Resample):
 
-    def __init__(self, shape: list[float] = [100, 256, 256]) -> None:
+    def __init__(self, shape: list[float] = [100, 256, 256], inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.shape = torch.tensor([0 if s < 0 else s for s in shape])
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
             TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
@@ -422,12 +436,13 @@ class ResampleToShape(Resample):
         return self._resample(tensor, shape)
 
 
-class ResampleTransform(Transform):
+class ResampleTransform(TransformInverse):
 
-    def __init__(self, transforms: dict[str, bool]) -> None:
+    def __init__(self, transforms: dict[str, bool], inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.transforms = transforms
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -500,6 +515,7 @@ class ResampleTransform(Transform):
 class Mask(Transform):
 
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
+        super().__init__()
         self.path = path
         self.value_outside = value_outside
 
@@ -516,13 +532,11 @@ class Mask(Transform):
                 raise NameError(f"Mask : {self.path}/{name} not found")
         return torch.where(torch.tensor(mask) > 0, tensor, self.value_outside)
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
-
 
 class Gradient(Transform):
 
     def __init__(self, per_dim: bool = False):
+        super().__init__()
         self.per_dim = per_dim
 
     @staticmethod
@@ -556,25 +570,21 @@ class Gradient(Transform):
 
         return result
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
-
 
 class Argmax(Transform):
 
     def __init__(self, dim: int = 0) -> None:
+        super().__init__()
         self.dim = dim
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
-
 
 class FlatLabel(Transform):
 
     def __init__(self, labels: list[int] | None = None) -> None:
+        super().__init__()
         self.labels = labels
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -586,19 +596,14 @@ class FlatLabel(Transform):
             data[torch.where(tensor > 0)] = 1
         return data
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
-
 
 class Save(Transform):
 
     def __init__(self, dataset: str) -> None:
+        super().__init__()
         self.dataset = dataset
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
-
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
 
 
@@ -607,23 +612,20 @@ class Flatten(Transform):
     def __init__(self) -> None:
         super().__init__()
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [np.prod(np.asarray(shape))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.flatten()
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
 
+class Permute(TransformInverse):
 
-class Permute(Transform):
-
-    def __init__(self, dims: str = "1|0|2") -> None:
-        super().__init__()
+    def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.dims = [0] + [int(d) + 1 for d in dims.split("|")]
 
-    def transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [shape[it - 1] for it in self.dims[1:]]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -633,10 +635,10 @@ class Permute(Transform):
         return tensor.permute(tuple(np.argsort(self.dims)))
 
 
-class Flip(Transform):
+class Flip(TransformInverse):
 
-    def __init__(self, dims: str = "1|0|2") -> None:
-        super().__init__()
+    def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
+        super().__init__(inverse)
 
         self.dims = [int(d) + 1 for d in str(dims).split("|")]
 
@@ -647,9 +649,10 @@ class Flip(Transform):
         return tensor.flip(tuple(self.dims))
 
 
-class Canonical(Transform):
+class Canonical(TransformInverse):
 
-    def __init__(self) -> None:
+    def __init__(self, inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -682,6 +685,7 @@ class Canonical(Transform):
 class HistogramMatching(Transform):
 
     def __init__(self, reference_group: str) -> None:
+        super().__init__()
         self.reference_group = reference_group
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -699,13 +703,11 @@ class HistogramMatching(Transform):
         result, _ = image_to_data(matcher.Execute(image, image_ref))
         return torch.tensor(result)
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
-
 
 class SelectLabel(Transform):
 
     def __init__(self, labels: list[str]) -> None:
+        super().__init__()
         self.labels = [label[1:-1].split(",") for label in labels]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -714,14 +716,11 @@ class SelectLabel(Transform):
             data[tensor == int(old_label)] = int(new_label)
         return data
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
 
+class OneHot(TransformInverse):
 
-class OneHot(Transform):
-
-    def __init__(self, num_classes: int) -> None:
-        super().__init__()
+    def __init__(self, num_classes: int, inverse: bool = True) -> None:
+        super().__init__(inverse)
         self.num_classes = num_classes
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -755,6 +754,3 @@ class TotalSegmentator(Transform):
             .permute(2, 1, 0)
             .unsqueeze(0)
         )
-
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor
