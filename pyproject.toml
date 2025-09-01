@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "konfai"
-version = "1.2.5"
+version = "1.2.9"
 description = "Modular and configurable Deep Learning framework with YAML and PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -24,7 +24,8 @@ dependencies = [
   "SimpleITK",
   "lxml",
   "h5py",
-  "pynvml"
+  "pynvml",
+  "requests"
 ]
 
 [project.urls]

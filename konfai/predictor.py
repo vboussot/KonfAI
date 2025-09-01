@@ -16,7 +16,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from konfai import config_file, konfai_root, models_directory, path_to_models, predictions_directory
 from konfai.data.data_manager import DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
-from konfai.data.transform import Transform, TransformLoader
+from konfai.data.transform import Transform, TransformInverse, TransformLoader
 from konfai.network.network import CPUModel, ModelLoader, NetState, Network
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
@@ -226,11 +226,12 @@ class OutSameAsGroupDataset(OutputDataset):
 
         if self.inverse_transform:
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
-                layer = transform.inverse(
-                    self.names[index_dataset],
-                    layer,
-                    self.attributes[index_dataset][index_augmentation][index_patch],
-                )
+                if isinstance(transform, TransformInverse) and transform.apply_inverse:
+                    layer = transform.inverse(
+                        self.names[index_dataset],
+                        layer,
+                        self.attributes[index_dataset][index_augmentation][index_patch],
+                    )
         self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
     def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
@@ -277,7 +278,8 @@ class OutSameAsGroupDataset(OutputDataset):
 
         if self.inverse_transform:
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
-                result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
+                if isinstance(transform, TransformInverse) and transform.apply_inverse:
+                    result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
 
         for transform in self.final_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])

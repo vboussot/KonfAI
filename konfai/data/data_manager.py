@@ -515,7 +515,7 @@ class Data(ABC):
                 self.groups_src[group_src][group_dest].load(
                     group_src,
                     group_dest,
-                    [self.datasets[filename] for filename, _ in datasets[group_src]],
+                    list(self.datasets.values()),
                 )
                 model_have_input |= self.groups_src[group_src][group_dest].is_input
         if self.patch is not None:

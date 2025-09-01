@@ -218,8 +218,8 @@ class Patch(ABC):
             ),
         )
         slices = [s] + list(self._patch_slices[a][index][1:])
-        data_sliced = data[slices_pre + slices]
-        if data_sliced.shape[len(slices_pre)] < bottom + top + 1:
+        data_sliced = data[tuple(slices_pre + slices)]
+        if extend_slice > 0 and data_sliced.shape[len(slices_pre)] < bottom + top + 1:
             pad_bottom = 0
             pad_top = 0
             if self._patch_slices[a][index][0].start - bottom < 0:
@@ -335,7 +335,7 @@ class DatasetManager:
         self.data: list[torch.Tensor] = []
 
         for transform_function in transforms:
-            _shape = transform_function.transform_shape(_shape, cache_attribute)
+            _shape = transform_function.transform_shape(self.name, _shape, cache_attribute)
 
         self.patch = (
             DatasetPatch(
