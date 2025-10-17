@@ -60,3 +60,20 @@ konfai TRAIN --gpu 0
 konfai PREDICTION --gpu 0
 konfai EVALUATION
 ```
+
+🧩 TODO & Perspectives
+
+📘 Documentation
+
+The official KonfAI documentation is in progress and will be released soon.
+
+🤖 KonfAI-MCP Server
+
+We are actively developing KonfAI-MCP, an extension of the framework enabling language-driven deep learning experimentation.
+Through the Model Context Protocol (MCP), KonfAI will serve as the deterministic and transparent execution layer for agentic LLMs, allowing large language models to specify, launch, and refine deep learning experiments directly through natural language.
+
+Imagine instructing an AI to:
+“Train a model for lung tumor segmentation from this dataset and optimize the Dice score.”
+KonfAI-MCP aims to turn such instructions into reproducible, verifiable experiments.
+
+This represents the next stage of AI-assisted scientific research, where language becomes a medium of empirical discovery.
