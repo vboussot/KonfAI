@@ -86,17 +86,17 @@ def get_cpu_info() -> str:
 
 
 def get_memory_info() -> str:
-    return f"Memory ({psutil.virtual_memory()[3] / 2**30:.2f}G ({psutil.virtual_memory()[2]:.2f} %))"
+    return f"Memory ({psutil.virtual_memory().used / 2**30:.2f}G ({psutil.virtual_memory().percent:.2f} %))"
 
 
 def get_memory() -> float:
-    return psutil.virtual_memory()[3] / 2**30
+    return psutil.virtual_memory().used / 2**30
 
 
-def memory_forecast(memory_init: float, i: float, size: float) -> str:
+def memory_forecast(memory_init: float, size: float) -> str:
     current_memory = get_memory()
-    forecast = memory_init + ((current_memory - memory_init) * size / i) if i > 0 else 0
-    return f"Memory forecast ({forecast:.2f}G ({forecast / (psutil.virtual_memory()[0] / 2**30) * 100:.2f} %))"
+    forecast = memory_init + ((current_memory - memory_init) * size)
+    return f"Memory forecast ({forecast:.2f}G ({forecast / (psutil.virtual_memory().total / 2**30) * 100:.2f} %))"
 
 
 def gpu_info() -> str:
@@ -505,8 +505,8 @@ class DistributedObject(ABC):
                 torch.manual_seed(self.manual_seed * world_size + global_rank)
             torch.backends.cudnn.benchmark = self.manual_seed is None
             torch.backends.cudnn.deterministic = self.manual_seed is not None
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cuda.matmul.fp32_precision = "tf32"
+            torch.backends.cudnn.conv.fp32_precision = "tf32"
             dataloaders = self.dataloader[global_rank]
             if torch.cuda.is_available():
                 torch.cuda.set_device(local_rank)
@@ -532,13 +532,13 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
         default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
         help="List of GPU",
     )
-    konfai.add_argument("-cpu", "--cpu", type=str, default="1", help="List of GPU")
+    konfai.add_argument("-cpu", "--cpu", type=str, default="1", help="Number of cores")
     konfai.add_argument(
         "--num-workers",
         "--num_workers",
         default=4,
         type=int,
-        help="No. of workers per DataLoader & GPU",
+        help="Number of workers per DataLoader & GPU",
     )
     konfai.add_argument(
         "-models_dir",
@@ -583,9 +583,10 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
         default="./Setups/",
         help="Setups location",
     )
-    konfai.add_argument("-log", action="store_true", help="Save log")
-    konfai.add_argument("-quiet", action="store_false", help="")
+    konfai.add_argument("-log", action="store_true", help="Enable logging to a file")
+    konfai.add_argument("-quiet", action="store_false", help="Suppress console output for a quieter execution")
 
+    konfai.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
     args = parser.parse_args()
     config = vars(args)
 

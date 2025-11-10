@@ -3,10 +3,8 @@ import importlib
 from collections.abc import Callable
 from enum import Enum
 
-import numpy as np
 import SimpleITK as sitk  # noqa: N813
 import torch
-from scipy.interpolate import interp1d
 
 from konfai.network import network
 from konfai.utils.config import config
@@ -388,27 +386,6 @@ class Const(torch.nn.Module):
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         return self.noise.to(tensor.device)
-
-
-class HistogramNoise(torch.nn.Module):
-
-    def __init__(self, n: int, sigma: float) -> None:
-        super().__init__()
-        self.x = np.linspace(0, 1, num=n, endpoint=True)
-        self.sigma = sigma
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        self.function = interp1d(
-            self.x,
-            self.x + np.random.normal(0, self.sigma, self.x.shape[0]),
-            kind="cubic",
-        )
-        result = torch.empty_like(tensor)
-
-        for value in torch.unique(tensor):
-            x = self.function(value.cpu())
-            result[torch.where(tensor == value)] = torch.tensor(x, device=tensor.device).float()
-        return result
 
 
 class Subset(torch.nn.Module):
