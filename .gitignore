@@ -9,3 +9,5 @@ examples
 docs
 tests
 konfai/metric/models
+.vscode
+.mypy_cache

@@ -252,8 +252,8 @@ class Standardize(TransformInverse):
         if self.lazy:
             return tensor
         else:
-            mean = float(cache_attribute.pop("Mean"))
-            std = float(cache_attribute.pop("Std"))
+            mean = cache_attribute.pop_tensor("Mean")
+            std = cache_attribute.pop_tensor("Std")
             return tensor * std + mean
 
 
@@ -341,6 +341,7 @@ class Resample(TransformInverse, ABC):
             mode = "bilinear"
         else:
             mode = "trilinear"
+
         return (
             F.interpolate(tensor.type(torch.float32).unsqueeze(0), size=tuple(size), mode=mode)
             .squeeze(0)
@@ -579,6 +580,16 @@ class Argmax(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
+
+
+class Softmax(Transform):
+
+    def __init__(self, dim: int = 0) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return torch.softmax(tensor, dim=self.dim)
 
 
 class FlatLabel(Transform):

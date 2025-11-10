@@ -186,7 +186,7 @@ class DatasetIter(data.Dataset):
                     return (
                         f"Caching {label}: "
                         f"{get_memory_info()} | "
-                        f"{memory_forecast(memory_init, 0, self.nb_dataset)} | "
+                        f"{memory_forecast(memory_init, self.nb_dataset)} | "
                         f"{get_cpu_info()}"
                     )
 

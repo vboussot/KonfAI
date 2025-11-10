@@ -30,7 +30,7 @@ class Reduction(ABC):
         pass
 
     @abstractmethod
-    def __call__(self, result: torch.Tensor) -> torch.Tensor:
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         pass
 
 
@@ -39,8 +39,8 @@ class Mean(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, result: torch.Tensor) -> torch.Tensor:
-        return torch.mean(result.float(), dim=0)
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        return torch.mean(torch.stack(tensors, dim=0).float(), dim=0)
 
 
 class Median(Reduction):
@@ -48,8 +48,8 @@ class Median(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, result: torch.Tensor) -> torch.Tensor:
-        return torch.median(result.float(), dim=0).values
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        return torch.median(torch.stack(tensors, dim=0).float(), dim=0).values
 
 
 class OutputDataset(Dataset, NeedDevice, ABC):
@@ -264,15 +264,12 @@ class OutSameAsGroupDataset(OutputDataset):
         return layer
 
     def get_output(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        result = torch.cat(
-            [
-                self._get_output(index, index_augmentation, dataset).unsqueeze(0)
-                for index_augmentation in self.output_layer_accumulator[index].keys()
-            ],
-            dim=0,
-        )
+        results = [
+            self._get_output(index, index_augmentation, dataset)
+            for index_augmentation in self.output_layer_accumulator[index].keys()
+        ]
         self.output_layer_accumulator.pop(index)
-        result = self.reduction(result.float()).to(result.dtype)
+        result = self.reduction(results).to(results[0].dtype)
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
@@ -418,40 +415,41 @@ class _Predictor:
             total=len(self.dataloader_prediction),
             ncols=0,
         ) as batch_iter:
-            for _, data_dict in batch_iter:
+            with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    input_tensor = self.get_input(data_dict)
-                    for name, output in self.model_composite(input_tensor, list(self.outputs_dataset.keys())):
-                        self._predict_log(data_dict)
-                        output_dataset = self.outputs_dataset[name]
-                        for i, (index, patch_augmentation, patch_index) in enumerate(
-                            [
-                                (int(index), int(patch_augmentation), int(patch_index))
-                                for index, patch_augmentation, patch_index in zip(
-                                    list(data_dict.values())[0][1],
-                                    list(data_dict.values())[0][2],
-                                    list(data_dict.values())[0][3],
-                                )
-                            ]
-                        ):
-                            output_dataset.add_layer(
-                                index,
-                                patch_augmentation,
-                                patch_index,
-                                output[i].cpu(),
-                                self.dataset,
-                            )
-                            if output_dataset.is_done(index):
-                                output_dataset.write_prediction(
+                    for _, data_dict in batch_iter:
+                        input_tensor = self.get_input(data_dict)
+                        for name, output in self.model_composite(input_tensor, list(self.outputs_dataset.keys())):
+                            self._predict_log(data_dict)
+                            output_dataset = self.outputs_dataset[name]
+                            for i, (index, patch_augmentation, patch_index) in enumerate(
+                                [
+                                    (int(index), int(patch_augmentation), int(patch_index))
+                                    for index, patch_augmentation, patch_index in zip(
+                                        list(data_dict.values())[0][1],
+                                        list(data_dict.values())[0][2],
+                                        list(data_dict.values())[0][3],
+                                    )
+                                ]
+                            ):
+                                output_dataset.add_layer(
                                     index,
-                                    self.dataset.get_dataset_from_index(list(data_dict.keys())[0], index).name.split(
-                                        "/"
-                                    )[-1],
-                                    output_dataset.get_output(index, self.dataset),
+                                    patch_augmentation,
+                                    patch_index,
+                                    output[i].cpu(),
+                                    self.dataset,
                                 )
+                                if output_dataset.is_done(index):
+                                    output_dataset.write_prediction(
+                                        index,
+                                        self.dataset.get_dataset_from_index(
+                                            list(data_dict.keys())[0], index
+                                        ).name.split("/")[-1],
+                                        output_dataset.get_output(index, self.dataset),
+                                    )
 
-                    batch_iter.set_description(f"Prediction : {description(self.model_composite)}")
-                    self.it += 1
+                        batch_iter.set_description(f"Prediction : {description(self.model_composite)}")
+                        self.it += 1
 
     def _predict_log(
         self,
@@ -598,7 +596,7 @@ class ModelComposite(Network):
 
         final_outputs = []
         for key, tensors in aggregated.items():
-            final_outputs.append((key, self.combine(torch.stack(tensors, dim=0))))
+            final_outputs.append((key, self.combine(tensors)))
 
         return final_outputs
 
