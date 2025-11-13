@@ -11,3 +11,4 @@ tests
 konfai/metric/models
 .vscode
 .mypy_cache
+test

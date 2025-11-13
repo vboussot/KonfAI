@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import itertools
+import json
 import os
 import random
 import re
@@ -21,6 +22,9 @@ import requests
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F  # noqa: N812
+from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.hf_api import RepoFolder
+from ruamel.yaml import YAML
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
@@ -165,6 +169,7 @@ class State(Enum):
     TRANSFER_LEARNING = "TRANSFER_LEARNING"
     FINE_TUNING = "FINE_TUNING"
     PREDICTION = "PREDICTION"
+    PREDICTION_HF = "PREDICTION_HF"
     EVALUATION = "EVALUATION"
 
     def __str__(self) -> str:
@@ -505,8 +510,8 @@ class DistributedObject(ABC):
                 torch.manual_seed(self.manual_seed * world_size + global_rank)
             torch.backends.cudnn.benchmark = self.manual_seed is None
             torch.backends.cudnn.deterministic = self.manual_seed is not None
-            torch.backends.cuda.matmul.fp32_precision = "tf32"
-            torch.backends.cudnn.conv.fp32_precision = "tf32"
+            # torch.backends.cuda.matmul.fp32_precision = "tf32"
+            # torch.backends.cudnn.conv.fp32_precision = "tf32"
             dataloaders = self.dataloader[global_rank]
             if torch.cuda.is_available():
                 torch.cuda.set_device(local_rank)
@@ -583,6 +588,8 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
         default="./Setups/",
         help="Setups location",
     )
+    konfai.add_argument("--tta", type=int, default=0, help="Number of augmentation")
+
     konfai.add_argument("-log", action="store_true", help="Enable logging to a file")
     konfai.add_argument("-quiet", action="store_false", help="Suppress console output for a quieter execution")
 
@@ -625,7 +632,17 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     torch.autograd.set_detect_anomaly(True)
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-    if config["type"] is State.PREDICTION:
+    if config["type"] is State.PREDICTION_HF:
+        from konfai.predictor import Predictor
+
+        model_hf = ModelHF(config["config"])
+        models_path = model_hf.install(config["tta"], config["MODEL"])
+        os.environ["KONFAI_MODEL"] = ":".join(models_path)
+        os.environ["KONFAI_config_file"] = "Prediction.yml"
+        os.environ["konfai_root"] = "Predictor"
+        os.environ["KONFAI_STATE"] = str(State.PREDICTION)
+        return Predictor(config=config_file())
+    elif config["type"] is State.PREDICTION:
         from konfai.predictor import Predictor
 
         os.environ["konfai_root"] = "Predictor"
@@ -882,3 +899,189 @@ class TransformError(KonfAIError):
 
     def __init__(self, *message) -> None:
         super().__init__("Transform", *message)
+
+
+class RepositoryHFError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("HF", *message)
+
+
+def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
+    api = HfApi()
+    model_names = []
+    try:
+        tree = api.list_repo_tree(repo_id=repo_id)
+    except Exception as e:
+        raise RepositoryHFError(f"Unable to access repository '{repo_id}': {e}")
+    for entry in tree:
+        model_name = entry.path
+        if isinstance(entry, RepoFolder) and is_model_repo(repo_id, model_name)[0]:
+            model_names.append(model_name)
+    return model_names
+
+
+def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, int]:
+    """
+    Check whether the Hugging Face repository structure is valid for KonfAI.
+    Required files:
+    - at least one .pt file in the model folder
+    - a Prediction.yml file
+    - a metadata.json file
+    """
+    api = HfApi()
+    fold_names = []
+    found_prediction_file = False
+    found_metadata_file = False
+
+    try:
+        tree = api.list_repo_tree(repo_id=repo_id, path_in_repo=model_name)
+    except Exception as e:
+        return False, f"Unable to access repository '{repo_id}': {e}", 0
+
+    for file in tree:
+        if file.path.endswith(".pt"):
+            fold_names.append(file.path)
+        elif file.path.endswith("Prediction.yml"):
+            found_prediction_file = True
+        elif file.path.endswith("metadata.json"):
+            found_metadata_file = True
+
+    if len(fold_names) == 0:
+        return False, f"No '.pt' model files were found in '{repo_id}/{model_name}'.", 0
+
+    if not found_prediction_file:
+        return False, f"Missing 'Prediction.yml' in '{repo_id}/{model_name}'.", 0
+
+    if not found_metadata_file:
+        return False, f"Missing 'metadata.json' in '{repo_id}/{model_name}'.", 0
+    return True, "", len(fold_names)
+
+
+class ModelHF:
+
+    def __init__(self, model_name: str):
+        if model_name and len(model_name.split(":")) != 2:
+            raise RepositoryHFError(
+                f"Invalid model name format in --config: '{model_name}'. "
+                "Expected format is 'REPO_ID:NAME', e.g. 'VBoussot/ImpactSynth:MR'."
+            )
+        self.repo_id, self.model_name = model_name.split(":")
+        _, err_message, self._number_of_models = is_model_repo(self.repo_id, self.model_name)
+        if err_message:
+            raise RepositoryHFError(err_message)
+        model_metadata = self._read_metadata()
+
+        required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
+        missing = [k for k in required_keys if k not in model_metadata]
+        if missing:
+            raise RepositoryHFError(f"Missing keys in metadata.json: {', '.join(missing)}")
+
+        self._description = str(model_metadata["description"])
+        self._short_description = str(model_metadata["short_description"])
+
+        try:
+            self._maximum_tta = int(model_metadata["tta"])
+        except Exception:
+            raise RepositoryHFError("The field 'tta' must be an integer.")
+
+        try:
+            self._mc_dropout = int(model_metadata["mc_dropout"])
+        except Exception:
+            raise RepositoryHFError("The field 'mc_dropout' must be an integer.")
+
+        self._display_name = str(model_metadata["display_name"])
+
+    def _read_metadata(self) -> dict[str, str]:
+        metadata_file_path = hf_hub_download(
+            repo_id=self.repo_id, filename=f"{self.model_name}/metadata.json", repo_type="model", revision=None
+        )  # nosec B615
+        with open(metadata_file_path, encoding="utf-8") as f:
+            model_metadata = json.load(f)
+        return model_metadata
+
+    def set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
+        new_value = int(np.clip(new_value, 0, self._maximum_tta))
+        if new_value > 0:
+            yaml = YAML()
+            with open(inference_file_path) as f:
+                data = yaml.load(f)
+
+            tmp = data["Predictor"]["Dataset"]["augmentations"]
+            if "DataAugmentation_0" in tmp:
+                tmp["DataAugmentation_0"]["nb"] = new_value
+            with open(inference_file_path, "w") as f:
+                yaml.dump(data, f)
+
+    def download(self, number_of_model: int) -> tuple[list[str], str, list[str]]:
+        api = HfApi()
+        models_path = []
+        codes_path = []
+        i = 0
+        for filename in api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name):
+            if filename.path.endswith(".pt"):
+                i += 1
+                if i > number_of_model:
+                    continue
+
+            file_path = hf_hub_download(
+                repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
+            )  # nosec B615
+            if "Prediction.yml" in filename.path:
+                inference_file_path = file_path
+            elif filename.path.endswith(".pt"):
+                models_path.append(file_path)
+            elif "requirements.txt" in filename.path:
+                with open(file_path, encoding="utf-8") as f:
+                    required_packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+                    installed = {dist.metadata["Name"].lower() for dist in importlib.metadata.distributions()}
+                    missing = []
+                    for req in required_packages:
+                        if req not in installed:
+                            missing.append(req)
+                    if missing:
+                        try:
+                            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])  # nosec B603
+                        except subprocess.CalledProcessError as e:
+                            raise RepositoryHFError(f"Failed to install packages: {e}")
+            elif "metadata.json" not in filename.path:
+                codes_path.append(file_path)
+        return models_path, inference_file_path, codes_path
+
+    def install(self, number_of_augmentation: int, number_of_model: int) -> list[str]:
+        if not number_of_model:
+            number_of_model = self._number_of_models
+        else:
+            try:
+                number_of_model = int(number_of_model)
+            except ValueError:
+                raise RepositoryHFError(
+                    f"Invalid value provided for '--MODEL': '{number_of_model}'. ",
+                    "The value must be an integer (e.g. 1, 2, 3).",
+                )
+        models_path, inference_file_path, codes_path = self.download(number_of_model)
+
+        shutil.copy2(inference_file_path, "./Prediction.yml")
+        self.set_number_of_augmentation("./Prediction.yml", number_of_augmentation)
+        for code_path in codes_path:
+            shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+
+        return models_path
+
+    def get_display_name(self):
+        return self._display_name
+
+    def get_maximum_tta(self):
+        return self._maximum_tta
+
+    def get_mc_dropout(self):
+        return self._mc_dropout
+
+    def get_number_of_models(self):
+        return self._number_of_models
+
+    def get_description(self):
+        return self._description
+
+    def get_short_description(self):
+        return self._short_description
