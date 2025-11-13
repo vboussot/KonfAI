@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "konfai"
-version = "1.3.1"
+version = "1.3.5"
 description = "Modular and configurable Deep Learning framework with YAML and PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -25,7 +25,8 @@ dependencies = [
   "lxml",
   "h5py",
   "nvidia-ml-py",
-  "requests"
+  "requests",
+  "huggingface_hub"
 ]
 
 [project.urls]

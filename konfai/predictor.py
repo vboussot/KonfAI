@@ -30,7 +30,7 @@ class Reduction(ABC):
         pass
 
     @abstractmethod
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
         pass
 
 
@@ -39,8 +39,10 @@ class Mean(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        return torch.mean(torch.stack(tensors, dim=0).float(), dim=0)
+    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+        if isinstance(tensor, list):
+            tensor = torch.stack(tensor, dim=0)
+        return torch.mean(tensor.float(), dim=0)
 
 
 class Median(Reduction):
@@ -48,8 +50,10 @@ class Median(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        return torch.median(torch.stack(tensors, dim=0).float(), dim=0).values
+    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+        if isinstance(tensor, list):
+            tensor = torch.stack(tensor, dim=0)
+        return torch.median(tensor.float(), dim=0).values
 
 
 class OutputDataset(Dataset, NeedDevice, ABC):
@@ -264,12 +268,15 @@ class OutSameAsGroupDataset(OutputDataset):
         return layer
 
     def get_output(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        results = [
-            self._get_output(index, index_augmentation, dataset)
-            for index_augmentation in self.output_layer_accumulator[index].keys()
-        ]
+        result = torch.cat(
+            [
+                self._get_output(index, index_augmentation, dataset).unsqueeze(0)
+                for index_augmentation in self.output_layer_accumulator[index].keys()
+            ],
+            dim=0,
+        )
         self.output_layer_accumulator.pop(index)
-        result = self.reduction(results).to(results[0].dtype)
+        result = self.reduction(result.float()).to(result.dtype)
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
