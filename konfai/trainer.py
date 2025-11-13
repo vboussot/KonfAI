@@ -636,7 +636,7 @@ class Trainer(DistributedObject):
             if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = input(f"The model {self.name} already exists ! Do you want to overwrite it (yes,no) : ")
                 if accept != "yes":
-                    return
+                    exit(0)
             for directory_path in [
                 statistics_directory(),
                 checkpoints_directory(),

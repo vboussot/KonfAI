@@ -56,6 +56,18 @@ class Median(Reduction):
         return torch.median(tensor.float(), dim=0).values
 
 
+class Concat(Reduction):
+
+    def __init__(self):
+        pass
+
+    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+        if isinstance(tensor, list):
+            return torch.stack(tensor, dim=2).squeeze(1)
+        else:
+            return tensor.view(tensor.shape[0] * tensor.shape[1], -1, *tensor.shape[3:])
+
+
 class OutputDataset(Dataset, NeedDevice, ABC):
 
     def __init__(
@@ -105,7 +117,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
                         classpath,
                         konfai_args=f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{name}",
                     )
-                    transform.set_datasets(datasets)
+                    transform.set_datasets(datasets + [self])
                     transform_type.append(transform)
 
         if self._patch_combine is not None:
@@ -758,7 +770,7 @@ class Predictor(DistributedObject):
                         f"The prediction {path} already exists ! Do you want to overwrite it (yes,no) : "
                     )
                     if accept != "yes":
-                        return
+                        exit(0)
 
             if not os.path.exists(path):
                 os.makedirs(path)

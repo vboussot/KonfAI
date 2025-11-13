@@ -232,7 +232,7 @@ class Evaluator(DistributedObject):
             exit(0)
         super().__init__(train_name)
         self.metric_path = evaluations_directory() + self.name + "/"
-        self.metricsLoader = metrics
+        self.metricsLoader = metrics if metrics else {}
         self.dataset = dataset
         self.metrics = {k: v.get_targets_criterions(k) for k, v in self.metricsLoader.items()}
         self.statistics_train = Statistics(self.metric_path + "Metric_TRAIN.json")
@@ -281,7 +281,8 @@ class Evaluator(DistributedObject):
                         result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = loss / c
                     else:
                         result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = true_loss
-        statistics.add(result, name)
+        if len(self.metrics) > 0:
+            statistics.add(result, name)
         return result
 
     def setup(self, world_size: int):
@@ -307,7 +308,7 @@ class Evaluator(DistributedObject):
                     f"The metric {self.name} already exists ! Do you want to overwrite it (yes,no) : "
                 )
                 if accept != "yes":
-                    return
+                    exit(0)
 
             if os.path.exists(self.metric_path):
                 shutil.rmtree(self.metric_path)
@@ -323,7 +324,6 @@ class Evaluator(DistributedObject):
         self.dataloader, _, _ = self.dataset.get_data(world_size)
 
         groups_dest = [group for groups in self.dataset.groups_src.values() for group in groups]
-
         missing_outputs = set(self.metrics.keys()) - set(groups_dest)
         if missing_outputs:
             raise EvaluatorError(
@@ -335,7 +335,7 @@ class Evaluator(DistributedObject):
         for i in {target for targets in self.metrics.values() for target in targets}:
             for u in i.split(";"):
                 target_groups.append(u)
-        missing_targets = set(target_groups) - set(groups_dest)
+        missing_targets = set(target_groups) - (set(groups_dest + ["None"]))
         if missing_targets:
             raise EvaluatorError(
                 f"The following metric target groups are missing from 'groups_dest': {sorted(missing_targets)}. ",

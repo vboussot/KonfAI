@@ -63,14 +63,14 @@ class MaskedLoss(Criterion):
             for batch in range(output.shape[0]):
                 if self.mode_image_masked:
                     loss_b = self.loss(
-                        output[batch, ...] * torch.where(mask == 1, 1, 0),
-                        targets[0][batch, ...] * torch.where(mask == 1, 1, 0),
+                        output[batch, ...].float() * torch.where(mask == 1, 1, 0),
+                        targets[0][batch, ...].float() * torch.where(mask == 1, 1, 0),
                     )
                 else:
                     index = mask[batch, ...] == 1
                     loss_b = self.loss(
-                        torch.masked_select(output[batch, ...], index),
-                        torch.masked_select(targets[0][batch, ...], index),
+                        torch.masked_select(output[batch, ...], index).float(),
+                        torch.masked_select(targets[0][batch, ...], index).float(),
                     )
 
                 loss += loss_b
@@ -78,7 +78,7 @@ class MaskedLoss(Criterion):
                     true_loss += loss_b.item()
                     true_nb += 1
         else:
-            loss_tmp = self.loss(output, targets[0])
+            loss_tmp = self.loss(output.float(), targets[0].float())
             loss += loss_tmp
             true_loss += loss_tmp.item()
             true_nb += 1
@@ -698,3 +698,22 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         else:
             loss = self._compute(output, list(targets))
         return loss.to(output)
+
+
+class Variance(Criterion):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        return output.float().var(1).mean(), output.float().var(1).mean().item()
+
+
+class Mean(Criterion):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        loss = output.float().mean()
+        return loss, loss.item()
