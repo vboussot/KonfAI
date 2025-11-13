@@ -1,6 +1,9 @@
 import importlib
+import os
+import subprocess  # nosec B404
 import tempfile
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -16,6 +19,7 @@ from konfai.utils.utils import NeedDevice, TransformError, _affine_matrix, _resa
 class Transform(NeedDevice, ABC):
 
     def __init__(self) -> None:
+        NeedDevice.__init__(self)
         self.datasets: list[Dataset] = []
 
     def set_datasets(self, datasets: list[Dataset]):
@@ -193,6 +197,17 @@ class Normalize(TransformInverse):
             input_min = float(cache_attribute.pop("Min"))
             input_max = float(cache_attribute.pop("Max"))
             return (tensor - self.min_value) * (input_max - input_min) / (self.max_value - self.min_value) + input_min
+
+
+class UnNormalize(Transform):
+
+    def __init__(self, min_value: int = -1024, max_value: int = 3071) -> None:
+        super().__init__()
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return (tensor + 1) / 2 * (self.max_value - self.min_value) + self.min_value
 
 
 class Standardize(TransformInverse):
@@ -610,9 +625,10 @@ class FlatLabel(Transform):
 
 class Save(Transform):
 
-    def __init__(self, dataset: str) -> None:
+    def __init__(self, dataset: str, group: str | None = None) -> None:
         super().__init__()
         self.dataset = dataset
+        self.group = group
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor
@@ -745,6 +761,102 @@ class OneHot(TransformInverse):
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=1).unsqueeze(1)
+
+
+class KonfAIInference(Transform):
+
+    def __init__(
+        self,
+        repo_id: str = "VBoussot/MRSegmentator-KonfAI",
+        model_name: str = "MRSegmentator",
+        number_of_ensemble: int = 0,
+        number_of_tta: int = 0,
+        number_of_mc_dropout: int = 0,
+        per_channel: bool = False,
+    ):
+        super().__init__()
+        self.repo_id = repo_id
+        self.model_name = model_name
+        self.number_of_ensemble = number_of_ensemble
+        self.number_of_tta = number_of_tta
+        self.number_of_mc_dropout = number_of_mc_dropout
+        self.per_channel = per_channel
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dataset = Path(tmpdir) / "Dataset"
+            if self.per_channel:
+                for i, channel in enumerate(tensor):
+                    image = data_to_image(channel.unsqueeze(0).numpy(), cache_attribute)
+                    (dataset / f"P{i:03d}").mkdir(parents=True, exist_ok=True)
+                    sitk.WriteImage(image, dataset / f"P{i:03d}" / "Volume.nii.gz")
+            else:
+                image = data_to_image(tensor.numpy(), cache_attribute)
+
+                (dataset / "P001").mkdir(parents=True, exist_ok=True)
+                sitk.WriteImage(image, dataset / "P001" / "Volume.nii.gz")
+
+            cmd = [
+                "konfai",
+                "PREDICTION_HF",
+                "-y",
+                "--MODEL",
+                str(self.number_of_ensemble),
+                "--tta",
+                str(self.number_of_tta),
+                "--config",
+                f"{self.repo_id}:{self.model_name}",
+            ]
+            if os.environ["CUDA_VISIBLE_DEVICES"]:
+                cmd += ["--gpu", os.environ["CUDA_VISIBLE_DEVICES"]]
+            else:
+                cmd += ["--cpu", os.environ["KONFAI_NB_CORES"]]
+
+            try:
+                subprocess.run(cmd, cwd=tmpdir, check=True)  # nosec B603
+            except subprocess.CalledProcessError as e:
+                raise TransformError(
+                    f"KonfAIInference {self.repo_id}:{self.model_name} failed with exit code {e.returncode}."
+                )
+
+            mha_file = list((Path(tmpdir) / "Predictions").rglob("*.mha"))
+            result = []
+            for file in mha_file:
+                result.append(torch.from_numpy(image_to_data(sitk.ReadImage(file))[0]))
+            return torch.stack(result, dim=1).squeeze(0)
+
+
+class InferenceStack(Transform):
+
+    def __init__(self, dataset: str, name: str, mode: str = "mean"):
+        self.dataset = None
+        if dataset:
+            if len(dataset.split(":")) > 1:
+                filename, file_format = dataset.split(":")
+            else:
+                filename = dataset
+                file_format = "mha"
+            self.dataset = Dataset(filename, file_format)
+        self.name = name
+        self.mode = mode
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        dataset = self.dataset if self.dataset else self.datasets[-1]
+        dataset.write("InferenceStack", name, data_to_image(tensors.numpy(), cache_attribute))
+        return (
+            tensors.float().mean(0).to(tensors.dtype).unsqueeze(0)
+            if self.mode == "mean"
+            else torch.median(tensors.float(), dim=0).values.unsqueeze(0)
+        )
+
+
+class Variance(Transform):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
 
 
 class TotalSegmentator(Transform):

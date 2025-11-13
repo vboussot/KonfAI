@@ -25,6 +25,7 @@ class Config:
             result = input("Create a new config file ? [no,yes,interactive] : ")
             if result in ["yes", "interactive"]:
                 os.environ["KONFAI_CONFIG_MODE"] = "interactive" if result == "interactive" else "default"
+                open(self.filename, "w").close()
             else:
                 exit(0)
 

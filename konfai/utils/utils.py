@@ -541,7 +541,7 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     konfai.add_argument(
         "--num-workers",
         "--num_workers",
-        default=4,
+        default=0,
         type=int,
         help="Number of workers per DataLoader & GPU",
     )

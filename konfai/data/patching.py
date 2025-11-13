@@ -386,14 +386,18 @@ class DatasetManager:
         data = None
         for transform_function in reversed(pre_transform):
             if isinstance(transform_function, Save):
-                if len(transform_function.dataset.split(":")) > 1:
-                    filename, file_format = transform_function.dataset.split(":")
+                if transform_function.dataset:
+                    if len(transform_function.dataset.split(":")) > 1:
+                        filename, file_format = transform_function.dataset.split(":")
+                    else:
+                        filename = transform_function.dataset
+                        file_format = "mha"
+                    dataset = Dataset(filename, file_format)
                 else:
-                    filename = transform_function.dataset
-                    file_format = "mha"
-                dataset = Dataset(filename, file_format)
-                if dataset.is_dataset_exist(self.group_dest, self.name):
-                    data, attrib = dataset.read_data(self.group_dest, self.name)
+                    dataset = self.dataset
+                group_dest = transform_function.group if transform_function.group else self.group_dest
+                if dataset.is_dataset_exist(group_dest, self.name):
+                    data, attrib = dataset.read_data(group_dest, self.name)
                     self.cache_attributes[0].update(attrib)
                     break
             i -= 1
@@ -407,14 +411,18 @@ class DatasetManager:
             for transform_function in pre_transform[i:]:
                 data = transform_function(self.name, data, self.cache_attributes[0])
                 if isinstance(transform_function, Save):
-                    if len(transform_function.dataset.split(":")) > 1:
-                        filename, file_format = transform_function.dataset.split(":")
+                    if transform_function.dataset:
+                        if len(transform_function.dataset.split(":")) > 1:
+                            filename, file_format = transform_function.dataset.split(":")
+                        else:
+                            filename = transform_function.dataset
+                            file_format = "mha"
+                        dataset = Dataset(filename, file_format)
                     else:
-                        filename = transform_function.dataset
-                        file_format = "mha"
-                    dataset = Dataset(filename, file_format)
+                        dataset = self.dataset
+                    group_dest = transform_function.group if transform_function.group else self.group_dest
                     dataset.write(
-                        self.group_dest,
+                        group_dest,
                         self.name,
                         data.numpy(),
                         self.cache_attributes[0],
