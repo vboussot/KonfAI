@@ -388,7 +388,7 @@ class Dataset:
                 os.makedirs(self.filename)
             if isinstance(data, sitk.Image):
                 for k, v in attributes.items():
-                    if len(v):
+                    if v and len(v):
                         data.SetMetaData(k, v)
                 sitk.WriteImage(data, f"{self.filename}{name}.{self.file_format}")
             elif isinstance(data, sitk.Transform):

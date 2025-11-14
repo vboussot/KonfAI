@@ -36,6 +36,10 @@ def main():
         print("\n[KonfAI] Manual interruption (Ctrl+C)")
 
 
+def main_hf():
+    pass
+
+
 def cluster():
     """
     Entry point for launching KonfAI on a cluster using Submitit.

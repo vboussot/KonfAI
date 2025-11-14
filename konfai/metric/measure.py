@@ -30,6 +30,9 @@ class Criterion(torch.nn.Module, ABC):
     def init(self, model: torch.nn.Module, output_group: str, target_group: str) -> str:
         return output_group
 
+    def get_name(self):
+        return self.__class__.__name__
+
     @abstractmethod
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         pass
@@ -702,8 +705,12 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
 
 class Variance(Criterion):
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "Variance") -> None:
         super().__init__()
+        self.name = name
+
+    def get_name(self):
+        return self.name
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         return output.float().var(1).mean(), output.float().var(1).mean().item()
@@ -711,8 +718,12 @@ class Variance(Criterion):
 
 class Mean(Criterion):
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "Mean") -> None:
         super().__init__()
+        self.name = name
+
+    def get_name(self):
+        return self.name
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         loss = output.float().mean()
