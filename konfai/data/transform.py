@@ -789,12 +789,12 @@ class KonfAIInference(Transform):
                 for i, channel in enumerate(tensor):
                     image = data_to_image(channel.unsqueeze(0).numpy(), cache_attribute)
                     (dataset / f"P{i:03d}").mkdir(parents=True, exist_ok=True)
-                    sitk.WriteImage(image, dataset / f"P{i:03d}" / "Volume.nii.gz")
+                    sitk.WriteImage(image, str(dataset / f"P{i:03d}" / "Volume.nii.gz"))
             else:
                 image = data_to_image(tensor.numpy(), cache_attribute)
 
                 (dataset / "P001").mkdir(parents=True, exist_ok=True)
-                sitk.WriteImage(image, dataset / "P001" / "Volume.nii.gz")
+                sitk.WriteImage(image, str(dataset / "P001" / "Volume.nii.gz"))
 
             cmd = [
                 "konfai",
@@ -822,7 +822,7 @@ class KonfAIInference(Transform):
             mha_file = list((Path(tmpdir) / "Predictions").rglob("*.mha"))
             result = []
             for file in mha_file:
-                result.append(torch.from_numpy(image_to_data(sitk.ReadImage(file))[0]))
+                result.append(torch.from_numpy(image_to_data(sitk.ReadImage(str(file)))[0]))
             return torch.stack(result, dim=1).squeeze(0)
 
 

@@ -197,6 +197,30 @@ class Statistics:
         with open(self.filename, "w") as f:
             f.write(json.dumps(result, indent=4))
 
+    def read(self):
+        with open(self.filename) as f:
+            json_data = json.load(f)
+
+        result = {}
+
+        aggregates = json_data.get("aggregates", {})
+
+        for key, stats in aggregates.items():
+            mean_value = stats.get("mean", None)
+            if mean_value is None:
+                continue
+
+            # Nettoyage du nom
+            parts = key.split(":")
+            if parts[-2] == "Dice":
+                continue
+            else:
+                metric_name = parts[-1]
+
+            result[metric_name] = mean_value
+
+        return result
+
 
 class Evaluator(DistributedObject):
     """
@@ -274,13 +298,13 @@ class Evaluator(DistributedObject):
                         loss = 0
                         c = 0
                         for k, v in true_loss.items():
-                            result[f"{output_group}:{target_group}:{metric.__class__.__name__}:{k}"] = v
+                            result[f"{output_group}:{target_group}:{metric.get_name()}:{k}"] = v
                             if not np.isnan(v):
                                 loss += v
                                 c += 1
-                        result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = loss / c
+                        result[f"{output_group}:{target_group}:{metric.get_name()}"] = loss / c
                     else:
-                        result[f"{output_group}:{target_group}:{metric.__class__.__name__}"] = true_loss
+                        result[f"{output_group}:{target_group}:{metric.get_name()}"] = true_loss
         if len(self.metrics) > 0:
             statistics.add(result, name)
         return result

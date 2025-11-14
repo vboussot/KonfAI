@@ -24,6 +24,7 @@ import torch.distributed as dist
 import torch.nn.functional as F  # noqa: N812
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.hf_api import RepoFolder
+from packaging.requirements import Requirement
 from ruamel.yaml import YAML
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -1002,16 +1003,19 @@ class ModelHF:
 
     def set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
-        if new_value > 0:
-            yaml = YAML()
-            with open(inference_file_path) as f:
-                data = yaml.load(f)
+        yaml = YAML()
+        with open(inference_file_path) as f:
+            data = yaml.load(f)
 
+        if new_value > 0:
             tmp = data["Predictor"]["Dataset"]["augmentations"]
             if "DataAugmentation_0" in tmp:
                 tmp["DataAugmentation_0"]["nb"] = new_value
-            with open(inference_file_path, "w") as f:
-                yaml.dump(data, f)
+
+        else:
+            data["Predictor"]["Dataset"]["augmentations"] = {}
+        with open(inference_file_path, "w") as f:
+            yaml.dump(data, f)
 
     def download(self, number_of_model: int) -> tuple[list[str], str, list[str]]:
         api = HfApi()
@@ -1033,17 +1037,34 @@ class ModelHF:
                 models_path.append(file_path)
             elif "requirements.txt" in filename.path:
                 with open(file_path, encoding="utf-8") as f:
-                    required_packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-                    installed = {dist.metadata["Name"].lower() for dist in importlib.metadata.distributions()}
-                    missing = []
-                    for req in required_packages:
-                        if req not in installed:
-                            missing.append(req)
-                    if missing:
+                    required_lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+                    installed = {
+                        dist.metadata["Name"].lower(): dist.version
+                        for dist in importlib.metadata.distributions()
+                        if dist.metadata.get("Name")
+                    }
+
+                    for line in required_lines:
+                        req = Requirement(line)
+                        name = req.name.lower()
+                        installed_version_str = installed.get(name)
+                        missing_or_outdated = []
+                        if installed_version_str is None:
+                            missing_or_outdated.append(line)
+                            continue
+
+                        if req.specifier:
+                            if not req.specifier.contains(installed_version_str, prereleases=True):
+                                missing_or_outdated.append(line)
+
+                    if missing_or_outdated:
                         try:
-                            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])  # nosec B603
+                            subprocess.check_call(
+                                [sys.executable, "-m", "pip", "install", *missing_or_outdated],  # nosec B603
+                            )
                         except subprocess.CalledProcessError as e:
-                            raise RepositoryHFError(f"Failed to install packages: {e}")
+                            raise RepositoryHFError(f"Failed to install packages: {e}") from e
             elif "metadata.json" not in filename.path:
                 codes_path.append(file_path)
         return models_path, inference_file_path, codes_path
