@@ -88,6 +88,9 @@ def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
     else:
         data = data.transpose(tuple([i + 1 for i in range(len(data.shape) - 1)] + [0]))
         image = sitk.GetImageFromArray(data, isVector=True)
+    for k, v in attributes.items():
+        if v and len(v):
+            image.SetMetaData(k, v)
     image.SetOrigin(attributes.get_np_array("Origin").tolist())
     image.SetSpacing(attributes.get_np_array("Spacing").tolist())
     image.SetDirection(attributes.get_np_array("Direction").tolist())
@@ -99,6 +102,8 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     attributes["Origin"] = np.asarray(image.GetOrigin())
     attributes["Spacing"] = np.asarray(image.GetSpacing())
     attributes["Direction"] = np.asarray(image.GetDirection())
+    for k in image.GetMetaDataKeys():
+        attributes[k] = image.GetMetaData(k)
     data = sitk.GetArrayFromImage(image)
 
     if image.GetNumberOfComponentsPerPixel() == 1:
@@ -106,6 +111,23 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     else:
         data = np.transpose(data, (len(data.shape) - 1, *list(range(len(data.shape) - 1))))
     return data, attributes
+
+
+def get_infos(filename: str) -> tuple[list[int], Attribute]:
+    attributes = Attribute()
+    file_reader = sitk.ImageFileReader()
+    file_reader.SetFileName(filename)
+    file_reader.ReadImageInformation()
+    attributes["Origin"] = np.asarray(file_reader.GetOrigin())
+    attributes["Spacing"] = np.asarray(file_reader.GetSpacing())
+    attributes["Direction"] = np.asarray(file_reader.GetDirection())
+    for k in file_reader.GetMetaDataKeys():
+        attributes[k] = file_reader.GetMetaData(k)
+    size = list(file_reader.GetSize())
+    if len(size) == 3:
+        size = list(reversed(size))
+    size = [file_reader.GetNumberOfComponents()] + size
+    return size, attributes
 
 
 class Dataset:

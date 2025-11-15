@@ -49,7 +49,8 @@ class MaskedLoss(Criterion):
         self.loss = loss
         self.mode_image_masked = mode_image_masked
 
-    def get_mask(self, targets: list[torch.Tensor]) -> torch.Tensor | None:
+    @staticmethod
+    def get_mask(targets: list[torch.Tensor]) -> torch.Tensor | None:
         result = None
         if len(targets) > 0:
             result = targets[0]
@@ -61,7 +62,7 @@ class MaskedLoss(Criterion):
         loss = torch.tensor(0, dtype=torch.float32).to(output.device)
         true_loss = 0
         true_nb = 0
-        mask = self.get_mask(list(targets[1:]))
+        mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is not None:
             for batch in range(output.shape[0]):
                 if self.mode_image_masked:
@@ -106,6 +107,32 @@ class MAE(MaskedLoss):
 
     def __init__(self, reduction: str = "mean") -> None:
         super().__init__(partial(MAE._loss, reduction), False)
+
+
+class MAESaveMap(MAE):
+
+    def __init__(self, reduction: str = "mean", dataset: str | None = None, group: str | None = None) -> None:
+        super().__init__(reduction)
+        self.dataset = dataset
+        self.group = group
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
+        loss, true_loss = super().forward(output, *targets)
+        if len(targets) == 2:
+            error_map = (
+                torch.nn.L1Loss(reduction="none")(
+                    output.float() * torch.where(targets[1] == 1, 1, 0),
+                    targets[0].float() * torch.where(targets[1] == 1, 1, 0),
+                )
+                .to(output.dtype)
+                .cpu()
+            )
+        else:
+            error_map = torch.nn.L1Loss(reduction="none")(output.float(), targets[0].float()).to(output.dtype).cpu()
+        return loss, true_loss, error_map
+
+    def get_name(self) -> str:
+        return "MAE"
 
 
 class PSNR(MaskedLoss):
@@ -173,23 +200,23 @@ class LPIPS(MaskedLoss):
 
 class Dice(Criterion):
 
-    def __init__(self, labels: list[int] | None = None) -> None:
-        super().__init__()
-        self.labels = labels
-
-    def flatten(self, tensor: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def flatten(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.permute((1, 0) + tuple(range(2, tensor.dim()))).contiguous().view(tensor.size(1), -1)
 
-    def dice_per_channel(self, tensor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        tensor = self.flatten(tensor)
-        target = self.flatten(target)
+    @staticmethod
+    def dice_per_channel(tensor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        tensor = Dice.flatten(tensor)
+        target = Dice.flatten(target)
         return (2.0 * (tensor * target).sum() + 1e-6) / (tensor.sum() + target.sum() + 1e-6)
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _loss(labels: list[int] | None, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        print(output.dtype, targets[0].dtype)
         target = F.interpolate(targets[0], output.shape[2:], mode="nearest")
         result = {}
         loss = torch.tensor(0, dtype=torch.float32).to(output.device)
-        labels = self.labels if self.labels is not None else torch.unique(target)
+        labels = labels if labels is not None else torch.unique(target)
         for label in labels:
             tp = target == label
             if tp.any().item():
@@ -197,12 +224,51 @@ class Dice(Criterion):
                     pp = output[:, label].unsqueeze(1)
                 else:
                     pp = output == label
-                loss_tmp = self.dice_per_channel(pp.float(), tp.float())
+                loss_tmp = Dice.dice_per_channel(pp.float(), tp.float())
                 loss += loss_tmp
                 result[label] = loss_tmp.item()
             else:
                 result[label] = np.nan
         return 1 - loss / len(labels), result
+
+    def __init__(self, labels: list[int] | None = None) -> None:
+        super().__init__()
+        self.loss = partial(Dice._loss, labels)
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        mask = MaskedLoss.get_mask(list(targets[1:]))
+        if mask is not None:
+            return self.loss(
+                (output * torch.where(targets[1] == 1, 1, 0)).to(torch.uint8),
+                (targets[0] * torch.where(targets[1] == 1, 1, 0)).to(torch.uint8),
+            )
+        else:
+            return self.loss(output, targets[0])
+
+
+class DiceSaveMap(Dice):
+
+    def __init__(self, labels: list[int] | None = None, dataset: str | None = None, group: str | None = None) -> None:
+        super().__init__(labels)
+        self.dataset = dataset
+        self.group = group
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
+        loss, true_loss = super().forward(output, *targets)
+        if len(targets) == 2:
+            error_map = (
+                torch.nn.L1Loss(reduction="none")(
+                    output * torch.where(targets[1] == 1, 1, 0), targets[0] * torch.where(targets[1] == 1, 1, 0)
+                )
+                .to(torch.uint8)
+                .cpu()
+            )
+        else:
+            error_map = torch.nn.L1Loss(reduction="none")(output, targets[0]).to(torch.uint8).cpu()
+        return loss, true_loss, error_map
+
+    def get_name(self) -> str:
+        return "Dice"
 
 
 class GradientImages(Criterion):

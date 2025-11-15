@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 from torch.cuda import device_count
 
 from konfai import konfai_nb_cores
-from konfai.utils.utils import Log, TensorBoard, setup
+from konfai.utils.utils import Log, TensorBoard, setup, setup_apps
 
 sys.path.insert(0, os.getcwd())
 
@@ -36,8 +36,18 @@ def main():
         print("\n[KonfAI] Manual interruption (Ctrl+C)")
 
 
-def main_hf():
-    pass
+def main_apps():
+    parser = argparse.ArgumentParser(description="KonfAI-Apps", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    try:
+        with setup_apps(parser) as distributed_object:
+            with Log(distributed_object.name, 0):
+                world_size = device_count()
+                if world_size == 0:
+                    world_size = int(konfai_nb_cores())
+                distributed_object.setup(world_size)
+                mp.spawn(distributed_object, nprocs=world_size)
+    except KeyboardInterrupt:
+        print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
 
 
 def cluster():

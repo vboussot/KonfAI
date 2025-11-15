@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from konfai import config_file, evaluations_directory, konfai_root
 from konfai.data.data_manager import DataMetric
 from konfai.utils.config import config
+from konfai.utils.dataset import Dataset
 from konfai.utils.utils import DistributedObject, EvaluatorError, get_module, synchronize_data
 
 
@@ -291,6 +292,25 @@ class Evaluator(DistributedObject):
                     )
                     if isinstance(loss, tuple):
                         true_loss = loss[1]
+                        if len(loss) == 3:
+                            if metric.dataset:
+                                if len(metric.dataset.split(":")) > 1:
+                                    filename, file_format = metric.dataset.split(":")
+                                else:
+                                    filename = metric.dataset
+                                    file_format = "mha"
+                                map_dataset = Dataset(filename, file_format)
+                                group = metric.group if metric.group else output_group
+                                for dataset in self.dataset.datasets.values():
+                                    for g in dataset.get_group():
+                                        if dataset.is_dataset_exist(g, name):
+                                            _, cache_attribute = dataset.get_infos(g, name)
+                                            map_dataset.write(
+                                                group,
+                                                name,
+                                                loss[2].squeeze(0).numpy(),
+                                                cache_attribute,
+                                            )
                     else:
                         true_loss = loss.item()
 

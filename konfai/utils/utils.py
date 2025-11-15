@@ -170,7 +170,6 @@ class State(Enum):
     TRANSFER_LEARNING = "TRANSFER_LEARNING"
     FINE_TUNING = "FINE_TUNING"
     PREDICTION = "PREDICTION"
-    PREDICTION_HF = "PREDICTION_HF"
     EVALUATION = "EVALUATION"
 
     def __str__(self) -> str:
@@ -524,9 +523,165 @@ class DistributedObject(ABC):
                     pynvml.nvmlShutdown()
 
 
+def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
+    parser = argparse.ArgumentParser(prog="konfai-apps", description="KonfAI Apps – Apps for Medical AI Models")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # -----------------
+    # 1) INFERENCE
+    # -----------------
+    infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
+
+    infer_p.add_argument("app", type=str, help="KonfAI App name")
+    infer_p.add_argument(
+        "-i", "--input", type=str, required=True, help="Input path: either a single volume file OR a dataset directory"
+    )
+    infer_p.add_argument("-o", "--output", type=str, help="Optional output volume path")
+    infer_p.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble")
+    infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
+    infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
+
+    # -----------------
+    # 2) EVALUATION
+    # -----------------
+    eval_p = subparsers.add_parser("eval", help="Evaluate a KonfAI App using ground-truth labels.")
+    eval_p.add_argument("app", type=str, help="KonfAI App name")
+
+    eval_p.add_argument(
+        "-i", "--input", type=str, required=True, help="Input path: either a single volume file OR a dataset directory"
+    )
+
+    # -----------------
+    # 3) UNCERTAINTY
+    # -----------------
+    unc_p = subparsers.add_parser("uncertainty", help="Compute model uncertainty for a KonfAI App.")
+    unc_p.add_argument("app", type=str, help="KonfAI App name")
+
+    unc_p.add_argument(
+        "-p",
+        "--pred-stack",
+        type=str,
+        required=True,
+        help=("Prediction stack: either a single multi-sample prediction file "),
+    )
+
+    # -----------------
+    # 4) Pipeline
+    # -----------------
+    pipe_p = subparsers.add_parser(
+        "pipeline", help="Run inference and optionally evaluation and uncertainty in a single command."
+    )
+
+    pipe_p.add_argument("app", type=str, help="KonfAI App name")
+
+    pipe_p.add_argument("-i", "--input", type=str, required=True, help="Input path: volume file or directory.")
+
+    pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
+
+    pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
+
+    pipe_p.add_argument("--ensemble", type=int, default=0, help="Number of models in ensemble.")
+
+    # optional eval
+    pipe_p.add_argument("--with-eval", action="store_true", help="Also run evaluation (requires --gt).")
+
+    pipe_p.add_argument("-g", "--gt", type=str, help="Ground-truth path (required when --with-eval is set).")
+
+    # optional uncertainty
+    pipe_p.add_argument("--with-uncertainty", action="store_true", help="Also estimate uncertainty using sampling.")
+
+    pipe_p.add_argument("-o", "--output", type=str, help="Output prediction volume (mean prediction).")
+
+    # -----------------
+    # 5) FINE-TUNE
+    # -----------------
+    ft_p = subparsers.add_parser("fine-tune", help="Fine-tune a KonfAI App on a dataset.")
+    ft_p.add_argument("app", type=str, help="KonfAI App name")
+
+    ft_p.add_argument("-d", "--dataset", type=str, required=True, help="Path to training dataset")
+    ft_p.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs")
+
+    parser.add_argument("-quiet", action="store_true", help="Suppress console output.")
+
+    parser.add_argument(
+        "-g",
+        "--gpu",
+        type=str,
+        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
+        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
+    )
+
+    parser.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+
+    parser.add_argument("--version", action="version", version=importlib.metadata.version("IMPACT-Synth-KonfAI"))
+
+    args = parser.parse_args()
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    os.environ["KONFAI_NB_CORES"] = args.cpu
+    os.environ["KONFAI_WORKERS"] = str(0)
+
+    os.environ["KONFAI_MODELS_DIRECTORY"] = "./Models/"
+    os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = "./Checkpoints/"
+    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = "./Predictions/"
+    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = "./Evaluations/"
+    os.environ["KONFAI_STATISTICS_DIRECTORY"] = "./Statistics/"
+    os.environ["KONFAI_SETUPS_DIRECTORY"] = "./Setups/"
+    os.environ["KONFAI_OVERWRITE"] = str(True)
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+
+    os.environ["KONFAI_VERBOSE"] = str(args.quiet)
+
+    model_hf = ModelHF(args.app)
+
+    if args.command == "infer":
+        models_path = model_hf.install_inference(args.tta, args.ensemble, args.mc)
+        os.environ["konfai_root"] = "Predictor"
+
+        os.environ["KONFAI_config_file"] = "Prediction.yml"
+        os.environ["KONFAI_MODEL"] = ":".join(models_path)
+        os.environ["KONFAI_STATE"] = str(State.PREDICTION)
+        from konfai.predictor import Predictor
+
+        return Predictor(config=config_file())
+    elif args.command == "eval":
+        from konfai.predictor import Predictor
+
+        model_hf.install_evaluation()
+        os.environ["konfai_root"] = "Evaluator"
+
+        os.environ["KONFAI_config_file"] = "Evaluation.yml"
+        os.environ["KONFAI_STATE"] = str(State.EVALUATION)
+        from konfai.evaluator import Evaluator
+
+        return Evaluator(config=config_file())
+    elif args.command == "uncertainty":
+        model_hf.install_uncertainty()
+        os.environ["konfai_root"] = "Evaluator"
+
+        os.environ["KONFAI_config_file"] = "Uncertainty.yml"
+        os.environ["KONFAI_STATE"] = str(State.EVALUATION)
+        from konfai.evaluator import Evaluator
+
+        return Evaluator(config=config_file())
+    elif args.command == "fine-tune":
+        models_path = model_hf.install_fine_tune()
+        os.environ["konfai_root"] = "Trainer"
+
+        os.environ["KONFAI_config_file"] = "FineTuning.yml"
+        os.environ["KONFAI_MODEL"] = ":".join(models_path)
+        os.environ["KONFAI_STATE"] = str(State.FINE_TUNING)
+        from konfai.trainer import Trainer
+
+        return Trainer(config=config_file())
+    else:
+        raise ValueError(f"Unknown command: {args.command}")
+
+
 def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     # KONFAI arguments
-    konfai = parser.add_argument_group("KONFAI arguments")
+    konfai = parser.add_argument_group("KonfAI arguments")
     konfai.add_argument("type", type=State, choices=list(State))
     konfai.add_argument("-y", action="store_true", help="Accept overwrite")
     konfai.add_argument("-tb", action="store_true", help="Start TensorBoard")
@@ -607,12 +762,11 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
     os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = config["EVALUATIONS_DIRECTORY"]
     os.environ["KONFAI_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
+    os.environ["KONFAI_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
 
     os.environ["KONFAI_STATE"] = str(config["type"])
 
     os.environ["KONFAI_MODEL"] = config["MODEL"]
-
-    os.environ["KONFAI_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
 
     os.environ["KONFAI_OVERWRITE"] = str(config["y"])
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
@@ -633,17 +787,7 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     torch.autograd.set_detect_anomaly(True)
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-    if config["type"] is State.PREDICTION_HF:
-        from konfai.predictor import Predictor
-
-        model_hf = ModelHF(config["config"])
-        models_path = model_hf.install(config["tta"], config["MODEL"])
-        os.environ["KONFAI_MODEL"] = ":".join(models_path)
-        os.environ["KONFAI_config_file"] = "Prediction.yml"
-        os.environ["konfai_root"] = "Predictor"
-        os.environ["KONFAI_STATE"] = str(State.PREDICTION)
-        return Predictor(config=config_file())
-    elif config["type"] is State.PREDICTION:
+    if config["type"] is State.PREDICTION:
         from konfai.predictor import Predictor
 
         os.environ["konfai_root"] = "Predictor"
@@ -993,6 +1137,19 @@ class ModelHF:
 
         self._display_name = str(model_metadata["display_name"])
 
+    def has_capabilities(self) -> tuple[bool, bool]:
+        api = HfApi()
+        tree = api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name)
+        evaluation_support = False
+        uncertainty_support = False
+
+        for file in tree:
+            if file.path.endswith("Evaluation.yml"):
+                evaluation_support = True
+            elif file.path.endswith("Uncertainty.yml"):
+                uncertainty_support = True
+        return evaluation_support, uncertainty_support
+
     def _read_metadata(self) -> dict[str, str]:
         metadata_file_path = hf_hub_download(
             repo_id=self.repo_id, filename=f"{self.model_name}/metadata.json", repo_type="model", revision=None
@@ -1017,7 +1174,7 @@ class ModelHF:
         with open(inference_file_path, "w") as f:
             yaml.dump(data, f)
 
-    def download(self, number_of_model: int) -> tuple[list[str], str, list[str]]:
+    def download_inference(self, number_of_model: int) -> tuple[list[str], str, list[str]]:
         api = HfApi()
         models_path = []
         codes_path = []
@@ -1069,7 +1226,39 @@ class ModelHF:
                 codes_path.append(file_path)
         return models_path, inference_file_path, codes_path
 
-    def install(self, number_of_augmentation: int, number_of_model: int) -> list[str]:
+    def download_evaluation(self) -> tuple[str, list[str]]:
+        api = HfApi()
+        codes_path = []
+        for filename in api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name):
+            if "Evaluation.yml" in filename.path:
+                evaluation_file_path = hf_hub_download(
+                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
+                )  # nosec B615
+            elif filename.path.endswith(".py"):
+                file_path = hf_hub_download(
+                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
+                )  # nosec B615
+                codes_path.append(file_path)
+        return evaluation_file_path, codes_path
+
+    def download_uncertainty(self) -> tuple[str, list[str]]:
+        api = HfApi()
+        codes_path = []
+        for filename in api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name):
+            if "Uncertainty.yml" in filename.path:
+                uncertainty_file_path = hf_hub_download(
+                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
+                )  # nosec B615
+            elif filename.path.endswith(".py"):
+                file_path = hf_hub_download(
+                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
+                )  # nosec B615
+                codes_path.append(file_path)
+        return uncertainty_file_path, codes_path
+
+    def install_inference(
+        self, number_of_augmentation: int, number_of_model: int, number_of_mc_dropout: int
+    ) -> list[str]:
         if not number_of_model:
             number_of_model = self._number_of_models
         else:
@@ -1080,7 +1269,7 @@ class ModelHF:
                     f"Invalid value provided for '--MODEL': '{number_of_model}'. ",
                     "The value must be an integer (e.g. 1, 2, 3).",
                 )
-        models_path, inference_file_path, codes_path = self.download(number_of_model)
+        models_path, inference_file_path, codes_path = self.download_inference(number_of_model)
 
         shutil.copy2(inference_file_path, "./Prediction.yml")
         self.set_number_of_augmentation("./Prediction.yml", number_of_augmentation)
@@ -1088,6 +1277,21 @@ class ModelHF:
             shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
 
         return models_path
+
+    def install_evaluation(self) -> None:
+        evaluation_file_path, codes_path = self.download_evaluation()
+        shutil.copy2(evaluation_file_path, "./Evaluation.yml")
+        for code_path in codes_path:
+            shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+
+    def install_uncertainty(self) -> None:
+        uncertainty_file_path, codes_path = self.download_uncertainty()
+        shutil.copy2(uncertainty_file_path, "./Uncertainty.yml")
+        for code_path in codes_path:
+            shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+
+    def install_fine_tune(self):
+        pass
 
     def get_display_name(self):
         return self._display_name
