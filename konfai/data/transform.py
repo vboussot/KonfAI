@@ -789,12 +789,12 @@ class KonfAIInference(Transform):
                 for i, channel in enumerate(tensor):
                     image = data_to_image(channel.unsqueeze(0).numpy(), cache_attribute)
                     (dataset / f"P{i:03d}").mkdir(parents=True, exist_ok=True)
-                    sitk.WriteImage(image, str(dataset / f"P{i:03d}" / "Volume.nii.gz"))
+                    sitk.WriteImage(image, str(dataset / f"P{i:03d}" / "Volume.mha"))
             else:
                 image = data_to_image(tensor.numpy(), cache_attribute)
 
                 (dataset / "P001").mkdir(parents=True, exist_ok=True)
-                sitk.WriteImage(image, str(dataset / "P001" / "Volume.nii.gz"))
+                sitk.WriteImage(image, str(dataset / "P001" / "Volume.mha"))
 
             cmd = [
                 "konfai",
@@ -842,7 +842,7 @@ class InferenceStack(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         dataset = self.dataset if self.dataset else self.datasets[-1]
-        dataset.write("InferenceStack", name, data_to_image(tensors.numpy(), cache_attribute))
+        dataset.write("InferenceStack", name, tensors.numpy(), cache_attribute)
         return (
             tensors.float().mean(0).to(tensors.dtype).unsqueeze(0)
             if self.mode == "mean"
