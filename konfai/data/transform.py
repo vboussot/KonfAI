@@ -784,6 +784,7 @@ class KonfAIInference(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         with tempfile.TemporaryDirectory() as tmpdir:
+
             dataset = Path(tmpdir) / "Dataset"
             if self.per_channel:
                 for i, channel in enumerate(tensor):
@@ -793,19 +794,23 @@ class KonfAIInference(Transform):
             else:
                 image = data_to_image(tensor.numpy(), cache_attribute)
 
-                (dataset / "P001").mkdir(parents=True, exist_ok=True)
-                sitk.WriteImage(image, str(dataset / "P001" / "Volume.mha"))
+                (dataset / "P000").mkdir(parents=True, exist_ok=True)
+                sitk.WriteImage(image, str(dataset / "P000" / "Volume.mha"))
 
             cmd = [
-                "konfai",
-                "PREDICTION_HF",
-                "-y",
-                "--MODEL",
+                "konfai-apps",
+                "infer",
+                f"{self.repo_id}:{self.model_name}",
+                "-i",
+                str(dataset),
+                "-o",
+                str(Path(tmpdir) / "Output"),
+                "--ensemble",
                 str(self.number_of_ensemble),
                 "--tta",
                 str(self.number_of_tta),
-                "--config",
-                f"{self.repo_id}:{self.model_name}",
+                "--mc",
+                str(self.number_of_mc_dropout),
             ]
             if os.environ["CUDA_VISIBLE_DEVICES"]:
                 cmd += ["--gpu", os.environ["CUDA_VISIBLE_DEVICES"]]
@@ -813,13 +818,13 @@ class KonfAIInference(Transform):
                 cmd += ["--cpu", os.environ["KONFAI_NB_CORES"]]
 
             try:
-                subprocess.run(cmd, cwd=tmpdir, check=True)  # nosec B603
+                subprocess.run(cmd, cwd="./", check=True)  # nosec B603
             except subprocess.CalledProcessError as e:
                 raise TransformError(
                     f"KonfAIInference {self.repo_id}:{self.model_name} failed with exit code {e.returncode}."
                 )
 
-            mha_file = list((Path(tmpdir) / "Predictions").rglob("*.mha"))
+            mha_file = list((Path(tmpdir) / "Output").rglob("*.mha"))
             result = []
             for file in mha_file:
                 result.append(torch.from_numpy(image_to_data(sitk.ReadImage(str(file)))[0]))

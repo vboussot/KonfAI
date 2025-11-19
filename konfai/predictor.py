@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from konfai import config_file, konfai_root, models_directory, path_to_models, predictions_directory
+from konfai import checkpoints_directory, config_file, konfai_root, path_to_models, predictions_directory
 from konfai.data.data_manager import DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
 from konfai.data.transform import Transform, TransformInverse, TransformLoader
@@ -728,10 +728,10 @@ class Predictor(DistributedObject):
                     name = model_path
                 else:
                     if self.name.endswith(".pt"):
-                        path = models_directory() + "/".join(self.name.split("/")[:-1]) + "/StateDict/"
+                        path = checkpoints_directory() + "/".join(self.name.split("/")[:-1]) + "/StateDict/"
                         name = self.name.split("/")[-1]
                     else:
-                        path = models_directory() + self.name + "/StateDict/"
+                        path = checkpoints_directory() + self.name + "/StateDict/"
                         name = sorted(os.listdir(path))[-1]
                 if os.path.exists(path + name):
                     state_dicts.append(

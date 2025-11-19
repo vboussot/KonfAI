@@ -1,6 +1,9 @@
 import argparse
 import os
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 import torch.multiprocessing as mp
 from torch.cuda import device_count
@@ -39,15 +42,26 @@ def main():
 def main_apps():
     parser = argparse.ArgumentParser(description="KonfAI-Apps", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     try:
-        with setup_apps(parser) as distributed_object:
+        user_dir = os.getcwd()
+        tmp_dir_default = Path(tempfile.mkdtemp())
+        distributed_object_init, tmp_dir, save_function = setup_apps(parser, Path(user_dir), tmp_dir_default)
+        with distributed_object_init() as distributed_object:
             with Log(distributed_object.name, 0):
                 world_size = device_count()
                 if world_size == 0:
                     world_size = int(konfai_nb_cores())
                 distributed_object.setup(world_size)
                 mp.spawn(distributed_object, nprocs=world_size)
+        save_function()
     except KeyboardInterrupt:
         print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
+    finally:
+        if str(tmp_dir) in sys.path:
+            sys.path.remove(str(tmp_dir))
+
+        os.chdir(str(user_dir))
+        if str(tmp_dir_default) == str(tmp_dir):
+            shutil.rmtree(str(tmp_dir))
 
 
 def cluster():

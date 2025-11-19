@@ -5,13 +5,16 @@ import json
 import os
 import random
 import re
+import resource
 import shutil
 import socket
 import subprocess  # nosec B404
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import closing
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, TextIO, cast
 
@@ -19,6 +22,7 @@ import numpy as np
 import psutil
 import pynvml
 import requests
+import SimpleITK as sitk  # noqa: N813
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F  # noqa: N812
@@ -523,7 +527,38 @@ class DistributedObject(ABC):
                     pynvml.nvmlShutdown()
 
 
-def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
+def match_supported(file: Path) -> bool:
+    lower = file.name.lower()
+    return any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
+
+
+def list_supported_files(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path] if match_supported(path) else []
+
+    files = []
+    for f in path.rglob("*"):
+        if f.is_file() and match_supported(f):
+            files.append(f)
+    return files
+
+
+def setup_apps(
+    parser: argparse.ArgumentParser, user_dir: Path, tmp_dir_default: Path
+) -> tuple[partial[DistributedObject], Path, Callable[[], None]]:
+    try:
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
+    except (ImportError, OSError, ValueError):
+        pass
+
+    def get_path(path: Path) -> Path:
+        if path.is_absolute():
+            result_path = path
+        else:
+            result_path = user_dir / path
+        return result_path
+
     parser = argparse.ArgumentParser(prog="konfai-apps", description="KonfAI Apps – Apps for Medical AI Models")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -535,12 +570,30 @@ def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
 
     infer_p.add_argument("app", type=str, help="KonfAI App name")
     infer_p.add_argument(
-        "-i", "--input", type=str, required=True, help="Input path: either a single volume file OR a dataset directory"
+        "-i",
+        "--input",
+        type=lambda p: get_path(Path(p)),
+        required=True,
+        help="Input path: either a single volume file OR a dataset directory",
     )
-    infer_p.add_argument("-o", "--output", type=str, help="Optional output volume path")
+    infer_p.add_argument(
+        "-o", "--output", type=lambda p: get_path(Path(p)), default="./Predictions", help="Optional output volume path"
+    )
     infer_p.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble")
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
     infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
+    infer_p.add_argument(
+        "-g",
+        "--gpu",
+        type=str,
+        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
+        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
+    )
+    infer_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    infer_p.add_argument(
+        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
+    )
+    infer_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
     # 2) EVALUATION
@@ -549,8 +602,31 @@ def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
     eval_p.add_argument("app", type=str, help="KonfAI App name")
 
     eval_p.add_argument(
-        "-i", "--input", type=str, required=True, help="Input path: either a single volume file OR a dataset directory"
+        "-i",
+        "--input",
+        type=lambda p: get_path(Path(p)),
+        required=True,
+        help="Input path: either a single volume file OR a dataset directory",
     )
+
+    eval_p.add_argument("--gt", type=lambda p: get_path(Path(p)), required=True, help="Ground-truth path")
+    eval_p.add_argument("--mask", type=lambda p: get_path(Path(p)), help="Optional evaluation mask path")
+    eval_p.add_argument(
+        "-o", "--output", type=lambda p: get_path(Path(p)), default="./Evaluations", help="Optional output volume path"
+    )
+    eval_p.add_argument(
+        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
+    )
+
+    eval_p.add_argument(
+        "-g",
+        "--gpu",
+        type=str,
+        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
+        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
+    )
+    eval_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    eval_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
     # 3) UNCERTAINTY
@@ -559,12 +635,29 @@ def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
     unc_p.add_argument("app", type=str, help="KonfAI App name")
 
     unc_p.add_argument(
-        "-p",
-        "--pred-stack",
-        type=str,
+        "-i",
+        "--input",
+        type=lambda p: get_path(Path(p)),
         required=True,
         help=("Prediction stack: either a single multi-sample prediction file "),
     )
+
+    unc_p.add_argument(
+        "-o", "--output", type=lambda p: get_path(Path(p)), default="./Evaluations", help="Optional output volume path"
+    )
+    unc_p.add_argument(
+        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
+    )
+
+    unc_p.add_argument(
+        "-g",
+        "--gpu",
+        type=str,
+        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
+        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
+    )
+    unc_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    unc_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
     # 4) Pipeline
@@ -602,30 +695,17 @@ def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
     ft_p.add_argument("-d", "--dataset", type=str, required=True, help="Path to training dataset")
     ft_p.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs")
 
-    parser.add_argument("-quiet", action="store_true", help="Suppress console output.")
-
-    parser.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
-    )
-
-    parser.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
-
-    parser.add_argument("--version", action="version", version=importlib.metadata.version("IMPACT-Synth-KonfAI"))
+    parser.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
 
     args = parser.parse_args()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-    os.environ["KONFAI_NB_CORES"] = args.cpu
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    os.environ["KONFAI_NB_CORES"] = str(args.cpu)
     os.environ["KONFAI_WORKERS"] = str(0)
 
-    os.environ["KONFAI_MODELS_DIRECTORY"] = "./Models/"
     os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = "./Checkpoints/"
-    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = "./Predictions/"
-    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = "./Evaluations/"
+    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = str(args.output) + "/"
+    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = str(args.output) + "/"
     os.environ["KONFAI_STATISTICS_DIRECTORY"] = "./Statistics/"
     os.environ["KONFAI_SETUPS_DIRECTORY"] = "./Setups/"
     os.environ["KONFAI_OVERWRITE"] = str(True)
@@ -635,48 +715,90 @@ def setup_apps(parser: argparse.ArgumentParser) -> DistributedObject:
 
     model_hf = ModelHF(args.app)
 
+    os.makedirs(args.tmp_dir, exist_ok=True)
+    os.chdir(str(args.tmp_dir))
+    if str(args.tmp_dir) not in sys.path:
+        sys.path.insert(0, str(args.tmp_dir))
+
+    if args.command != "fine-tune":
+        from konfai.utils.dataset import Dataset
+
+        dataset = Dataset("Dataset", "mha")
+        for idx, file in enumerate(list_supported_files(args.input)):
+            dataset.write("Volume", f"P{idx:03d}", sitk.ReadImage(str(file)))
+
     if args.command == "infer":
         models_path = model_hf.install_inference(args.tta, args.ensemble, args.mc)
-        os.environ["konfai_root"] = "Predictor"
 
+        os.environ["KONFAI_ROOT"] = "Predictor"
         os.environ["KONFAI_config_file"] = "Prediction.yml"
         os.environ["KONFAI_MODEL"] = ":".join(models_path)
         os.environ["KONFAI_STATE"] = str(State.PREDICTION)
+
+        def save() -> None:
+            if os.path.exists("Predictions"):
+                shutil.copytree("Predictions", args.output, dirs_exist_ok=True)
+
         from konfai.predictor import Predictor
 
-        return Predictor(config=config_file())
+        classname = Predictor
     elif args.command == "eval":
-        from konfai.predictor import Predictor
+
+        for idx, file in enumerate(list_supported_files(args.gt)):
+            dataset.write("Reference", f"P{idx:03d}", sitk.ReadImage(str(file)))
+        if not args.mask:
+            names = dataset.get_names("Volume")
+            for name in names:
+                data, attr = dataset.read_data("Volume", name)
+                dataset.write("Mask", name, np.ones_like(data), attr)
+        else:
+            for idx, file in enumerate(list_supported_files(args.mask)):
+                dataset.write("Mask", f"P{idx:03d}", sitk.ReadImage(str(file)))
 
         model_hf.install_evaluation()
-        os.environ["konfai_root"] = "Evaluator"
+        os.environ["KONFAI_ROOT"] = "Evaluator"
 
         os.environ["KONFAI_config_file"] = "Evaluation.yml"
         os.environ["KONFAI_STATE"] = str(State.EVALUATION)
         from konfai.evaluator import Evaluator
 
-        return Evaluator(config=config_file())
+        def save() -> None:
+            if os.path.exists("./Evaluations"):
+                shutil.copytree("./Evaluations", args.output, dirs_exist_ok=True)
+
+        classname = Evaluator
+
     elif args.command == "uncertainty":
         model_hf.install_uncertainty()
-        os.environ["konfai_root"] = "Evaluator"
+        os.environ["KONFAI_ROOT"] = "Evaluator"
 
         os.environ["KONFAI_config_file"] = "Uncertainty.yml"
         os.environ["KONFAI_STATE"] = str(State.EVALUATION)
         from konfai.evaluator import Evaluator
 
-        return Evaluator(config=config_file())
+        def save() -> None:
+            if os.path.exists("./Evaluations"):
+                shutil.copytree("./Evaluations", args.output, dirs_exist_ok=True)
+
+        classname = Evaluator
     elif args.command == "fine-tune":
         models_path = model_hf.install_fine_tune()
-        os.environ["konfai_root"] = "Trainer"
+        os.environ["KONFAI_ROOT"] = "Trainer"
 
         os.environ["KONFAI_config_file"] = "FineTuning.yml"
         os.environ["KONFAI_MODEL"] = ":".join(models_path)
         os.environ["KONFAI_STATE"] = str(State.FINE_TUNING)
+
+        def save() -> None:
+            pass
+
         from konfai.trainer import Trainer
 
-        return Trainer(config=config_file())
+        classname = Trainer
     else:
         raise ValueError(f"Unknown command: {args.command}")
+
+    return partial(classname, config=config_file()), args.tmp_dir, save
 
 
 def setup(parser: argparse.ArgumentParser) -> DistributedObject:
@@ -744,7 +866,6 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
         default="./Setups/",
         help="Setups location",
     )
-    konfai.add_argument("--tta", type=int, default=0, help="Number of augmentation")
 
     konfai.add_argument("-log", action="store_true", help="Enable logging to a file")
     konfai.add_argument("-quiet", action="store_false", help="Suppress console output for a quieter execution")
@@ -757,7 +878,6 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     os.environ["KONFAI_NB_CORES"] = config["cpu"]
 
     os.environ["KONFAI_WORKERS"] = str(config["num_workers"])
-    os.environ["KONFAI_MODELS_DIRECTORY"] = config["MODELS_DIRECTORY"]
     os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
     os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
     os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = config["EVALUATIONS_DIRECTORY"]
@@ -790,17 +910,17 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     if config["type"] is State.PREDICTION:
         from konfai.predictor import Predictor
 
-        os.environ["konfai_root"] = "Predictor"
+        os.environ["KONFAI_ROOT"] = "Predictor"
         return Predictor(config=config_file())
     elif config["type"] is State.EVALUATION:
         from konfai.evaluator import Evaluator
 
-        os.environ["konfai_root"] = "Evaluator"
+        os.environ["KONFAI_ROOT"] = "Evaluator"
         return Evaluator(config=config_file())
     else:
         from konfai.trainer import Trainer
 
-        os.environ["konfai_root"] = "Trainer"
+        os.environ["KONFAI_ROOT"] = "Trainer"
         return Trainer(config=config_file())
 
 
@@ -1274,7 +1394,8 @@ class ModelHF:
         shutil.copy2(inference_file_path, "./Prediction.yml")
         self.set_number_of_augmentation("./Prediction.yml", number_of_augmentation)
         for code_path in codes_path:
-            shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+            if code_path.endswith(".py"):
+                shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
 
         return models_path
 
@@ -1282,13 +1403,15 @@ class ModelHF:
         evaluation_file_path, codes_path = self.download_evaluation()
         shutil.copy2(evaluation_file_path, "./Evaluation.yml")
         for code_path in codes_path:
-            shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+            if code_path.endswith(".py"):
+                shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
 
     def install_uncertainty(self) -> None:
         uncertainty_file_path, codes_path = self.download_uncertainty()
         shutil.copy2(uncertainty_file_path, "./Uncertainty.yml")
         for code_path in codes_path:
-            shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+            if code_path.endswith(".py"):
+                shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
 
     def install_fine_tune(self):
         pass

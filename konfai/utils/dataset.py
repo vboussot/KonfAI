@@ -3,6 +3,7 @@ import copy
 import csv
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 import h5py
@@ -113,10 +114,10 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     return data, attributes
 
 
-def get_infos(filename: str) -> tuple[list[int], Attribute]:
+def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     attributes = Attribute()
     file_reader = sitk.ImageFileReader()
-    file_reader.SetFileName(filename)
+    file_reader.SetFileName(str(filename))
     file_reader.ReadImageInformation()
     attributes["Origin"] = np.asarray(file_reader.GetOrigin())
     attributes["Spacing"] = np.asarray(file_reader.GetSpacing())
@@ -531,11 +532,11 @@ class Dataset:
             if self.file is not None:
                 self.file.__exit__(exc_type, value, traceback)
 
-    def __init__(self, filename: str, file_format: str) -> None:
-        if file_format != "h5" and not filename.endswith("/"):
+    def __init__(self, filename: str | Path, file_format: str) -> None:
+        if file_format != "h5" and not str(filename).endswith("/"):
             filename = f"{filename}/"
-        self.is_directory = filename.endswith("/")
-        self.filename = filename
+        self.is_directory = str(filename).endswith("/")
+        self.filename = str(filename)
         self.file_format = file_format
 
     def write(
