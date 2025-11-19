@@ -2,10 +2,6 @@ import datetime
 import os
 
 
-def models_directory() -> str:
-    return _get_env("KONFAI_MODELS_DIRECTORY")
-
-
 def checkpoints_directory() -> str:
     return _get_env("KONFAI_CHECKPOINTS_DIRECTORY")
 
@@ -39,7 +35,7 @@ def konfai_state() -> str:
 
 
 def konfai_root() -> str:
-    return _get_env("konfai_root")
+    return _get_env("KONFAI_ROOT")
 
 
 def cuda_visible_devices() -> str:
