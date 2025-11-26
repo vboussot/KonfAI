@@ -5,9 +5,11 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import tqdm
 from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
 from torch.utils.data import DataLoader
@@ -17,7 +19,7 @@ from konfai import checkpoints_directory, config_file, konfai_root, path_to_mode
 from konfai.data.data_manager import DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
 from konfai.data.transform import Transform, TransformInverse, TransformLoader
-from konfai.network.network import CPUModel, ModelLoader, NetState, Network
+from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import DataLog, DistributedObject, NeedDevice, PredictorError, State, description, get_module
@@ -31,7 +33,7 @@ class Reduction(ABC):
 
     @abstractmethod
     def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-        pass
+        raise NotImplementedError()
 
 
 class Mean(Reduction):
@@ -39,10 +41,8 @@ class Mean(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-        if isinstance(tensor, list):
-            tensor = torch.stack(tensor, dim=0)
-        return torch.mean(tensor.float(), dim=0)
+    def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
+        return torch.mean(torch.cat(tensor, dim=0).float(), dim=0).to(tensor[0].dtype)
 
 
 class Median(Reduction):
@@ -50,10 +50,8 @@ class Median(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-        if isinstance(tensor, list):
-            tensor = torch.stack(tensor, dim=0)
-        return torch.median(tensor.float(), dim=0).values
+    def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
+        return torch.median(torch.cat(tensor, dim=0).float(), dim=0).to(tensor[0].dtype).values
 
 
 class Concat(Reduction):
@@ -61,11 +59,8 @@ class Concat(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-        if isinstance(tensor, list):
-            return torch.stack(tensor, dim=2).squeeze(1)
-        else:
-            return tensor.view(tensor.shape[0] * tensor.shape[1], -1, *tensor.shape[3:])
+    def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
+        return torch.cat(tensor, dim=1)
 
 
 class OutputDataset(Dataset, NeedDevice, ABC):
@@ -168,7 +163,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         layer: torch.Tensor,
         dataset: DatasetIter,
     ):
-        pass
+        raise NotImplementedError()
 
     def is_done(self, index: int) -> bool:
         return len(self.output_layer_accumulator[index]) == self.nb_data_augmentation and all(
@@ -176,8 +171,8 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         )
 
     @abstractmethod
-    def get_output(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        pass
+    def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
+        raise NotImplementedError()
 
     def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
         super().write(self.group, name, layer.numpy(), self.attributes[index][0][0])
@@ -197,7 +192,6 @@ class OutSameAsGroupDataset(OutputDataset):
         final_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
         patch_combine: str | None = None,
         reduction: str = "Mean",
-        inverse_transform: bool = True,
     ) -> None:
         super().__init__(
             dataset_filename,
@@ -209,7 +203,6 @@ class OutSameAsGroupDataset(OutputDataset):
             reduction,
         )
         self.group_src, self.group_dest = same_as_group.split(":")
-        self.inverse_transform = inverse_transform
 
     def add_layer(
         self,
@@ -240,14 +233,13 @@ class OutSameAsGroupDataset(OutputDataset):
             for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
                 self.attributes[index_dataset][index_augmentation][i] = Attribute(input_dataset.cache_attributes[0])
 
-        if self.inverse_transform:
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
-                if isinstance(transform, TransformInverse) and transform.apply_inverse:
-                    layer = transform.inverse(
-                        self.names[index_dataset],
-                        layer,
-                        self.attributes[index_dataset][index_augmentation][index_patch],
-                    )
+        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
+            if isinstance(transform, TransformInverse) and transform.apply_inverse:
+                layer = transform.inverse(
+                    self.names[index_dataset],
+                    layer,
+                    self.attributes[index_dataset][index_augmentation][index_patch],
+                )
         self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
     def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
@@ -261,7 +253,9 @@ class OutSameAsGroupDataset(OutputDataset):
                 f"Destination group '{self.group_dest}' not found. Available groups: {groups[self.group_src]}."
             )
 
-    def _get_output(self, index: int, index_augmentation: int, dataset: DatasetIter) -> torch.Tensor:
+    def _get_output(
+        self, index: int, index_augmentation: int, number_of_channels_per_model: list[int], dataset: DatasetIter
+    ) -> torch.Tensor:
         layer = self.output_layer_accumulator[index][index_augmentation].assemble()
         if index_augmentation > 0:
 
@@ -274,28 +268,33 @@ class OutSameAsGroupDataset(OutputDataset):
                     break
                 i += data_augmentations.nb
 
-        for transform in self.before_reduction_transforms:
-            layer = transform(self.names[index], layer, self.attributes[index][index_augmentation][0])
+        chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
+        base_attr = self.attributes[index][index_augmentation][0]
+        base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+        results = []
+        for i, layer in enumerate(chunks):
+            attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
+            for transform in self.before_reduction_transforms:
+                layer = transform(self.names[index], layer, Attribute(attr))
+            results.append(layer)
 
-        return layer
+        return torch.stack(results, dim=0)
 
-    def get_output(self, index: int, dataset: DatasetIter) -> torch.Tensor:
-        result = torch.cat(
-            [
-                self._get_output(index, index_augmentation, dataset).unsqueeze(0)
-                for index_augmentation in self.output_layer_accumulator[index].keys()
-            ],
-            dim=0,
-        )
+    def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
+        results = [
+            self._get_output(index, index_augmentation, number_of_channels_per_model, dataset).unsqueeze(0)
+            for index_augmentation in self.output_layer_accumulator[index].keys()
+        ]
         self.output_layer_accumulator.pop(index)
-        result = self.reduction(result.float()).to(result.dtype)
+        result = self.reduction(results)
+        if isinstance(self.reduction, Concat):
+            result = result.squeeze(0)
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
-        if self.inverse_transform:
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
-                if isinstance(transform, TransformInverse) and transform.apply_inverse:
-                    result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
+        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
+            if isinstance(transform, TransformInverse) and transform.apply_inverse:
+                result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
 
         for transform in self.final_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
@@ -351,13 +350,13 @@ class _Predictor:
         self.local_rank = local_rank
 
         self.model_composite = model_composite
+
         self.dataloader_prediction = dataloader_prediction
         self.outputs_dataset = outputs_dataset
         self.autocast = autocast
 
         self.it = 0
 
-        self.device = self.model_composite.device
         self.dataset: DatasetIter = self.dataloader_prediction.dataset
         patch_size, overlap = self.dataset.get_patch_config()
         for output_dataset in self.outputs_dataset.values():
@@ -438,7 +437,9 @@ class _Predictor:
                 with torch.amp.autocast("cuda", enabled=self.autocast):
                     for _, data_dict in batch_iter:
                         input_tensor = self.get_input(data_dict)
-                        for name, output in self.model_composite(input_tensor, list(self.outputs_dataset.keys())):
+                        for name, number_of_channels_per_model, output in self.model_composite(
+                            input_tensor, list(self.outputs_dataset.keys())
+                        ):
                             self._predict_log(data_dict)
                             output_dataset = self.outputs_dataset[name]
                             for i, (index, patch_augmentation, patch_index) in enumerate(
@@ -464,7 +465,7 @@ class _Predictor:
                                         self.dataset.get_dataset_from_index(
                                             list(data_dict.keys())[0], index
                                         ).name.split("/")[-1],
-                                        output_dataset.get_output(index, self.dataset),
+                                        output_dataset.get_output(index, number_of_channels_per_model, self.dataset),
                                     )
 
                         batch_iter.set_description(f"Prediction : {description(self.model_composite)}")
@@ -589,11 +590,11 @@ class ModelComposite(Network):
             self[f"Model_{i}"].load(state_dict, init=False)
             self[f"Model_{i}"].set_name(f"{self[f'Model_{i}'].get_name()}_{i}")
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         data_dict: dict[tuple[str, bool], torch.Tensor],
         output_layers: list[str] = [],
-    ) -> list[tuple[str, torch.Tensor]]:
+    ) -> list[tuple[str, list[int], torch.Tensor]]:
         """
         Perform a forward pass on all model replicas and aggregate their outputs.
 
@@ -611,11 +612,13 @@ class ModelComposite(Network):
         aggregated = defaultdict(list)
         for module_outputs in result.values():
             for key, tensor in module_outputs:
+                if tensor.dtype == torch.float32:
+                    tensor = tensor.to(torch.float16)
                 aggregated[key].append(tensor)
 
         final_outputs = []
         for key, tensors in aggregated.items():
-            final_outputs.append((key, self.combine(tensors)))
+            final_outputs.append((key, [t.shape[1] for t in tensors], self.combine(tensors)))
 
         return final_outputs
 
@@ -712,7 +715,7 @@ class Predictor(DistributedObject):
         Raises:
             Exception: If a model path does not exist or cannot be loaded.
         """
-        model_paths = path_to_models().split(":")
+        model_paths = path_to_models()
         state_dicts = []
         for model_path in model_paths:
             if model_path.startswith("https://"):
@@ -764,7 +767,7 @@ class Predictor(DistributedObject):
         """
         for dataset_filename in self.datasets_filename:
             path = self.predict_path + dataset_filename
-            if os.path.exists(path):
+            if os.path.exists(path) and len(list(Path(path).rglob("*.yml"))):
                 if os.environ["KONFAI_OVERWRITE"] != "True":
                     accept = builtins.input(
                         f"The prediction {path} already exists ! Do you want to overwrite it (yes,no) : "
@@ -801,7 +804,7 @@ class Predictor(DistributedObject):
                 getattr(importlib.import_module(module), name)
             )(config=None)
 
-        self.model_composite = ModelComposite(self.model, len(path_to_models().split(":")), combine)
+        self.model_composite = ModelComposite(self.model, len(path_to_models()), combine)
         self.model_composite.load(self._load())
 
         if (
@@ -838,10 +841,13 @@ class Predictor(DistributedObject):
             local_rank (int): Local device rank.
             dataloaders (list[DataLoader]): List of data loaders for prediction.
         """
-        model_composite = Network.to(self.model_composite, local_rank * self.size)
+
         model_composite = (
-            DDP(model_composite, static_graph=True) if torch.cuda.is_available() else CPUModel(model_composite)
+            Network.to(self.model_composite, local_rank * self.size)
+            if torch.cuda.is_available()
+            else self.model_composite
         )
+        model_composite = DDP(model_composite, static_graph=True) if dist.is_initialized() else Model(model_composite)
         with _Predictor(
             world_size,
             global_rank,

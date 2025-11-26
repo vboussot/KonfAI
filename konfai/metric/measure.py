@@ -8,6 +8,7 @@ from functools import partial
 import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
+from huggingface_hub import hf_hub_download
 from scipy import linalg
 from skimage.metrics import structural_similarity
 from torchvision.models import Inception_V3_Weights, inception_v3
@@ -17,7 +18,7 @@ from konfai.data.patching import ModelPatch
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.config import config
-from konfai.utils.utils import download_url, get_module
+from konfai.utils.utils import get_module
 
 models_register = {}
 
@@ -704,18 +705,19 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         self.in_channels = in_channels
         self.loss = torch.nn.L1Loss()
         self.weights = weights
-        self.model_path = download_url(
-            model_name,
-            "https://huggingface.co/VBoussot/impact-torchscript-models/resolve/main/",
-        )
-        self.model: torch.nn.Module = torch.jit.load(self.model_path)  # nosec B614
+
+        self.model_path = hf_hub_download(
+            repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
+        )  # nosec B615
+
+        self.model: torch.nn.Module = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
         self.dim = len(shape)
         self.shape = shape if all(s > 0 for s in shape) else None
         self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
 
+        dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
         try:
-            dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
-            out = self.model(dummy_input)
+            out = self.model.to(0)(dummy_input)
             if not isinstance(out, (list, tuple)):
                 raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
             if len(weights) != len(out):

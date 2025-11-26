@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import shutil
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -346,7 +347,7 @@ class Evaluator(DistributedObject):
         Raises:
             EvaluatorError: If any metric output or target group is missing in the dataset's group mapping.
         """
-        if os.path.exists(self.metric_path):
+        if os.path.exists(self.metric_path) and len(list(Path(self.metric_path).rglob("*.yml"))):
             if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = builtins.input(
                     f"The metric {self.name} already exists ! Do you want to overwrite it (yes,no) : "
@@ -354,7 +355,6 @@ class Evaluator(DistributedObject):
                 if accept != "yes":
                     exit(0)
 
-            if os.path.exists(self.metric_path):
                 shutil.rmtree(self.metric_path)
 
         if not os.path.exists(self.metric_path):

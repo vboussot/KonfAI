@@ -549,6 +549,24 @@ class Mask(Transform):
         return torch.where(torch.tensor(mask) > 0, tensor, self.value_outside)
 
 
+class Sum(Transform):
+
+    def __init__(self, dim: int = 0) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "number_of_channels_per_model" in cache_attribute:
+            number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
+            result = tensor[0]
+            for i, t in enumerate(tensor[1:]):
+                t[t != 0] += int(number_of_channels[i]) - 1
+                result += t
+            return result
+        else:
+            return torch.sum(tensor, dim=self.dim).to(tensor.dtype)
+
+
 class Gradient(Transform):
 
     def __init__(self, per_dim: bool = False):
@@ -824,10 +842,10 @@ class KonfAIInference(Transform):
                     f"KonfAIInference {self.repo_id}:{self.model_name} failed with exit code {e.returncode}."
                 )
 
-            mha_file = list((Path(tmpdir) / "Output").rglob("*.mha"))
             result = []
-            for file in mha_file:
-                result.append(torch.from_numpy(image_to_data(sitk.ReadImage(str(file)))[0]))
+            for file in (Path(tmpdir) / "Output").rglob("*.mha"):
+                if file.name != "InferenceStack.mha":
+                    result.append(torch.from_numpy(image_to_data(sitk.ReadImage(str(file)))[0]))
             return torch.stack(result, dim=1).squeeze(0)
 
 
@@ -846,13 +864,15 @@ class InferenceStack(Transform):
         self.mode = mode
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if tensors.shape[0] == 1:
+            return tensors.squeeze(0)
+        if self.mode == "Seg":
+            _tensors = torch.argmax(torch.softmax(tensors, dim=1), dim=1).to(torch.uint8)
+        else:
+            _tensors = tensors.squeeze(1)
         dataset = self.dataset if self.dataset else self.datasets[-1]
-        dataset.write("InferenceStack", name, tensors.numpy(), cache_attribute)
-        return (
-            tensors.float().mean(0).to(tensors.dtype).unsqueeze(0)
-            if self.mode == "mean"
-            else torch.median(tensors.float(), dim=0).values.unsqueeze(0)
-        )
+        dataset.write("InferenceStack", name, _tensors.numpy(), cache_attribute)
+        return tensors.float().mean(0).to(tensors.dtype)
 
 
 class Variance(Transform):

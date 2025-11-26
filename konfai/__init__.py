@@ -6,8 +6,8 @@ def checkpoints_directory() -> str:
     return _get_env("KONFAI_CHECKPOINTS_DIRECTORY")
 
 
-def path_to_models() -> str:
-    return _get_env("KONFAI_MODEL")
+def path_to_models() -> list[str]:
+    return _get_env("KONFAI_MODEL").split(os.pathsep)
 
 
 def predictions_directory() -> str:
