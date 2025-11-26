@@ -363,7 +363,6 @@ class Log:
     def write(self, msg: str):
         if not msg:
             return
-
         ansi_escape = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
         msg_clean = ansi_escape.sub("", msg)
         if "\r" in msg_clean or "[A" in msg:
@@ -679,21 +678,54 @@ def setup_apps(
     # optional eval
     pipe_p.add_argument("--with-eval", action="store_true", help="Also run evaluation (requires --gt).")
 
-    pipe_p.add_argument("-g", "--gt", type=str, help="Ground-truth path (required when --with-eval is set).")
+    pipe_p.add_argument("--gt", type=lambda p: get_path(Path(p)), required=True, help="Ground-truth path")
 
     # optional uncertainty
     pipe_p.add_argument("--with-uncertainty", action="store_true", help="Also estimate uncertainty using sampling.")
 
     pipe_p.add_argument("-o", "--output", type=str, help="Output prediction volume (mean prediction).")
 
+    pipe_p.add_argument(
+        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
+    )
+
+    pipe_p.add_argument(
+        "-g",
+        "--gpu",
+        type=str,
+        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
+        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
+    )
+
+    pipe_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    pipe_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
+
     # -----------------
     # 5) FINE-TUNE
     # -----------------
     ft_p = subparsers.add_parser("fine-tune", help="Fine-tune a KonfAI App on a dataset.")
     ft_p.add_argument("app", type=str, help="KonfAI App name")
+    ft_p.add_argument("name", type=str, help="New KonfAI App display name")
 
     ft_p.add_argument("-d", "--dataset", type=str, required=True, help="Path to training dataset")
     ft_p.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs")
+
+    ft_p.add_argument(
+        "-o", "--output", type=lambda p: get_path(Path(p)), default="./", help="Optional output volume path"
+    )
+
+    ft_p.add_argument("--tmp_dir", type=lambda p: Path(p).absolute(), default="./", help="Use a temporary directory.")
+
+    ft_p.add_argument(
+        "-g",
+        "--gpu",
+        type=str,
+        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
+        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
+    )
+
+    ft_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    ft_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     parser.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
 
@@ -713,7 +745,11 @@ def setup_apps(
 
     os.environ["KONFAI_VERBOSE"] = str(args.quiet)
 
-    model_hf = ModelHF(args.app)
+    model: ModelLoad
+    if len(args.app.split(":")) == 2:
+        model = ModelHF(args.app.split(":")[0], args.app.split(":")[1])
+    else:
+        model = ModelDirectory(Path(args.app).parent, Path(args.app).name)
 
     os.makedirs(args.tmp_dir, exist_ok=True)
     os.chdir(str(args.tmp_dir))
@@ -728,11 +764,11 @@ def setup_apps(
             dataset.write("Volume", f"P{idx:03d}", sitk.ReadImage(str(file)))
 
     if args.command == "infer":
-        models_path = model_hf.install_inference(args.tta, args.ensemble, args.mc)
+        models_path = model.install_inference(args.tta, args.ensemble, args.mc)
 
         os.environ["KONFAI_ROOT"] = "Predictor"
         os.environ["KONFAI_config_file"] = "Prediction.yml"
-        os.environ["KONFAI_MODEL"] = ":".join(models_path)
+        os.environ["KONFAI_MODEL"] = os.pathsep.join([str(path) for path in models_path])
         os.environ["KONFAI_STATE"] = str(State.PREDICTION)
 
         def save() -> None:
@@ -755,7 +791,7 @@ def setup_apps(
             for idx, file in enumerate(list_supported_files(args.mask)):
                 dataset.write("Mask", f"P{idx:03d}", sitk.ReadImage(str(file)))
 
-        model_hf.install_evaluation()
+        model.install_evaluation()
         os.environ["KONFAI_ROOT"] = "Evaluator"
 
         os.environ["KONFAI_config_file"] = "Evaluation.yml"
@@ -769,7 +805,7 @@ def setup_apps(
         classname = Evaluator
 
     elif args.command == "uncertainty":
-        model_hf.install_uncertainty()
+        model.install_uncertainty()
         os.environ["KONFAI_ROOT"] = "Evaluator"
 
         os.environ["KONFAI_config_file"] = "Uncertainty.yml"
@@ -782,11 +818,11 @@ def setup_apps(
 
         classname = Evaluator
     elif args.command == "fine-tune":
-        models_path = model_hf.install_fine_tune()
+        models_path = model.install_fine_tune(args.output, args.name)
         os.environ["KONFAI_ROOT"] = "Trainer"
 
-        os.environ["KONFAI_config_file"] = "FineTuning.yml"
-        os.environ["KONFAI_MODEL"] = ":".join(models_path)
+        os.environ["KONFAI_config_file"] = "Config.yml"
+        os.environ["KONFAI_MODEL"] = os.pathsep.join([str(path) for path in models_path])
         os.environ["KONFAI_STATE"] = str(State.FINE_TUNING)
 
         def save() -> None:
@@ -925,6 +961,8 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
 
 
 def setup_gpu(world_size: int, port: int, rank: int | None = None) -> tuple[int | None, int | None]:
+    if os.name == "nt":
+        return rank, rank
     try:
         nodelist = os.getenv("SLURM_JOB_NODELIST")
         if nodelist is None:
@@ -949,10 +987,10 @@ def setup_gpu(world_size: int, port: int, rank: int | None = None) -> tuple[int 
     if global_rank >= world_size:
         return None, None
     # print("tcp://{}:{}".format(host_name, port))
-    if torch.cuda.is_available():
+    if dist.is_nccl_available():
         torch.cuda.empty_cache()
         dist.init_process_group(
-            "nccl",
+            backend="nccl",
             rank=global_rank,
             init_method=f"tcp://{host_name}:{port}",
             world_size=world_size,
@@ -981,7 +1019,7 @@ def cleanup():
 
 
 def synchronize_data(world_size: int, gpu: int, data: Any) -> list[Any]:
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and dist.is_initialized():
         outputs: list[dict[str, tuple[dict[str, float], dict[str, float]]] | None] = [None] * world_size
         torch.cuda.set_device(gpu)
         dist.all_gather_object(outputs, data)
@@ -1166,10 +1204,28 @@ class TransformError(KonfAIError):
         super().__init__("Transform", *message)
 
 
-class RepositoryHFError(KonfAIError):
+class AppRepositoryHFError(KonfAIError):
 
     def __init__(self, *message) -> None:
-        super().__init__("HF", *message)
+        super().__init__("Repo Hugging Face", *message)
+
+
+class AppDirectoryError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Model Directory", *message)
+
+
+class AppError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Model Config", *message)
+
+
+class AppMetadataError(KonfAIError):
+
+    def __init__(self, *message) -> None:
+        super().__init__("Model metadata", *message)
 
 
 def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
@@ -1178,12 +1234,35 @@ def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
     try:
         tree = api.list_repo_tree(repo_id=repo_id)
     except Exception as e:
-        raise RepositoryHFError(f"Unable to access repository '{repo_id}': {e}")
+        raise AppRepositoryHFError(f"Unable to access repository '{repo_id}': {e}")
     for entry in tree:
         model_name = entry.path
         if isinstance(entry, RepoFolder) and is_model_repo(repo_id, model_name)[0]:
             model_names.append(model_name)
     return model_names
+
+
+def is_model_directory(model_path: Path) -> tuple[bool, str, int]:
+    fold_names = []
+    found_prediction_file = False
+    found_metadata_file = False
+    for filename in model_path.glob("*"):
+        if str(filename).endswith(".pt"):
+            fold_names.append(filename)
+        elif str(filename).endswith("Prediction.yml"):
+            found_prediction_file = True
+        elif str(filename).endswith("metadata.json"):
+            found_metadata_file = True
+
+    if len(fold_names) == 0:
+        return False, f"No '.pt' model files were found in '{model_path}'.", 0
+
+    if not found_prediction_file:
+        return False, f"Missing 'Prediction.yml' in '{model_path}'.", 0
+
+    if not found_metadata_file:
+        return False, f"Missing 'metadata.json' in '{model_path}'.", 0
+    return True, "", len(fold_names)
 
 
 def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, int]:
@@ -1223,24 +1302,19 @@ def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, int]:
     return True, "", len(fold_names)
 
 
-class ModelHF:
+class ModelLoad(ABC):
 
-    def __init__(self, model_name: str):
-        if model_name and len(model_name.split(":")) != 2:
-            raise RepositoryHFError(
-                f"Invalid model name format in --config: '{model_name}'. "
-                "Expected format is 'REPO_ID:NAME', e.g. 'VBoussot/ImpactSynth:MR'."
-            )
-        self.repo_id, self.model_name = model_name.split(":")
-        _, err_message, self._number_of_models = is_model_repo(self.repo_id, self.model_name)
-        if err_message:
-            raise RepositoryHFError(err_message)
-        model_metadata = self._read_metadata()
-
+    def __init__(self, model_name: str, number_of_models: int) -> None:
+        self._number_of_models = number_of_models
+        self._model_name = model_name
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
+        metadata_file_path = self._download(f"{self._model_name}/metadata.json")
+        with open(metadata_file_path, encoding="utf-8") as f:
+            model_metadata = json.load(f)
+
         missing = [k for k in required_keys if k not in model_metadata]
         if missing:
-            raise RepositoryHFError(f"Missing keys in metadata.json: {', '.join(missing)}")
+            raise AppMetadataError(f"Missing keys in metadata.json: {', '.join(missing)}")
 
         self._description = str(model_metadata["description"])
         self._short_description = str(model_metadata["short_description"])
@@ -1248,35 +1322,32 @@ class ModelHF:
         try:
             self._maximum_tta = int(model_metadata["tta"])
         except Exception:
-            raise RepositoryHFError("The field 'tta' must be an integer.")
+            raise AppMetadataError("The field 'tta' must be an integer.")
 
         try:
             self._mc_dropout = int(model_metadata["mc_dropout"])
         except Exception:
-            raise RepositoryHFError("The field 'mc_dropout' must be an integer.")
+            raise AppMetadataError("The field 'mc_dropout' must be an integer.")
 
         self._display_name = str(model_metadata["display_name"])
 
-    def has_capabilities(self) -> tuple[bool, bool]:
-        api = HfApi()
-        tree = api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name)
-        evaluation_support = False
-        uncertainty_support = False
+    def get_display_name(self):
+        return self._display_name
 
-        for file in tree:
-            if file.path.endswith("Evaluation.yml"):
-                evaluation_support = True
-            elif file.path.endswith("Uncertainty.yml"):
-                uncertainty_support = True
-        return evaluation_support, uncertainty_support
+    def get_maximum_tta(self):
+        return self._maximum_tta
 
-    def _read_metadata(self) -> dict[str, str]:
-        metadata_file_path = hf_hub_download(
-            repo_id=self.repo_id, filename=f"{self.model_name}/metadata.json", repo_type="model", revision=None
-        )  # nosec B615
-        with open(metadata_file_path, encoding="utf-8") as f:
-            model_metadata = json.load(f)
-        return model_metadata
+    def get_mc_dropout(self):
+        return self._mc_dropout
+
+    def get_number_of_models(self):
+        return self._number_of_models
+
+    def get_description(self):
+        return self._description
+
+    def get_short_description(self):
+        return self._short_description
 
     def set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
@@ -1294,25 +1365,48 @@ class ModelHF:
         with open(inference_file_path, "w") as f:
             yaml.dump(data, f)
 
-    def download_inference(self, number_of_model: int) -> tuple[list[str], str, list[str]]:
-        api = HfApi()
+    @abstractmethod
+    def _get_filenames(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _download(self, filename: str) -> Path:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get_name(self) -> str:
+        raise NotImplementedError()
+
+    def has_capabilities(self) -> tuple[bool, bool]:
+        filenames = self._get_filenames()
+        evaluation_support = False
+        uncertainty_support = False
+
+        for filename in filenames:
+            if filename.endswith("Evaluation.yml"):
+                evaluation_support = True
+            elif filename.endswith("Uncertainty.yml"):
+                uncertainty_support = True
+        return evaluation_support, uncertainty_support
+
+    def download_inference(self, number_of_model: int) -> tuple[list[Path], Path, list[Path]]:
+        filenames = self._get_filenames()
         models_path = []
         codes_path = []
         i = 0
-        for filename in api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name):
-            if filename.path.endswith(".pt"):
+        for filename in filenames:
+            if filename.endswith(".pt"):
                 i += 1
                 if i > number_of_model:
                     continue
 
-            file_path = hf_hub_download(
-                repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
-            )  # nosec B615
-            if "Prediction.yml" in filename.path:
+            file_path = self._download(filename)
+
+            if "Prediction.yml" in filename:
                 inference_file_path = file_path
-            elif filename.path.endswith(".pt"):
+            elif filename.endswith(".pt"):
                 models_path.append(file_path)
-            elif "requirements.txt" in filename.path:
+            elif "requirements.txt" in filename:
                 with open(file_path, encoding="utf-8") as f:
                     required_lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
@@ -1341,61 +1435,57 @@ class ModelHF:
                                 [sys.executable, "-m", "pip", "install", *missing_or_outdated],  # nosec B603
                             )
                         except subprocess.CalledProcessError as e:
-                            raise RepositoryHFError(f"Failed to install packages: {e}") from e
-            elif "metadata.json" not in filename.path:
+                            raise AppRepositoryHFError(f"Failed to install packages: {e}") from e
+            elif "metadata.json" not in filename:
                 codes_path.append(file_path)
         return models_path, inference_file_path, codes_path
 
-    def download_evaluation(self) -> tuple[str, list[str]]:
-        api = HfApi()
+    def download_train(self) -> list[Path]:
+        filenames = self._get_filenames()
+        files_path = []
+        for filename in filenames:
+            files_path.append(self._download(filename))
+        return files_path
+
+    def download_evaluation(self) -> tuple[Path, list[Path]]:
+        filenames = self._get_filenames()
         codes_path = []
-        for filename in api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name):
-            if "Evaluation.yml" in filename.path:
-                evaluation_file_path = hf_hub_download(
-                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
-                )  # nosec B615
-            elif filename.path.endswith(".py"):
-                file_path = hf_hub_download(
-                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
-                )  # nosec B615
-                codes_path.append(file_path)
+        for filename in filenames:
+            if "Evaluation.yml" in filename:
+                evaluation_file_path = self._download(filename)
+            elif filename.endswith(".py"):
+                codes_path.append(self._download(filename))
         return evaluation_file_path, codes_path
 
-    def download_uncertainty(self) -> tuple[str, list[str]]:
-        api = HfApi()
+    def download_uncertainty(self) -> tuple[Path, list[Path]]:
+        filenames = self._get_filenames()
         codes_path = []
-        for filename in api.list_repo_tree(repo_id=self.repo_id, path_in_repo=self.model_name):
-            if "Uncertainty.yml" in filename.path:
-                uncertainty_file_path = hf_hub_download(
-                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
-                )  # nosec B615
-            elif filename.path.endswith(".py"):
-                file_path = hf_hub_download(
-                    repo_id=self.repo_id, filename=filename.path, repo_type="model", revision=None
-                )  # nosec B615
-                codes_path.append(file_path)
+        for filename in filenames:
+            if "Uncertainty.yml" in filename:
+                uncertainty_file_path = self._download(filename)
+            elif filename.endswith(".py"):
+                codes_path.append(self._download(filename))
         return uncertainty_file_path, codes_path
 
     def install_inference(
         self, number_of_augmentation: int, number_of_model: int, number_of_mc_dropout: int
-    ) -> list[str]:
+    ) -> list[Path]:
         if not number_of_model:
             number_of_model = self._number_of_models
         else:
             try:
                 number_of_model = int(number_of_model)
             except ValueError:
-                raise RepositoryHFError(
+                raise AppError(
                     f"Invalid value provided for '--MODEL': '{number_of_model}'. ",
                     "The value must be an integer (e.g. 1, 2, 3).",
                 )
         models_path, inference_file_path, codes_path = self.download_inference(number_of_model)
-
         shutil.copy2(inference_file_path, "./Prediction.yml")
         self.set_number_of_augmentation("./Prediction.yml", number_of_augmentation)
         for code_path in codes_path:
-            if code_path.endswith(".py"):
-                shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+            if code_path.suffix == ".py":
+                shutil.copy2(code_path, code_path.name)
 
         return models_path
 
@@ -1403,33 +1493,143 @@ class ModelHF:
         evaluation_file_path, codes_path = self.download_evaluation()
         shutil.copy2(evaluation_file_path, "./Evaluation.yml")
         for code_path in codes_path:
-            if code_path.endswith(".py"):
-                shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+            if code_path.suffix == ".py":
+                shutil.copy2(code_path, code_path.name)
 
     def install_uncertainty(self) -> None:
         uncertainty_file_path, codes_path = self.download_uncertainty()
         shutil.copy2(uncertainty_file_path, "./Uncertainty.yml")
         for code_path in codes_path:
-            if code_path.endswith(".py"):
-                shutil.copy2(code_path, "./{}".format(code_path.split("/")[-1]))
+            if code_path.suffix == ".py":
+                shutil.copy2(code_path, code_path.name)
 
-    def install_fine_tune(self):
-        pass
+    def install_fine_tune(self, path: Path, display_name: str) -> list[Path]:
 
-    def get_display_name(self):
-        return self._display_name
+        target_dir = path.expanduser().resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        src_paths = self.download_train()
+        models_path = []
 
-    def get_maximum_tta(self):
-        return self._maximum_tta
+        overwrite_all = None
 
-    def get_mc_dropout(self):
-        return self._mc_dropout
+        def ask_overwrite_cli(dest_path: Path) -> bool:
+            """Prompt user in terminal to decide whether to overwrite a file."""
+            nonlocal overwrite_all
 
-    def get_number_of_models(self):
-        return self._number_of_models
+            # If the user already decided globally, apply it
+            if overwrite_all is not None:
+                return overwrite_all
 
-    def get_description(self):
-        return self._description
+            while True:
+                print(f"\nFile already exists: {dest_path}")
+                choice = input("Overwrite? [y]es / [n]o / [a]ll / [s]kip_all: ").strip().lower()
 
-    def get_short_description(self):
-        return self._short_description
+                if choice == "y":
+                    return True
+                elif choice == "n":
+                    return False
+                elif choice == "a":
+                    overwrite_all = True
+                    return True
+                elif choice == "s":
+                    overwrite_all = False
+                    return False
+                else:
+                    print("Invalid input. Please choose y / n / a / s.")
+
+        for src in src_paths:
+            if src.is_dir():
+                for item in src.rglob("*"):
+                    rel = item.relative_to(src)
+                    dest = target_dir / rel
+                    if item.is_dir():
+                        dest.mkdir(parents=True, exist_ok=True)
+                        continue
+
+                    # Ensure parent exists
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+
+                    # If file exists → prompt in CLI
+                    if dest.exists():
+                        if not ask_overwrite_cli(dest):
+
+                            continue
+
+                    shutil.copy2(item, dest)
+
+                    # Track model weights
+                    if str(item).endswith(".pt"):
+                        models_path.append(item)
+
+            elif src.is_file() or src.is_symlink():
+                dest = target_dir / src.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+
+                if str(src).endswith(".pt"):
+                    models_path.append(src)
+
+                # If file exists → prompt in CLI
+                if dest.exists():
+                    if not ask_overwrite_cli(dest):
+                        continue
+
+                shutil.copy2(src, dest)
+
+        metadata_file = path / "metadata.json"
+        # Load existing metadata
+        with open(metadata_file, encoding="utf-8") as f:
+            model_metadata = json.load(f)
+
+        # Modify the metadata
+        model_metadata["display_name"] = display_name
+
+        # Save back to disk (UTF-8, pretty JSON)
+        with open(metadata_file, "w", encoding="utf-8") as f:
+            json.dump(model_metadata, f, indent=2, ensure_ascii=False)
+        return models_path
+
+
+class ModelDirectory(ModelLoad):
+
+    def __init__(self, model_directory: Path, model_name: str):
+        self._model_directory = model_directory
+        _, err_message, number_of_models = is_model_directory(model_directory / model_name)
+
+        if err_message:
+            raise AppDirectoryError(err_message)
+
+        super().__init__(model_name, number_of_models)
+
+    def _get_filenames(self) -> list[str]:
+        return [filename.name for filename in (self._model_directory / self._model_name).glob("*")]
+
+    def _download(self, filename: str) -> Path:
+        return self._model_directory / filename
+
+    def get_name(self) -> str:
+        return str(self._model_directory / self._model_name)
+
+
+class ModelHF(ModelLoad):
+
+    def __init__(self, repo_id: str, model_name: str):
+        self._repo_id, self.model_name = repo_id, model_name
+        _, err_message, number_of_models = is_model_repo(self._repo_id, self.model_name)
+        if err_message:
+            raise AppRepositoryHFError(err_message)
+
+        super().__init__(self.model_name, number_of_models)
+
+    def _get_filenames(self) -> list[str]:
+        api = HfApi()
+        tree = api.list_repo_tree(repo_id=self._repo_id, path_in_repo=self.model_name)
+        return [filename.path for filename in tree]
+
+    def _download(self, filename: str) -> Path:
+        file_path = hf_hub_download(
+            repo_id=self._repo_id, filename=filename, repo_type="model", revision=None
+        )  # nosec B615
+        return Path(file_path)
+
+    def get_name(self) -> str:
+        return f"{self._repo_id}:{self._model_name}"

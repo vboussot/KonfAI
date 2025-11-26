@@ -19,7 +19,7 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import DataTrain
-from konfai.network.network import CPUModel, ModelLoader, NetState, Network
+from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import config
 from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, description
 
@@ -137,7 +137,7 @@ class _Trainer:
         autocast: bool,
         it_validation: int | None,
         it: int,
-        model: DDP | CPUModel,
+        model: Model,
         model_ema: AveragedModel,
         dataloader_training: DataLoader,
         dataloader_validation: DataLoader | None = None,
@@ -571,19 +571,20 @@ class Trainer(DistributedObject):
         Returns:
             dict: State dictionary loaded from checkpoint.
         """
-        if path_to_models().startswith("https://"):
+        path_to_model = path_to_models()[0]
+        if path_to_model.startswith("https://"):
             try:
                 state_dict = {
-                    path_to_models().split(":")[1]: torch.hub.load_state_dict_from_url(
-                        url=path_to_models().split(":")[0], map_location="cpu", check_hash=True
+                    path_to_model.split(":")[1]: torch.hub.load_state_dict_from_url(
+                        url=path_to_model.split(":")[0], map_location="cpu", check_hash=True
                     )
                 }
             except Exception:
-                raise Exception(f"Model : {path_to_models()} does not exist !")
+                raise Exception(f"Model : {path_to_model} does not exist !")
         else:
-            if path_to_models() != "":
+            if path_to_model != "":
                 path = ""
-                name = path_to_models()
+                name = path_to_model
             else:
                 path = checkpoints_directory() + self.name + "/"
                 if os.listdir(path):
@@ -692,8 +693,9 @@ class Trainer(DistributedObject):
             local_rank (int): Local rank within the node.
             dataloaders (list[DataLoader]): Training and validation dataloaders.
         """
-        model = Network.to(self.model, local_rank * self.size)
-        model = DDP(model, static_graph=True) if torch.cuda.is_available() else CPUModel(model)
+        model = Network.to(self.model, local_rank * self.size) if torch.cuda.is_available() else self.model
+        model = DDP(model, static_graph=True) if dist.is_initialized() else Model(model)
+
         if self.model_ema is not None:
             self.model_ema.module = Network.to(self.model_ema.module, local_rank)
         with _Trainer(

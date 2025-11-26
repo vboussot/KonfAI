@@ -41,6 +41,7 @@ def main():
 
 def main_apps():
     parser = argparse.ArgumentParser(description="KonfAI-Apps", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    tmp_dir = None
     try:
         user_dir = os.getcwd()
         tmp_dir_default = Path(tempfile.mkdtemp())
@@ -56,12 +57,13 @@ def main_apps():
     except KeyboardInterrupt:
         print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
     finally:
-        if str(tmp_dir) in sys.path:
-            sys.path.remove(str(tmp_dir))
+        if tmp_dir:
+            if str(tmp_dir) in sys.path:
+                sys.path.remove(str(tmp_dir))
 
-        os.chdir(str(user_dir))
-        if str(tmp_dir_default) == str(tmp_dir):
-            shutil.rmtree(str(tmp_dir))
+            os.chdir(str(user_dir))
+            if str(tmp_dir_default) == str(tmp_dir):
+                shutil.rmtree(str(tmp_dir))
 
 
 def cluster():

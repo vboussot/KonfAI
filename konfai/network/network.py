@@ -1327,11 +1327,10 @@ class ModelLoader:
         return model
 
 
-class CPUModel:
+class Model:
 
     def __init__(self, model: Network) -> None:
         self.module = model
-        self.device = torch.device("cpu")
 
     def train(self):
         self.module.train()
