@@ -5,7 +5,6 @@ import json
 import os
 import random
 import re
-import resource
 import shutil
 import socket
 import subprocess  # nosec B404
@@ -545,11 +544,6 @@ def list_supported_files(path: Path) -> list[Path]:
 def setup_apps(
     parser: argparse.ArgumentParser, user_dir: Path, tmp_dir_default: Path
 ) -> tuple[partial[DistributedObject], Path, Callable[[], None]]:
-    try:
-        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
-    except (ImportError, OSError, ValueError):
-        pass
 
     def get_path(path: Path) -> Path:
         if path.is_absolute():

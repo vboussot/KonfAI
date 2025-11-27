@@ -39,7 +39,7 @@ def konfai_root() -> str:
 
 
 def cuda_visible_devices() -> str:
-    return _get_env("CUDA_VISIBLE_DEVICES")
+    return os.environ.get("CUDA_VISIBLE_DEVICES", "")
 
 
 def konfai_nb_cores() -> str:
