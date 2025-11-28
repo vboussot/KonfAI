@@ -566,8 +566,10 @@ def setup_apps(
         "-i",
         "--input",
         type=lambda p: get_path(Path(p)),
+        nargs="+",
+        action="append",
         required=True,
-        help="Input path: either a single volume file OR a dataset directory",
+        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
     )
     infer_p.add_argument(
         "-o", "--output", type=lambda p: get_path(Path(p)), default="./Predictions", help="Optional output volume path"
@@ -576,16 +578,22 @@ def setup_apps(
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
     infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
     infer_p.add_argument(
+        "--prediction_file", type=str, default="Prediction.yml", help="Optional prediction config filename"
+    )
+    infer_p.add_argument(
+        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
+    )
+    infer_p.add_argument(
         "-g",
         "--gpu",
         type=str,
         default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
         help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
     )
-    infer_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
     infer_p.add_argument(
-        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
+        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
     )
+
     infer_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
@@ -598,15 +606,36 @@ def setup_apps(
         "-i",
         "--input",
         type=lambda p: get_path(Path(p)),
+        nargs="+",
+        action="append",
         required=True,
-        help="Input path: either a single volume file OR a dataset directory",
+        help="Input path(s): provide one or multiple data files, or a dataset directory.",
     )
 
-    eval_p.add_argument("--gt", type=lambda p: get_path(Path(p)), required=True, help="Ground-truth path")
-    eval_p.add_argument("--mask", type=lambda p: get_path(Path(p)), help="Optional evaluation mask path")
+    eval_p.add_argument(
+        "--gt",
+        type=lambda p: get_path(Path(p)),
+        nargs="+",
+        action="append",
+        required=True,
+        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
+    )
+
+    eval_p.add_argument(
+        "--mask",
+        type=lambda p: get_path(Path(p)),
+        nargs="+",
+        action="append",
+        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
+    )
+
     eval_p.add_argument(
         "-o", "--output", type=lambda p: get_path(Path(p)), default="./Evaluations", help="Optional output volume path"
     )
+    eval_p.add_argument(
+        "--evaluation_file", type=str, default="Evaluation.yml", help="Optional evaluation config filename"
+    )
+
     eval_p.add_argument(
         "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
     )
@@ -618,7 +647,9 @@ def setup_apps(
         default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
         help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
     )
-    eval_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    eval_p.add_argument(
+        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
+    )
     eval_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
@@ -631,13 +662,20 @@ def setup_apps(
         "-i",
         "--input",
         type=lambda p: get_path(Path(p)),
+        nargs="+",
+        action="append",
         required=True,
-        help=("Prediction stack: either a single multi-sample prediction file "),
+        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
     )
 
     unc_p.add_argument(
         "-o", "--output", type=lambda p: get_path(Path(p)), default="./Evaluations", help="Optional output volume path"
     )
+
+    unc_p.add_argument(
+        "--uncertainty_file", type=str, default="Uncertainty.yml", help="Optional uncertainty config filename"
+    )
+
     unc_p.add_argument(
         "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
     )
@@ -649,7 +687,9 @@ def setup_apps(
         default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
         help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
     )
-    unc_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    unc_p.add_argument(
+        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
+    )
     unc_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
@@ -661,8 +701,15 @@ def setup_apps(
 
     pipe_p.add_argument("app", type=str, help="KonfAI App name")
 
-    pipe_p.add_argument("-i", "--input", type=str, required=True, help="Input path: volume file or directory.")
-
+    pipe_p.add_argument(
+        "-i",
+        "--input",
+        type=lambda p: get_path(Path(p)),
+        nargs="+",
+        action="append",
+        required=True,
+        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
+    )
     pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
 
     pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
@@ -691,7 +738,9 @@ def setup_apps(
         help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
     )
 
-    pipe_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    pipe_p.add_argument(
+        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
+    )
     pipe_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     # -----------------
@@ -718,7 +767,9 @@ def setup_apps(
         help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
     )
 
-    ft_p.add_argument("--cpu", type=int, default=1, help="Number of CPU cores to use when --gpu is empty.")
+    ft_p.add_argument(
+        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
+    )
     ft_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
 
     parser.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
@@ -743,7 +794,7 @@ def setup_apps(
     if len(args.app.split(":")) == 2:
         model = ModelHF(args.app.split(":")[0], args.app.split(":")[1])
     else:
-        model = ModelDirectory(Path(args.app).parent, Path(args.app).name)
+        model = ModelDirectory(Path(args.app).resolve().parent, Path(args.app).name)
 
     os.makedirs(args.tmp_dir, exist_ok=True)
     os.chdir(str(args.tmp_dir))
@@ -751,17 +802,23 @@ def setup_apps(
         sys.path.insert(0, str(args.tmp_dir))
 
     if args.command != "fine-tune":
-        from konfai.utils.dataset import Dataset
+        from konfai.utils.dataset import Dataset, read_landmarks
 
         dataset = Dataset("Dataset", "mha")
-        for idx, file in enumerate(list_supported_files(args.input)):
-            dataset.write("Volume", f"P{idx:03d}", sitk.ReadImage(str(file)))
+        for i, input_file in enumerate([p for group in args.input for p in group]):
+            for idx, file in enumerate(list_supported_files(input_file)):
+                if file.suffix == ".fcsv":
+                    dataset.write(f"Volume_{i}", f"P{idx:03d}", read_landmarks(str(file)))
+                elif str(file).endswith(".itk.txt"):
+                    dataset.write(f"Volume_{i}", f"P{idx:03d}", sitk.ReadTransform(str(file)))
+                else:
+                    dataset.write(f"Volume_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
 
     if args.command == "infer":
         models_path = model.install_inference(args.tta, args.ensemble, args.mc)
 
         os.environ["KONFAI_ROOT"] = "Predictor"
-        os.environ["KONFAI_config_file"] = "Prediction.yml"
+        os.environ["KONFAI_config_file"] = args.prediction_file
         os.environ["KONFAI_MODEL"] = os.pathsep.join([str(path) for path in models_path])
         os.environ["KONFAI_STATE"] = str(State.PREDICTION)
 
@@ -774,21 +831,29 @@ def setup_apps(
         classname = Predictor
     elif args.command == "eval":
 
-        for idx, file in enumerate(list_supported_files(args.gt)):
-            dataset.write("Reference", f"P{idx:03d}", sitk.ReadImage(str(file)))
-        if not args.mask:
-            names = dataset.get_names("Volume")
-            for name in names:
-                data, attr = dataset.read_data("Volume", name)
-                dataset.write("Mask", name, np.ones_like(data), attr)
-        else:
-            for idx, file in enumerate(list_supported_files(args.mask)):
-                dataset.write("Mask", f"P{idx:03d}", sitk.ReadImage(str(file)))
+        for i, gt in enumerate([p for group in args.gt for p in group]):
+            for idx, file in enumerate(list_supported_files(gt)):
+                if file.suffix == ".fcsv":
+                    dataset.write(f"Reference_{i}", f"P{idx:03d}", read_landmarks(str(file)))
+                elif file.suffix == ".itk.txt":
+                    dataset.write(f"Reference_{i}", f"P{idx:03d}", sitk.ReadTransform(str(file)))
+                else:
+                    dataset.write(f"Reference_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
 
-        model.install_evaluation()
+        if not args.mask:
+            names = dataset.get_names("Volume_0")
+            for name in names:
+                data, attr = dataset.read_data("Volume_0", name)
+                dataset.write("Mask_0", name, np.ones_like(data), attr)
+        else:
+            for i, mask in enumerate([p for group in args.gt for p in group]):
+                for idx, file in enumerate(list_supported_files(mask)):
+                    dataset.write(f"Mask_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
+
+        model.install_evaluation(args.evaluation_file)
         os.environ["KONFAI_ROOT"] = "Evaluator"
 
-        os.environ["KONFAI_config_file"] = "Evaluation.yml"
+        os.environ["KONFAI_config_file"] = args.evaluation_file
         os.environ["KONFAI_STATE"] = str(State.EVALUATION)
         from konfai.evaluator import Evaluator
 
@@ -802,7 +867,7 @@ def setup_apps(
         model.install_uncertainty()
         os.environ["KONFAI_ROOT"] = "Evaluator"
 
-        os.environ["KONFAI_config_file"] = "Uncertainty.yml"
+        os.environ["KONFAI_config_file"] = args.uncertainty_file
         os.environ["KONFAI_STATE"] = str(State.EVALUATION)
         from konfai.evaluator import Evaluator
 
@@ -845,7 +910,9 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
         default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
         help="List of GPU",
     )
-    konfai.add_argument("-cpu", "--cpu", type=str, default="1", help="Number of cores")
+    konfai.add_argument(
+        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
+    )
     konfai.add_argument(
         "--num-workers",
         "--num_workers",
@@ -981,7 +1048,7 @@ def setup_gpu(world_size: int, port: int, rank: int | None = None) -> tuple[int 
     if global_rank >= world_size:
         return None, None
     # print("tcp://{}:{}".format(host_name, port))
-    if dist.is_nccl_available():
+    if dist.is_nccl_available() and torch.cuda.is_available():
         torch.cuda.empty_cache()
         dist.init_process_group(
             backend="nccl",
@@ -1135,10 +1202,10 @@ SUPPORTED_EXTENSIONS = [
     "bmp",  # 2D formats
     "h5",
     "itk.txt",
-    ".fcsv",
-    ".xml",
-    ".vtk",
-    ".npy",
+    "fcsv",
+    "xml",
+    "vtk",
+    "npy",
 ]
 
 
@@ -1238,24 +1305,21 @@ def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
 
 def is_model_directory(model_path: Path) -> tuple[bool, str, int]:
     fold_names = []
-    found_prediction_file = False
     found_metadata_file = False
     for filename in model_path.glob("*"):
         if str(filename).endswith(".pt"):
             fold_names.append(filename)
-        elif str(filename).endswith("Prediction.yml"):
-            found_prediction_file = True
-        elif str(filename).endswith("metadata.json"):
+        elif str(filename).endswith("app.json"):
             found_metadata_file = True
 
-    if len(fold_names) == 0:
-        return False, f"No '.pt' model files were found in '{model_path}'.", 0
+    # if len(fold_names) == 0:
+    #    return False, f"No '.pt' model files were found in '{model_path}'.", 0
 
-    if not found_prediction_file:
-        return False, f"Missing 'Prediction.yml' in '{model_path}'.", 0
+    # if not found_prediction_file:
+    #    return False, f"Missing 'Prediction.yml' in '{model_path}'.", 0
 
     if not found_metadata_file:
-        return False, f"Missing 'metadata.json' in '{model_path}'.", 0
+        return False, f"Missing 'app.json' in '{model_path}'.", 0
     return True, "", len(fold_names)
 
 
@@ -1263,13 +1327,10 @@ def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, int]:
     """
     Check whether the Hugging Face repository structure is valid for KonfAI.
     Required files:
-    - at least one .pt file in the model folder
-    - a Prediction.yml file
-    - a metadata.json file
+    - a app file
     """
     api = HfApi()
     fold_names = []
-    found_prediction_file = False
     found_metadata_file = False
 
     try:
@@ -1277,22 +1338,14 @@ def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, int]:
     except Exception as e:
         return False, f"Unable to access repository '{repo_id}': {e}", 0
 
-    for file in tree:
-        if file.path.endswith(".pt"):
-            fold_names.append(file.path)
-        elif file.path.endswith("Prediction.yml"):
-            found_prediction_file = True
-        elif file.path.endswith("metadata.json"):
+    for filename in tree:
+        if filename.path.endswith(".pt"):
+            fold_names.append(filename.path)
+        elif filename.path.endswith("app.json"):
             found_metadata_file = True
 
-    if len(fold_names) == 0:
-        return False, f"No '.pt' model files were found in '{repo_id}/{model_name}'.", 0
-
-    if not found_prediction_file:
-        return False, f"Missing 'Prediction.yml' in '{repo_id}/{model_name}'.", 0
-
     if not found_metadata_file:
-        return False, f"Missing 'metadata.json' in '{repo_id}/{model_name}'.", 0
+        return False, f"Missing 'app.json' in '{repo_id}/{model_name}'.", 0
     return True, "", len(fold_names)
 
 
@@ -1302,13 +1355,13 @@ class ModelLoad(ABC):
         self._number_of_models = number_of_models
         self._model_name = model_name
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
-        metadata_file_path = self._download(f"{self._model_name}/metadata.json")
+        metadata_file_path = self._download("app.json")
         with open(metadata_file_path, encoding="utf-8") as f:
             model_metadata = json.load(f)
 
         missing = [k for k in required_keys if k not in model_metadata]
         if missing:
-            raise AppMetadataError(f"Missing keys in metadata.json: {', '.join(missing)}")
+            raise AppMetadataError(f"Missing keys in app.json: {', '.join(missing)}")
 
         self._description = str(model_metadata["description"])
         self._short_description = str(model_metadata["short_description"])
@@ -1383,7 +1436,9 @@ class ModelLoad(ABC):
                 uncertainty_support = True
         return evaluation_support, uncertainty_support
 
-    def download_inference(self, number_of_model: int) -> tuple[list[Path], Path, list[Path]]:
+    def download_inference(
+        self, number_of_model: int, prediction_file: str = "Prediction.yml"
+    ) -> tuple[list[Path], Path, list[Path]]:
         filenames = self._get_filenames()
         models_path = []
         codes_path = []
@@ -1396,7 +1451,7 @@ class ModelLoad(ABC):
 
             file_path = self._download(filename)
 
-            if "Prediction.yml" in filename:
+            if prediction_file in filename:
                 inference_file_path = file_path
             elif filename.endswith(".pt"):
                 models_path.append(file_path)
@@ -1430,7 +1485,7 @@ class ModelLoad(ABC):
                             )
                         except subprocess.CalledProcessError as e:
                             raise AppRepositoryHFError(f"Failed to install packages: {e}") from e
-            elif "metadata.json" not in filename:
+            elif "app.json" not in filename:
                 codes_path.append(file_path)
         return models_path, inference_file_path, codes_path
 
@@ -1441,28 +1496,32 @@ class ModelLoad(ABC):
             files_path.append(self._download(filename))
         return files_path
 
-    def download_evaluation(self) -> tuple[Path, list[Path]]:
+    def download_evaluation(self, evaluation_file: str = "Evaluation.yml") -> tuple[Path, list[Path]]:
         filenames = self._get_filenames()
         codes_path = []
         for filename in filenames:
-            if "Evaluation.yml" in filename:
+            if evaluation_file in filename:
                 evaluation_file_path = self._download(filename)
             elif filename.endswith(".py"):
                 codes_path.append(self._download(filename))
         return evaluation_file_path, codes_path
 
-    def download_uncertainty(self) -> tuple[Path, list[Path]]:
+    def download_uncertainty(self, uncertainty_file: str = "Uncertainty.yml") -> tuple[Path, list[Path]]:
         filenames = self._get_filenames()
         codes_path = []
         for filename in filenames:
-            if "Uncertainty.yml" in filename:
+            if uncertainty_file in filename:
                 uncertainty_file_path = self._download(filename)
             elif filename.endswith(".py"):
                 codes_path.append(self._download(filename))
         return uncertainty_file_path, codes_path
 
     def install_inference(
-        self, number_of_augmentation: int, number_of_model: int, number_of_mc_dropout: int
+        self,
+        number_of_augmentation: int,
+        number_of_model: int,
+        number_of_mc_dropout: int,
+        prediction_file="Prediction.yml",
     ) -> list[Path]:
         if not number_of_model:
             number_of_model = self._number_of_models
@@ -1475,24 +1534,24 @@ class ModelLoad(ABC):
                     "The value must be an integer (e.g. 1, 2, 3).",
                 )
         models_path, inference_file_path, codes_path = self.download_inference(number_of_model)
-        shutil.copy2(inference_file_path, "./Prediction.yml")
-        self.set_number_of_augmentation("./Prediction.yml", number_of_augmentation)
+        shutil.copy2(inference_file_path, prediction_file)
+        self.set_number_of_augmentation(prediction_file, number_of_augmentation)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
 
         return models_path
 
-    def install_evaluation(self) -> None:
-        evaluation_file_path, codes_path = self.download_evaluation()
-        shutil.copy2(evaluation_file_path, "./Evaluation.yml")
+    def install_evaluation(self, evaluation_file="Evaluation.yml") -> None:
+        evaluation_file_path, codes_path = self.download_evaluation(evaluation_file)
+        shutil.copy2(evaluation_file_path, evaluation_file)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
 
-    def install_uncertainty(self) -> None:
-        uncertainty_file_path, codes_path = self.download_uncertainty()
-        shutil.copy2(uncertainty_file_path, "./Uncertainty.yml")
+    def install_uncertainty(self, uncertainty_file="Uncertainty.yml") -> None:
+        uncertainty_file_path, codes_path = self.download_uncertainty(uncertainty_file)
+        shutil.copy2(uncertainty_file_path, uncertainty_file)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
@@ -1569,7 +1628,7 @@ class ModelLoad(ABC):
 
                 shutil.copy2(src, dest)
 
-        metadata_file = path / "metadata.json"
+        metadata_file = path / "app.json"
         # Load existing metadata
         with open(metadata_file, encoding="utf-8") as f:
             model_metadata = json.load(f)
@@ -1598,7 +1657,7 @@ class ModelDirectory(ModelLoad):
         return [filename.name for filename in (self._model_directory / self._model_name).glob("*")]
 
     def _download(self, filename: str) -> Path:
-        return self._model_directory / filename
+        return self._model_directory / self._model_name / filename
 
     def get_name(self) -> str:
         return str(self._model_directory / self._model_name)
@@ -1620,6 +1679,8 @@ class ModelHF(ModelLoad):
         return [filename.path for filename in tree]
 
     def _download(self, filename: str) -> Path:
+        if not filename.startswith(self._model_name):
+            filename = self._model_name + "/" + filename
         file_path = hf_hub_download(
             repo_id=self._repo_id, filename=filename, repo_type="model", revision=None
         )  # nosec B615

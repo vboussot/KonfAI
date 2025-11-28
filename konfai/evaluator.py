@@ -154,14 +154,14 @@ class Statistics:
                 - mean and count
         """
         return {
-            "max": np.nanmax(values) if np.any(~np.isnan(values)) else np.nan,
-            "min": np.nanmin(values) if np.any(~np.isnan(values)) else np.nan,
-            "std": np.nanstd(values) if np.any(~np.isnan(values)) else np.nan,
-            "25pc": np.nanpercentile(values, 25) if np.any(~np.isnan(values)) else np.nan,
-            "50pc": np.nanpercentile(values, 50) if np.any(~np.isnan(values)) else np.nan,
-            "75pc": np.nanpercentile(values, 75) if np.any(~np.isnan(values)) else np.nan,
-            "mean": np.nanmean(values) if np.any(~np.isnan(values)) else np.nan,
-            "count": np.count_nonzero(~np.isnan(values)) if np.any(~np.isnan(values)) else np.nan,
+            "max": float(np.nanmax(values)) if np.any(~np.isnan(values)) else np.nan,
+            "min": float(np.nanmin(values)) if np.any(~np.isnan(values)) else np.nan,
+            "std": float(np.nanstd(values)) if np.any(~np.isnan(values)) else np.nan,
+            "25pc": float(np.nanpercentile(values, 25)) if np.any(~np.isnan(values)) else np.nan,
+            "50pc": float(np.nanpercentile(values, 50)) if np.any(~np.isnan(values)) else np.nan,
+            "75pc": float(np.nanpercentile(values, 75)) if np.any(~np.isnan(values)) else np.nan,
+            "mean": float(np.nanmean(values)) if np.any(~np.isnan(values)) else np.nan,
+            "count": float(np.count_nonzero(~np.isnan(values))) if np.any(~np.isnan(values)) else np.nan,
         }
 
     def write(self, outputs: list[dict[str, dict[str, Any]]]) -> None:
@@ -197,6 +197,7 @@ class Statistics:
             result["aggregates"][metric_name] = Statistics.get_statistic(values)
 
         with open(self.filename, "w") as f:
+            print(result)
             f.write(json.dumps(result, indent=4))
 
     def read(self):
