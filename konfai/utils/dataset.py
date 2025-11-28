@@ -131,6 +131,18 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     return size, attributes
 
 
+def read_landmarks(filename: str) -> np.ndarray | None:
+    data = None
+    with open(filename, newline="") as csvfile:
+        reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
+        lines = list(reader)
+        data = np.zeros((len(list(lines)), 3), dtype=np.double)
+        for i, row in enumerate(lines):
+            data[i] = np.array(row[1:4], dtype=np.double)
+        csvfile.close()
+    return data
+
+
 class Dataset:
 
     class AbstractFile(ABC):
@@ -355,15 +367,14 @@ class Dataset:
                     attributes[f"{i}:FixedParameters"] = transform.GetFixedParameters()
 
                     datas.append(np.asarray(transform.GetParameters()))
-                data = np.asarray(datas)
+
+                max_len = max(len(v) for v in datas)
+
+                padded_datas = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
+
+                data = np.asarray(padded_datas)
             elif os.path.exists(f"{self.filename}{name}.fcsv"):
-                with open(f"{self.filename}{name}.fcsv", newline="") as csvfile:
-                    reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
-                    lines = list(reader)
-                    data = np.zeros((len(list(lines)), 3), dtype=np.double)
-                    for i, row in enumerate(lines):
-                        data[i] = np.array(row[1:4], dtype=np.double)
-                    csvfile.close()
+                data = read_landmarks(f"{self.filename}{name}.fcsv")
             elif os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
                     result = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320

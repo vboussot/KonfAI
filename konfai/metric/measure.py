@@ -9,9 +9,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 from huggingface_hub import hf_hub_download
-from scipy import linalg
-from skimage.metrics import structural_similarity
-from torchvision.models import Inception_V3_Weights, inception_v3
 from tqdm import tqdm
 
 from konfai.data.patching import ModelPatch
@@ -153,6 +150,8 @@ class SSIM(MaskedLoss):
 
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        from skimage.metrics import structural_similarity
+
         return structural_similarity(
             x[0][0].detach().cpu().numpy(),
             y[0][0].cpu().numpy(),
@@ -197,6 +196,16 @@ class LPIPS(MaskedLoss):
         import lpips
 
         super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model).to(0)), True)
+
+
+class TRE(Criterion):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor):
+        loss = torch.linalg.norm(output - targets[0], dim=2)
+        return loss.mean(), {f"Landmarks_{i}": v.item() for i, v in enumerate(loss.mean(0))}
 
 
 class Dice(Criterion):
@@ -600,6 +609,9 @@ class FID(Criterion):
 
         def __init__(self) -> None:
             super().__init__()
+
+            from torchvision.models import Inception_V3_Weights, inception_v3
+
             self.model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
             self.model.fc = torch.nn.Identity()
             self.model.eval()
@@ -633,6 +645,8 @@ class FID(Criterion):
         sigma2 = np.cov(generated_features, rowvar=False)
 
         diff = mu1 - mu2
+        from scipy import linalg
+
         covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
         if np.iscomplexobj(covmean):
             covmean = covmean.real
