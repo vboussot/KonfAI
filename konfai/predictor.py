@@ -42,7 +42,7 @@ class Mean(Reduction):
         pass
 
     def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
-        return torch.mean(torch.cat(tensor, dim=0).float(), dim=0).to(tensor[0].dtype)
+        return torch.mean(torch.cat(tensor, dim=0).float(), dim=0).to(tensor[0].dtype).unsqueeze(0)
 
 
 class Median(Reduction):
@@ -51,7 +51,7 @@ class Median(Reduction):
         pass
 
     def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
-        return torch.median(torch.cat(tensor, dim=0).float(), dim=0).to(tensor[0].dtype).values
+        return torch.median(torch.cat(tensor, dim=0).float(), dim=0).values.to(tensor[0].dtype).unsqueeze(0)
 
 
 class Concat(Reduction):
@@ -267,7 +267,6 @@ class OutSameAsGroupDataset(OutputDataset):
                         layer = data_augmentation.inverse(index, index_augmentation_tmp - i, layer)
                     break
                 i += data_augmentations.nb
-
         chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
         base_attr = self.attributes[index][index_augmentation][0]
         base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
@@ -285,10 +284,9 @@ class OutSameAsGroupDataset(OutputDataset):
             self._get_output(index, index_augmentation, number_of_channels_per_model, dataset).unsqueeze(0)
             for index_augmentation in self.output_layer_accumulator[index].keys()
         ]
+
         self.output_layer_accumulator.pop(index)
-        result = self.reduction(results)
-        if isinstance(self.reduction, Concat):
-            result = result.squeeze(0)
+        result = self.reduction(results).squeeze(0)
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
@@ -298,6 +296,7 @@ class OutSameAsGroupDataset(OutputDataset):
 
         for transform in self.final_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
+
         return result
 
 
@@ -725,7 +724,7 @@ class Predictor(DistributedObject):
                     )
                 except Exception:
                     raise Exception(f"Model : {model_path} does not exist !")
-            else:
+            elif len(model_path):
                 if model_path != "":
                     path = ""
                     name = model_path
@@ -735,7 +734,10 @@ class Predictor(DistributedObject):
                         name = self.name.split("/")[-1]
                     else:
                         path = checkpoints_directory() + self.name + "/StateDict/"
-                        name = sorted(os.listdir(path))[-1]
+                        if os.path.exists(path):
+                            name = sorted(os.listdir(path))[-1]
+                        else:
+                            return []
                 if os.path.exists(path + name):
                     state_dicts.append(
                         torch.load(path + name, map_location=torch.device("cpu"), weights_only=False)  # nosec B614
@@ -847,7 +849,12 @@ class Predictor(DistributedObject):
             if torch.cuda.is_available()
             else self.model_composite
         )
-        model_composite = DDP(model_composite, static_graph=True) if dist.is_initialized() else Model(model_composite)
+        has_trainable_params = any(p.requires_grad for p in model_composite.parameters())
+        model_composite = (
+            DDP(model_composite, static_graph=True)
+            if dist.is_initialized() and has_trainable_params
+            else Model(model_composite)
+        )
         with _Predictor(
             world_size,
             global_rank,

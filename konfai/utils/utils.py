@@ -211,6 +211,9 @@ def get_patch_slices_from_nb_patch_per_dim(
 def get_patch_slices_from_shape(
     patch_size: list[int], shape: list[int], overlap_tmp: int | None
 ) -> tuple[list[tuple[slice, ...]], list[tuple[int, bool]]]:
+
+    if patch_size is None or all(p == 0 for p in patch_size):
+        patch_size = shape
     if len(shape) != len(patch_size):
         raise DatasetManagerError(
             f"Dimension mismatch: 'patch_size' has {len(patch_size)} dimensions, but 'shape' has {len(shape)}.",
@@ -846,7 +849,7 @@ def setup_apps(
                 data, attr = dataset.read_data("Volume_0", name)
                 dataset.write("Mask_0", name, np.ones_like(data), attr)
         else:
-            for i, mask in enumerate([p for group in args.gt for p in group]):
+            for i, mask in enumerate([p for group in args.mask for p in group]):
                 for idx, file in enumerate(list_supported_files(mask)):
                     dataset.write(f"Mask_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
 
@@ -972,7 +975,7 @@ def setup(parser: argparse.ArgumentParser) -> DistributedObject:
     config = vars(args)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = config["gpu"]
-    os.environ["KONFAI_NB_CORES"] = config["cpu"]
+    os.environ["KONFAI_NB_CORES"] = str(config["cpu"])
 
     os.environ["KONFAI_WORKERS"] = str(config["num_workers"])
     os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]

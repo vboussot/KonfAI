@@ -34,7 +34,10 @@ def main():
                     world_size = int(konfai_nb_cores())
                 distributed_object.setup(world_size)
                 with TensorBoard(distributed_object.name):
-                    mp.spawn(distributed_object, nprocs=world_size)
+                    if world_size > 1:
+                        mp.spawn(distributed_object, nprocs=world_size)
+                    else:
+                        distributed_object(0)
     except KeyboardInterrupt:
         print("\n[KonfAI] Manual interruption (Ctrl+C)")
 
@@ -52,7 +55,10 @@ def main_apps():
                 if world_size == 0:
                     world_size = int(konfai_nb_cores())
                 distributed_object.setup(world_size)
-                mp.spawn(distributed_object, nprocs=world_size)
+                if world_size > 1:
+                    mp.spawn(distributed_object, nprocs=world_size)
+                else:
+                    distributed_object(0)
         save_function()
     except KeyboardInterrupt:
         print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
