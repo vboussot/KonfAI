@@ -830,7 +830,7 @@ class KonfAIInference(Transform):
                 "--mc",
                 str(self.number_of_mc_dropout),
             ]
-            if os.environ["CUDA_VISIBLE_DEVICES"]:
+            if "CUDA_VISIBLE_DEVICES" in os.environ and len(os.environ["CUDA_VISIBLE_DEVICES"]) > 0:
                 cmd += ["--gpu", os.environ["CUDA_VISIBLE_DEVICES"]]
             else:
                 cmd += ["--cpu", os.environ["KONFAI_NB_CORES"]]

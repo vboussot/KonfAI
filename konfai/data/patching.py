@@ -115,18 +115,23 @@ class Accumulator:
 
     def __init__(
         self,
-        patch_slices: list[tuple[slice]],
+        patch_slices: list[tuple[slice, ...]],
         patch_size: list[int],
         patch_combine: PathCombine | None = None,
         batch: bool = True,
     ) -> None:
         self._layer_accumulator: list[torch.Tensor | None] = [None] * len(patch_slices)
-        self.patch_slices = []
-        for patch in patch_slices:
-            slices = []
-            for s, shape in zip(patch, patch_size):
-                slices.append(slice(s.start, s.start + shape))
-            self.patch_slices.append(tuple(slices))
+        self.patch_slices: list[tuple[slice, ...]] = []
+
+        if patch_size is not None and not all(p == 0 for p in patch_size):
+            for patch in patch_slices:
+                slices: list[slice] = []
+                for s, shape in zip(patch, patch_size):
+                    slices.append(slice(s.start, s.start + shape))
+                self.patch_slices.append(tuple(slices))
+        else:
+            self.patch_slices = patch_slices
+
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
         self.patch_size = patch_size
         self.patch_combine = patch_combine
@@ -199,7 +204,7 @@ class Patch(ABC):
 
     def get_data(self, data: torch.Tensor, index: int, a: int, is_input: bool) -> list[torch.Tensor]:
         slices_pre = []
-        for max_value in data.shape[: -len(self.patch_size)]:
+        for max_value in data.shape[: -len(self._patch_slices[a][0])]:
             slices_pre.append(slice(max_value))
         extend_slice = self.extend_slice if is_input else 0
 
@@ -233,14 +238,15 @@ class Patch(ABC):
             )
 
         padding = []
-        for dim_it, _slice in enumerate(reversed(slices)):
-            p = (
-                0
-                if _slice.start + self.patch_size[-dim_it - 1] <= data.shape[-dim_it - 1]
-                else self.patch_size[-dim_it - 1] - (data.shape[-dim_it - 1] - _slice.start)
-            )
-            padding.append(0)
-            padding.append(p)
+        if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
+            for dim_it, _slice in enumerate(reversed(slices)):
+                p = (
+                    0
+                    if _slice.start + self.patch_size[-dim_it - 1] <= data.shape[-dim_it - 1]
+                    else self.patch_size[-dim_it - 1] - (data.shape[-dim_it - 1] - _slice.start)
+                )
+                padding.append(0)
+                padding.append(p)
 
         data_sliced = F.pad(
             data_sliced,
@@ -249,8 +255,9 @@ class Patch(ABC):
             (0 if data_sliced.dtype == torch.uint8 and self.pad_value < 0 else self.pad_value),
         )
 
-        for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
-            data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)
+        if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
+            for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
+                data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)
         return (
             torch.cat([data_sliced[:, i, ...] for i in range(data_sliced.shape[1])], dim=0)
             if extend_slice > 0
