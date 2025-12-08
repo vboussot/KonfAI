@@ -76,6 +76,74 @@ konfai EVALUATION
 
 ---
 
+## 📦 KonfAI Apps
+
+A **KonfAI App** is a self-contained workflow package built with KonfAI.  
+It defines how a model is executed, how outputs are generated, and how optional evaluation or uncertainty workflows are performed.
+
+They can be executed **identically** from:
+
+| Interface | Command |
+|----------|---------|
+| 🖥️ CLI | `konfai-apps infer ...` |
+| 🧠 3D Slicer | Via **SlicerKonfAI** GUI https://github.com/vboussot/SlicerKonfAI |
+
+---
+
+### 📂 Structure of a KonfAI App
+
+```
+my_konfai_app/
+├── app.json                # Metadata for UI + behaviors
+├── Prediction.yml          # Inference workflow (required)
+├── Evaluation.yml          # Evaluation workflow (optional)
+├── Uncertainty.yml         # Uncertainty workflow (optional)
+└── checkpoint.pt           # Trained model (single or ensemble)
+```
+
+Example `app.json`:
+
+```json
+{
+    "display_name": "Lung Lobe Segmentation",
+    "short_description": "Segmentation of lung lobes on CBCT scans.",
+    "description": "This App synthesizes CT-like contrast from CBCT then segments lung lobes.",
+    "tta": 4,
+    "mc_dropout": 0
+}
+```
+
+---
+
+### 🚀 Using a KonfAI App (CLI)
+
+Inference:
+```bash
+konfai-apps infer my_app -i input.mha -o ./Predictions --tta 4
+```
+
+Evaluation:
+```bash
+konfai-apps eval my_app -i input/ --gt labels/
+```
+
+Uncertainty:
+```bash
+konfai-apps uncertainty my_app -i input.mha
+```
+
+Pipeline (inference → evaluation → uncertainty):
+```bash
+konfai-apps pipeline my_app -i input.mha --with-eval --gt gt.mha --with-uncertainty
+```
+
+Fine-tuning:
+```bash
+konfai-apps fine-tune my_app -d ./Dataset --epochs 20
+```
+
+---
+
 ## 🧩 TODO & Perspectives
 
 ### 📘 Documentation
