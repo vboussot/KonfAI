@@ -1,33 +1,26 @@
 import datetime
 import os
+from pathlib import Path
 
 
-def checkpoints_directory() -> str:
-    return _get_env("KONFAI_CHECKPOINTS_DIRECTORY")
+def checkpoints_directory() -> Path:
+    return Path(_get_env("KONFAI_CHECKPOINTS_DIRECTORY"))
 
 
-def path_to_models() -> list[str]:
-    return _get_env("KONFAI_MODEL").split(os.pathsep)
+def predictions_directory() -> Path:
+    return Path(_get_env("KONFAI_PREDICTIONS_DIRECTORY"))
 
 
-def predictions_directory() -> str:
-    return _get_env("KONFAI_PREDICTIONS_DIRECTORY")
+def evaluations_directory() -> Path:
+    return Path(_get_env("KONFAI_EVALUATIONS_DIRECTORY"))
 
 
-def evaluations_directory() -> str:
-    return _get_env("KONFAI_EVALUATIONS_DIRECTORY")
+def statistics_directory() -> Path:
+    return Path(_get_env("KONFAI_STATISTICS_DIRECTORY"))
 
 
-def statistics_directory() -> str:
-    return _get_env("KONFAI_STATISTICS_DIRECTORY")
-
-
-def setups_directory() -> str:
-    return _get_env("KONFAI_SETUPS_DIRECTORY")
-
-
-def config_file() -> str:
-    return _get_env("KONFAI_config_file")
+def config_file() -> Path:
+    return Path(_get_env("KONFAI_config_file"))
 
 
 def konfai_state() -> str:
@@ -38,12 +31,16 @@ def konfai_root() -> str:
     return _get_env("KONFAI_ROOT")
 
 
-def cuda_visible_devices() -> str:
-    return os.environ.get("CUDA_VISIBLE_DEVICES", "")
+def cuda_visible_devices() -> list[int]:
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        return [int(gpu) for gpu in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if gpu != ""]
+    else:
+        import torch
 
-
-def konfai_nb_cores() -> str:
-    return _get_env("KONFAI_NB_CORES")
+        devices = []
+        if torch.cuda.is_available():
+            devices = list(range(torch.cuda.device_count()))
+    return devices
 
 
 def current_date() -> str:

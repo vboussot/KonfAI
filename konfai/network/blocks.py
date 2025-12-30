@@ -54,16 +54,16 @@ def get_torch_module(name_fonction: str, dim: int | None = None) -> torch.nn.Mod
     )
 
 
+@config("BlockConfig")
 class BlockConfig:
 
-    @config("BlockConfig")
     def __init__(
         self,
         kernel_size: int = 3,
         stride: int = 1,
         padding: int = 1,
         bias=True,
-        activation: str | Callable[[], torch.nn.Module] = "ReLU",
+        activation: str | Callable[[], torch.nn.Module] | None = "ReLU",
         norm_mode: str | NormMode | Callable[[int], torch.nn.Module] = "NONE",
     ) -> None:
         self.kernel_size = kernel_size

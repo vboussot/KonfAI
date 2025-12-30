@@ -245,9 +245,9 @@ class ConvNeXt(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
-        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
+        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"Head": network.TargetCriterionsLoader()},
         patch: ModelPatch = ModelPatch(),
         dim: int = 3,
         in_channels: int = 1,

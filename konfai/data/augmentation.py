@@ -1,4 +1,3 @@
-import importlib
 import os
 from abc import ABC, abstractmethod
 
@@ -8,7 +7,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 
 from konfai import konfai_root
-from konfai.utils.config import config
+from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image
 from konfai.utils.utils import AugmentationError, NeedDevice, get_module
 
@@ -116,18 +115,16 @@ def _rotation_2d_matrix(rotation: torch.Tensor, center: torch.Tensor | None = No
 
 class Prob:
 
-    @config()
     def __init__(self, prob: float = 1.0) -> None:
         self.prob = prob
 
 
 class DataAugmentationsList:
 
-    @config()
     def __init__(
         self,
         nb: int = 10,
-        data_augmentations: dict[str, Prob] = {"default:Flip": Prob(1)},
+        data_augmentations: dict[str, Prob] = {"default|Flip": Prob(1)},
     ) -> None:
         self.nb = nb
         self.data_augmentations: list[DataAugmentation] = []
@@ -136,9 +133,9 @@ class DataAugmentationsList:
     def load(self, key: str, datasets: list[Dataset]):
         for augmentation, prob in self.data_augmentationsLoader.items():
             module, name = get_module(augmentation, "konfai.data.augmentation")
-            data_augmentation: DataAugmentation = config(
+            data_augmentation: DataAugmentation = apply_config(
                 f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{augmentation}"
-            )(getattr(importlib.import_module(module), name))(config=None)
+            )(getattr(module, name))()
             data_augmentation.load(prob.prob)
             data_augmentation.set_datasets(datasets)
             self.data_augmentations.append(data_augmentation)

@@ -1,5 +1,4 @@
 import copy
-import importlib
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -14,7 +13,7 @@ from tqdm import tqdm
 from konfai.data.patching import ModelPatch
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
-from konfai.utils.config import config
+from konfai.utils.config import apply_config
 from konfai.utils.utils import get_module
 
 models_register = {}
@@ -222,7 +221,6 @@ class Dice(Criterion):
 
     @staticmethod
     def _loss(labels: list[int] | None, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        print(output.dtype, targets[0].dtype)
         target = F.interpolate(targets[0], output.shape[2:], mode="nearest")
         result = {}
         loss = torch.tensor(0, dtype=torch.float32).to(output.device)
@@ -378,8 +376,7 @@ class PerceptualLoss(Criterion):
 
     class Module:
 
-        @config()
-        def __init__(self, losses: dict[str, float] = {"Gram": 1, "torch_nn_L1Loss": 1}) -> None:
+        def __init__(self, losses: dict[str, float] = {"Gram": 1, "torch:nn:L1Loss": 1}) -> None:
             self.losses = losses
             self.konfai_args = os.environ["KONFAI_CONFIG_PATH"] if "KONFAI_CONFIG_PATH" in os.environ else ""
 
@@ -387,9 +384,7 @@ class PerceptualLoss(Criterion):
             result: dict[torch.nn.Module, float] = {}
             for loss, loss_value in self.losses.items():
                 module, name = get_module(loss, "konfai.metric.measure")
-                result[config(self.konfai_args)(getattr(importlib.import_module(module), name))(config=None)] = (
-                    loss_value
-                )
+                result[apply_config(self.konfai_args)(getattr(module, name))()] = loss_value
             return result
 
     def __init__(
@@ -397,7 +392,7 @@ class PerceptualLoss(Criterion):
         model_loader: ModelLoader = ModelLoader(),
         path_model: str = "name",
         modules: dict[str, Module] = {
-            "UNetBlock_0.DownConvBlock.Activation_1": Module({"Gram": 1, "torch_nn_L1Loss": 1})
+            "UNetBlock_0.DownConvBlock.Activation_1": Module({"Gram": 1, "torch:nn:L1Loss": 1})
         },
         shape: list[int] = [128, 128, 128],
     ) -> None:
@@ -710,16 +705,30 @@ class MutualInformationLoss(torch.nn.Module):
 
 class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthesis
 
+    class Weights:
+
+        def __init__(self, weights: list[float] = [0, 1]) -> None:
+            self.weights = weights
+
     def __init__(
-        self, model_name: str, shape: list[int] = [0, 0], in_channels: int = 1, weights: list[float] = [1]
+        self,
+        model_name: str,
+        shape: list[int] = [0, 0],
+        in_channels: int = 1,
+        losses: dict[str, Weights] = {"torch:nn:L1Loss": Weights([0, 1]), "Gram": Weights([0, 1])},
     ) -> None:
         super().__init__()
         if model_name is None:
             return
         self.in_channels = in_channels
-        self.loss = torch.nn.L1Loss()
-        self.weights = weights
-
+        self.weighted_losses = {}
+        for loss, weights in losses.items():
+            module, name = get_module(loss, "konfai.metric.measure")
+            self.weighted_losses[
+                apply_config(".".join(os.environ["KONFAI_CONFIG_PATH"].split(".")[0:-1]) + "." + loss)(
+                    getattr(module, name)
+                )()
+            ] = weights.weights
         self.model_path = hf_hub_download(
             repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
         )  # nosec B615
@@ -734,13 +743,17 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
             out = self.model.to(0)(dummy_input)
             if not isinstance(out, (list, tuple)):
                 raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
-            if len(weights) != len(out):
-                raise ValueError(f"Mismatch between number of weights ({len(weights)}) and model outputs ({len(out)}).")
+            for name, weights in losses.items():
+                if len(weights.weights) != len(out):
+                    raise ValueError(
+                        f"Loss '{name}': mismatch between the number of weights "
+                        f"({len(weights.weights)}) and the number of model outputs "
+                        f"({len(out)}). Each output must have a corresponding weight."
+                    )
         except Exception as e:
             msg = (
                 f"[Model Sanity Check Failed]\n"
                 f"Input shape attempted: {dummy_input.shape}\n"
-                f"Expected output length: {len(weights)}\n"
                 f"Error: {type(e).__name__}: {e}"
             )
             raise RuntimeError(msg) from e
@@ -762,14 +775,11 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         output = self.preprocessing(output)
         targets = [self.preprocessing(target) for target in targets]
         self.model.to(output.device)
-        for zipped_output in zip(self.weights, self.model(output), *[self.model(target) for target in targets]):
-            weight = zipped_output[0]
-            if weight == 0:
-                continue
-            output_feature = zipped_output[1]
+        for i, zipped_output in enumerate(zip(self.model(output), *[self.model(target) for target in targets])):
+            output_feature = zipped_output[0]
             targets_features = zipped_output[1:]
-            for target_feature in targets_features:
-                loss += weight * self.loss(output_feature, target_feature)
+            for target_feature, (sub_loss, weights) in zip(targets_features, self.weighted_losses.items()):
+                loss += weights[i] * sub_loss(output_feature, target_feature)
         return loss
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:

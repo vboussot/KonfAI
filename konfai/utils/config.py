@@ -3,6 +3,7 @@ import inspect
 import os
 import types
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import ruamel.yaml
@@ -16,12 +17,12 @@ yaml = ruamel.yaml.YAML()
 
 class Config:
 
-    def __init__(self, filename, key) -> None:
-        self.filename = filename
+    def __init__(self, key: str) -> None:
+        self.filename = Path(os.environ["KONFAI_config_file"])
         self.keys = key.split(".")
 
     def __enter__(self):
-        if not os.path.exists(self.filename):
+        if not self.filename.exists():
             result = input("Create a new config file ? [no,yes,interactive] : ")
             if result in ["yes", "interactive"]:
                 os.environ["KONFAI_CONFIG_MODE"] = "interactive" if result == "interactive" else "default"
@@ -93,12 +94,12 @@ class Config:
             else:
                 os.environ["KONFAI_CONFIG_MODE"] = "remove"
                 exit(0)
-        return default.split(":")[1] if len(default.split(":")) > 1 else default
+        return default.split("|")[1] if len(default.split("|")) > 1 else default
 
     @staticmethod
     def _get_input_default(name: str, default: str | None, is_list: bool = False) -> list[str | None] | str | None:
         if isinstance(default, str) and (
-            default == "default" or (len(default.split(":")) > 1 and default.split(":")[0] == "default")
+            default == "default" or (len(default.split("|")) > 1 and default.split("|")[0] == "default")
         ):
             if os.environ["KONFAI_CONFIG_MODE"] == "interactive":
                 if is_list:
@@ -108,17 +109,17 @@ class Config:
                         key_tmp = Config._get_input(name, default)
                         if key_tmp != "!" and key_tmp != " ":
                             if key_tmp == "":
-                                key_tmp = default.split(":")[1] if len(default.split(":")) > 1 else default
+                                key_tmp = default.split("|")[1] if len(default.split("|")) > 1 else default
                             list_tmp.append(key_tmp)
                     return list_tmp
                 else:
                     value = Config._get_input(name, default)
                     if value == "":
-                        return default.split(":")[1] if len(default.split(":")) > 1 else default
+                        return default.split("|")[1] if len(default.split("|")) > 1 else default
                     else:
                         return value
             else:
-                default = default.split(":")[1] if len(default.split(":")) > 1 else default
+                default = default.split("|")[1] if len(default.split("|")) > 1 else default
         return [default] if is_list else default
 
     def get_value(self, name, default) -> object:
@@ -178,20 +179,26 @@ class Config:
 
 def config(key: str | None = None):
     def decorator(function):
+        function._key = key
+        return function
+
+    return decorator
+
+
+def apply_config(konfai_args: str | None = None):
+    def decorator(function):
         def new_function(*args, **kwargs):
-            if "config" in kwargs:
-                filename = kwargs["config"]
-                if filename is None:
-                    filename = os.environ["KONFAI_config_file"]
-                else:
-                    os.environ["KONFAI_config_file"] = filename
-                key_tmp = (
-                    kwargs["konfai_args"] + ("." + key if key is not None else "") if "konfai_args" in kwargs else key
-                )
+            key = getattr(function, "_key", None)
+            key_tmp = konfai_args + ("." + key if key is not None else "") if konfai_args is not None else key
+            if (
+                "KONFAI_config_file" in os.environ
+                and "KONFAI_CONFIG_MODE" in os.environ
+                and os.environ["KONFAI_CONFIG_MODE"] != "Import"
+                and key_tmp is not None
+            ):
+                os.environ["KONFAI_CONFIG_PATH"] = key_tmp
                 without = kwargs["konfai_without"] if "konfai_without" in kwargs else []
-                if key_tmp is not None:
-                    os.environ["KONFAI_CONFIG_PATH"] = key_tmp
-                with Config(filename, key_tmp) as config:
+                with Config(key_tmp) as config:
                     os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
                     kwargs = {}
                     for param in list(inspect.signature(function).parameters.values())[len(args) :]:
@@ -199,11 +206,17 @@ def config(key: str | None = None):
                             continue
 
                         annotation = param.annotation
+                        if annotation == "int":
+                            annotation = int
+                        if annotation == "float":
+                            annotation = float
+                        if annotation == "bool":
+                            annotation = bool
                         # --- support Literal ---
                         if get_origin(annotation) is Literal:
                             allowed_values = get_args(annotation)
                             default_value = param.default if param.default != inspect._empty else allowed_values[0]
-                            value = config.get_value(param.name, f"default:{default_value}")
+                            value = config.get_value(param.name, f"default|{default_value}")
                             if value not in allowed_values:
                                 raise ConfigError(
                                     f"Invalid value '{value}' for parameter '{param.name} "
@@ -211,7 +224,6 @@ def config(key: str | None = None):
                                 )
                             kwargs[param.name] = value
                             continue
-
                         if (
                             str(annotation).startswith("typing.Union")
                             or str(annotation).startswith("typing.Optional")
@@ -271,10 +283,9 @@ def config(key: str | None = None):
                                         ]:
                                             try:
                                                 kwargs[param.name] = {
-                                                    value: annotation.__args__[1](
-                                                        config=filename,
-                                                        konfai_args=str(key_tmp) + "." + param.name + "." + value,
-                                                    )
+                                                    value: apply_config(str(key_tmp) + "." + param.name + "." + value)(
+                                                        annotation.__args__[1]
+                                                    )()
                                                     for value in values
                                                 }
                                             except ValueError as e:
@@ -291,7 +302,7 @@ def config(key: str | None = None):
                                         )
                                 else:
                                     try:
-                                        kwargs[param.name] = annotation(config=filename, konfai_args=key_tmp)
+                                        kwargs[param.name] = apply_config(key_tmp)(annotation)()
                                     except Exception as e:
                                         raise ConfigError(
                                             f"Failed to instantiate {param.name} with type {annotation}, error {e} "

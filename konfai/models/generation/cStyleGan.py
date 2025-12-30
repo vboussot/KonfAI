@@ -124,7 +124,7 @@ class ModulatedConv(torch.nn.Module):
 
     def apply(self, module: torch.nn.Module):
         if isinstance(module, torch.nn.modules.conv._ConvNd):
-            delattr(module, "weight")
+            del module.weight
             module.bias = None
 
             str_dim = module.__class__.__name__[-2:]
@@ -249,7 +249,7 @@ class Generator(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         patch: ModelPatch = ModelPatch(),
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},

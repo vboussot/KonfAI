@@ -1,8 +1,6 @@
-import importlib
-import os
-import subprocess  # nosec B404
 import tempfile
 from abc import ABC, abstractmethod
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +9,8 @@ import SimpleITK as sitk  # noqa: N813
 import torch
 import torch.nn.functional as F  # noqa: N812
 
-from konfai.utils.config import config
+from konfai import cuda_visible_devices
+from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
 from konfai.utils.utils import NeedDevice, TransformError, _affine_matrix, _resample_affine, get_module
 
@@ -46,13 +45,12 @@ class TransformInverse(Transform, ABC):
 
 class TransformLoader:
 
-    @config()
     def __init__(self) -> None:
         pass
 
     def get_transform(self, classpath: str, konfai_args: str) -> Transform:
         module, name = get_module(classpath, "konfai.data.transform")
-        return config(f"{konfai_args}.{classpath}")(getattr(importlib.import_module(module), name))(config=None)
+        return apply_config(f"{konfai_args}.{classpath}")(getattr(module, name))()
 
 
 class Clip(Transform):
@@ -800,47 +798,44 @@ class KonfAIInference(Transform):
         self.number_of_mc_dropout = number_of_mc_dropout
         self.per_channel = per_channel
 
+    def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
+        from konfai.app import KonfAIApp
+
+        konfai_app = KonfAIApp(f"{self.repo_id}:{self.model_name}")
+        konfai_app.infer(
+            [[dataset_path]],
+            output_path,
+            self.number_of_ensemble,
+            self.number_of_tta,
+            self.number_of_mc_dropout,
+            gpu=gpu,
+        )
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            dataset = Path(tmpdir) / "Dataset"
+            dataset_path = Path(tmpdir) / "Dataset"
             if self.per_channel:
                 for i, channel in enumerate(tensor):
                     image = data_to_image(channel.unsqueeze(0).numpy(), cache_attribute)
-                    (dataset / f"P{i:03d}").mkdir(parents=True, exist_ok=True)
-                    sitk.WriteImage(image, str(dataset / f"P{i:03d}" / "Volume.mha"))
+                    (dataset_path / f"P{i:03d}").mkdir(parents=True, exist_ok=True)
+                    sitk.WriteImage(image, str(dataset_path / f"P{i:03d}" / "Volume.mha"))
             else:
                 image = data_to_image(tensor.numpy(), cache_attribute)
 
-                (dataset / "P000").mkdir(parents=True, exist_ok=True)
-                sitk.WriteImage(image, str(dataset / "P000" / "Volume.mha"))
+                (dataset_path / "P000").mkdir(parents=True, exist_ok=True)
+                sitk.WriteImage(image, str(dataset_path / "P000" / "Volume.mha"))
 
-            cmd = [
-                "konfai-apps",
-                "infer",
-                f"{self.repo_id}:{self.model_name}",
-                "-i",
-                str(dataset),
-                "-o",
-                str(Path(tmpdir) / "Output"),
-                "--ensemble",
-                str(self.number_of_ensemble),
-                "--tta",
-                str(self.number_of_tta),
-                "--mc",
-                str(self.number_of_mc_dropout),
-            ]
-            if "CUDA_VISIBLE_DEVICES" in os.environ and len(os.environ["CUDA_VISIBLE_DEVICES"]) > 0:
-                cmd += ["--gpu", os.environ["CUDA_VISIBLE_DEVICES"]]
-            else:
-                cmd += ["--cpu", os.environ["KONFAI_NB_CORES"]]
+            ctx = get_context("spawn")
 
-            try:
-                subprocess.run(cmd, cwd="./", check=True)  # nosec B603
-            except subprocess.CalledProcessError as e:
-                raise TransformError(
-                    f"KonfAIInference {self.repo_id}:{self.model_name} failed with exit code {e.returncode}."
-                )
+            p = ctx.Process(
+                target=self.infer_entry, args=(dataset_path, Path(tmpdir) / "Output", cuda_visible_devices())
+            )
+            p.start()
+            p.join()
+
+            if p.exitcode != 0:
+                raise RuntimeError("Inference process failed")
 
             result = []
             for file in (Path(tmpdir) / "Output").rglob("*.mha"):

@@ -1,5 +1,5 @@
-import argparse
 import importlib.util
+import inspect
 import itertools
 import json
 import os
@@ -13,18 +13,18 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import closing
 from enum import Enum
-from functools import partial
+from functools import wraps
 from pathlib import Path
-from typing import Any, TextIO, cast
+from types import ModuleType
+from typing import Any, ParamSpec, TextIO, TypeVar, cast
 
 import numpy as np
 import psutil
 import pynvml
 import requests
-import SimpleITK as sitk  # noqa: N813
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F  # noqa: N812
+import torch.multiprocessing as mp
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.hf_api import RepoFolder
 from packaging.requirements import Requirement
@@ -34,13 +34,15 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
 
 from konfai import (
-    config_file,
     cuda_visible_devices,
     evaluations_directory,
     konfai_state,
     predictions_directory,
     statistics_directory,
 )
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def description(model, model_ema=None, show_memory: bool = True, train: bool = True) -> str:
@@ -77,15 +79,18 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
     return result
 
 
-def get_module(classpath: str, default_classpath: str) -> tuple[str, str]:
+def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
     if len(classpath.split(":")) > 1:
-        module = ".".join(classpath.split(":")[:-1])
+        module_name = ".".join(classpath.split(":")[:-1])
         name = classpath.split(":")[-1]
     else:
-        module = (
+        module_name = (
             default_classpath + ("." if len(classpath.split(".")) > 2 else "") + ".".join(classpath.split(".")[:-1])
         )
         name = classpath.split(".")[-1]
+    os.environ["KONFAI_CONFIG_MODE"] = "Import"
+    module = importlib.import_module(module_name)
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
     return module, name.split("/")[0]
 
 
@@ -101,17 +106,17 @@ def get_memory() -> float:
     return psutil.virtual_memory().used / 2**30
 
 
-def memory_forecast(memory_init: float, size: float) -> str:
+def memory_forecast(memory_init: float, i: int, size: int) -> str:
     current_memory = get_memory()
-    forecast = memory_init + ((current_memory - memory_init) * size)
+    forecast = memory_init + ((current_memory - memory_init) * size / i) if i > 0 else memory_init
     return f"Memory forecast ({forecast:.2f}G ({forecast / (psutil.virtual_memory().total / 2**30) * 100:.2f} %))"
 
 
 def gpu_info() -> str:
-    if cuda_visible_devices() == "":
+    if len(cuda_visible_devices()) == 0:
         return ""
 
-    devices = [int(i) for i in cuda_visible_devices().split(",")]
+    devices = [int(i) for i in cuda_visible_devices()]
     device = devices[0]
 
     if device < pynvml.nvmlDeviceGetCount():
@@ -129,7 +134,7 @@ def get_max_gpu_memory(device: int | torch.device) -> float:
             device = int(str(device).replace("cuda:", ""))
         else:
             return 0
-    device = [int(i) for i in cuda_visible_devices().split(",")][device]
+    device = cuda_visible_devices()[device]
     if device < pynvml.nvmlDeviceGetCount():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -144,7 +149,7 @@ def get_gpu_memory(device: int | torch.device) -> float:
             device = int(str(device).replace("cuda:", ""))
         else:
             return 0
-    device = [int(i) for i in cuda_visible_devices().split(",")][device]
+    device = cuda_visible_devices()[device]
     if device < pynvml.nvmlDeviceGetCount():
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
         memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -170,8 +175,6 @@ def get_device(device: int):
 class State(Enum):
     TRAIN = "TRAIN"
     RESUME = "RESUME"
-    TRANSFER_LEARNING = "TRANSFER_LEARNING"
-    FINE_TUNING = "FINE_TUNING"
     PREDICTION = "PREDICTION"
     EVALUATION = "EVALUATION"
 
@@ -341,7 +344,6 @@ class Log:
             path = evaluations_directory()
         else:
             path = statistics_directory()
-
         self.verbose = os.environ.get("KONFAI_VERBOSE", "True") == "True"
         self.log_path = os.path.join(path, name)
         os.makedirs(self.log_path, exist_ok=True)
@@ -405,9 +407,7 @@ class TensorBoard:
             if tensorboard_exe is None:
                 raise RuntimeError("TensorBoard executable not found in PATH.")
 
-            logdir = (
-                predictions_directory() if konfai_state() == "PREDICTION" else statistics_directory() + self.name + "/"
-            )
+            logdir = predictions_directory() if konfai_state() == "PREDICTION" else statistics_directory() / self.name
 
             port = os.environ.get("KONFAI_TENSORBOARD_PORT")
             if not port or not port.isdigit():
@@ -416,7 +416,7 @@ class TensorBoard:
             command = [
                 tensorboard_exe,
                 "--logdir",
-                logdir,
+                str(logdir),
                 "--port",
                 port,
                 "--bind_all",
@@ -528,500 +528,77 @@ class DistributedObject(ABC):
                     pynvml.nvmlShutdown()
 
 
-def match_supported(file: Path) -> bool:
-    lower = file.name.lower()
-    return any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
-
-
-def list_supported_files(path: Path) -> list[Path]:
-    if path.is_file():
-        return [path] if match_supported(path) else []
-
-    files = []
-    for f in path.rglob("*"):
-        if f.is_file() and match_supported(f):
-            files.append(f)
-    return files
-
-
-def setup_apps(
-    parser: argparse.ArgumentParser, user_dir: Path, tmp_dir_default: Path
-) -> tuple[partial[DistributedObject], Path, Callable[[], None]]:
-
-    def get_path(path: Path) -> Path:
-        if path.is_absolute():
-            result_path = path
-        else:
-            result_path = user_dir / path
-        return result_path
-
-    parser = argparse.ArgumentParser(prog="konfai-apps", description="KonfAI Apps – Apps for Medical AI Models")
-
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # -----------------
-    # 1) INFERENCE
-    # -----------------
-    infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
-
-    infer_p.add_argument("app", type=str, help="KonfAI App name")
-    infer_p.add_argument(
-        "-i",
-        "--input",
-        type=lambda p: get_path(Path(p)),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
-    )
-    infer_p.add_argument(
-        "-o", "--output", type=lambda p: get_path(Path(p)), default="./Predictions", help="Optional output volume path"
-    )
-    infer_p.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble")
-    infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
-    infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
-    infer_p.add_argument(
-        "--prediction_file", type=str, default="Prediction.yml", help="Optional prediction config filename"
-    )
-    infer_p.add_argument(
-        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
-    )
-    infer_p.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
-    )
-    infer_p.add_argument(
-        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
-    )
-
-    infer_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
-
-    # -----------------
-    # 2) EVALUATION
-    # -----------------
-    eval_p = subparsers.add_parser("eval", help="Evaluate a KonfAI App using ground-truth labels.")
-    eval_p.add_argument("app", type=str, help="KonfAI App name")
-
-    eval_p.add_argument(
-        "-i",
-        "--input",
-        type=lambda p: get_path(Path(p)),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Input path(s): provide one or multiple data files, or a dataset directory.",
-    )
-
-    eval_p.add_argument(
-        "--gt",
-        type=lambda p: get_path(Path(p)),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
-    )
-
-    eval_p.add_argument(
-        "--mask",
-        type=lambda p: get_path(Path(p)),
-        nargs="+",
-        action="append",
-        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
-    )
-
-    eval_p.add_argument(
-        "-o", "--output", type=lambda p: get_path(Path(p)), default="./Evaluations", help="Optional output volume path"
-    )
-    eval_p.add_argument(
-        "--evaluation_file", type=str, default="Evaluation.yml", help="Optional evaluation config filename"
-    )
-
-    eval_p.add_argument(
-        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
-    )
-
-    eval_p.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
-    )
-    eval_p.add_argument(
-        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
-    )
-    eval_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
-
-    # -----------------
-    # 3) UNCERTAINTY
-    # -----------------
-    unc_p = subparsers.add_parser("uncertainty", help="Compute model uncertainty for a KonfAI App.")
-    unc_p.add_argument("app", type=str, help="KonfAI App name")
-
-    unc_p.add_argument(
-        "-i",
-        "--input",
-        type=lambda p: get_path(Path(p)),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
-    )
-
-    unc_p.add_argument(
-        "-o", "--output", type=lambda p: get_path(Path(p)), default="./Evaluations", help="Optional output volume path"
-    )
-
-    unc_p.add_argument(
-        "--uncertainty_file", type=str, default="Uncertainty.yml", help="Optional uncertainty config filename"
-    )
-
-    unc_p.add_argument(
-        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
-    )
-
-    unc_p.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
-    )
-    unc_p.add_argument(
-        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
-    )
-    unc_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
-
-    # -----------------
-    # 4) Pipeline
-    # -----------------
-    pipe_p = subparsers.add_parser(
-        "pipeline", help="Run inference and optionally evaluation and uncertainty in a single command."
-    )
-
-    pipe_p.add_argument("app", type=str, help="KonfAI App name")
-
-    pipe_p.add_argument(
-        "-i",
-        "--input",
-        type=lambda p: get_path(Path(p)),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
-    )
-    pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
-
-    pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
-
-    pipe_p.add_argument("--ensemble", type=int, default=0, help="Number of models in ensemble.")
-
-    # optional eval
-    pipe_p.add_argument("--with-eval", action="store_true", help="Also run evaluation (requires --gt).")
-
-    pipe_p.add_argument("--gt", type=lambda p: get_path(Path(p)), required=True, help="Ground-truth path")
-
-    # optional uncertainty
-    pipe_p.add_argument("--with-uncertainty", action="store_true", help="Also estimate uncertainty using sampling.")
-
-    pipe_p.add_argument("-o", "--output", type=str, help="Output prediction volume (mean prediction).")
-
-    pipe_p.add_argument(
-        "--tmp_dir", type=lambda p: Path(p).absolute(), default=tmp_dir_default, help="Use a temporary directory."
-    )
-
-    pipe_p.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
-    )
-
-    pipe_p.add_argument(
-        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
-    )
-    pipe_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
-
-    # -----------------
-    # 5) FINE-TUNE
-    # -----------------
-    ft_p = subparsers.add_parser("fine-tune", help="Fine-tune a KonfAI App on a dataset.")
-    ft_p.add_argument("app", type=str, help="KonfAI App name")
-    ft_p.add_argument("name", type=str, help="New KonfAI App display name")
-
-    ft_p.add_argument("-d", "--dataset", type=str, required=True, help="Path to training dataset")
-    ft_p.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs")
-
-    ft_p.add_argument(
-        "-o", "--output", type=lambda p: get_path(Path(p)), default="./", help="Optional output volume path"
-    )
-
-    ft_p.add_argument("--tmp_dir", type=lambda p: Path(p).absolute(), default="./", help="Use a temporary directory.")
-
-    ft_p.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="GPU list (e.g. '0' or '0,1'). Leave empty for CPU.",
-    )
-
-    ft_p.add_argument(
-        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
-    )
-    ft_p.add_argument("--quiet", action="store_false", help="Suppress console output.")
-
-    parser.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
-
-    args = parser.parse_args()
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
-    os.environ["KONFAI_NB_CORES"] = str(args.cpu)
-    os.environ["KONFAI_WORKERS"] = str(0)
-
-    os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = "./Checkpoints/"
-    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = str(args.output) + "/"
-    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = str(args.output) + "/"
-    os.environ["KONFAI_STATISTICS_DIRECTORY"] = "./Statistics/"
-    os.environ["KONFAI_SETUPS_DIRECTORY"] = "./Setups/"
-    os.environ["KONFAI_OVERWRITE"] = str(True)
-    os.environ["KONFAI_CONFIG_MODE"] = "Done"
-
-    os.environ["KONFAI_VERBOSE"] = str(args.quiet)
-
-    model: ModelLoad
-    if len(args.app.split(":")) == 2:
-        model = ModelHF(args.app.split(":")[0], args.app.split(":")[1])
-    else:
-        model = ModelDirectory(Path(args.app).resolve().parent, Path(args.app).name)
-
-    os.makedirs(args.tmp_dir, exist_ok=True)
-    os.chdir(str(args.tmp_dir))
-    if str(args.tmp_dir) not in sys.path:
-        sys.path.insert(0, str(args.tmp_dir))
-
-    if args.command != "fine-tune":
-        from konfai.utils.dataset import Dataset, read_landmarks
-
-        dataset = Dataset("Dataset", "mha")
-        for i, input_file in enumerate([p for group in args.input for p in group]):
-            for idx, file in enumerate(list_supported_files(input_file)):
-                if file.suffix == ".fcsv":
-                    dataset.write(f"Volume_{i}", f"P{idx:03d}", read_landmarks(str(file)))
-                elif str(file).endswith(".itk.txt"):
-                    dataset.write(f"Volume_{i}", f"P{idx:03d}", sitk.ReadTransform(str(file)))
-                else:
-                    dataset.write(f"Volume_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
-
-    if args.command == "infer":
-        models_path = model.install_inference(args.tta, args.ensemble, args.mc)
-
-        os.environ["KONFAI_ROOT"] = "Predictor"
-        os.environ["KONFAI_config_file"] = args.prediction_file
-        os.environ["KONFAI_MODEL"] = os.pathsep.join([str(path) for path in models_path])
-        os.environ["KONFAI_STATE"] = str(State.PREDICTION)
-
-        def save() -> None:
-            if os.path.exists("Predictions"):
-                shutil.copytree("Predictions", args.output, dirs_exist_ok=True)
-
-        from konfai.predictor import Predictor
-
-        classname = Predictor
-    elif args.command == "eval":
-
-        for i, gt in enumerate([p for group in args.gt for p in group]):
-            for idx, file in enumerate(list_supported_files(gt)):
-                if file.suffix == ".fcsv":
-                    dataset.write(f"Reference_{i}", f"P{idx:03d}", read_landmarks(str(file)))
-                elif file.suffix == ".itk.txt":
-                    dataset.write(f"Reference_{i}", f"P{idx:03d}", sitk.ReadTransform(str(file)))
-                else:
-                    dataset.write(f"Reference_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
-
-        if not args.mask:
-            names = dataset.get_names("Volume_0")
-            for name in names:
-                data, attr = dataset.read_data("Volume_0", name)
-                dataset.write("Mask_0", name, np.ones_like(data), attr)
-        else:
-            for i, mask in enumerate([p for group in args.mask for p in group]):
-                for idx, file in enumerate(list_supported_files(mask)):
-                    dataset.write(f"Mask_{i}", f"P{idx:03d}", sitk.ReadImage(str(file)))
-
-        model.install_evaluation(args.evaluation_file)
-        os.environ["KONFAI_ROOT"] = "Evaluator"
-
-        os.environ["KONFAI_config_file"] = args.evaluation_file
-        os.environ["KONFAI_STATE"] = str(State.EVALUATION)
-        from konfai.evaluator import Evaluator
-
-        def save() -> None:
-            if os.path.exists("./Evaluations"):
-                shutil.copytree("./Evaluations", args.output, dirs_exist_ok=True)
-
-        classname = Evaluator
-
-    elif args.command == "uncertainty":
-        model.install_uncertainty()
-        os.environ["KONFAI_ROOT"] = "Evaluator"
-
-        os.environ["KONFAI_config_file"] = args.uncertainty_file
-        os.environ["KONFAI_STATE"] = str(State.EVALUATION)
-        from konfai.evaluator import Evaluator
-
-        def save() -> None:
-            if os.path.exists("./Evaluations"):
-                shutil.copytree("./Evaluations", args.output, dirs_exist_ok=True)
-
-        classname = Evaluator
-    elif args.command == "fine-tune":
-        models_path = model.install_fine_tune(args.output, args.name)
-        os.environ["KONFAI_ROOT"] = "Trainer"
-
-        os.environ["KONFAI_config_file"] = "Config.yml"
-        os.environ["KONFAI_MODEL"] = os.pathsep.join([str(path) for path in models_path])
-        os.environ["KONFAI_STATE"] = str(State.FINE_TUNING)
-
-        def save() -> None:
-            pass
-
-        from konfai.trainer import Trainer
-
-        classname = Trainer
-    else:
-        raise ValueError(f"Unknown command: {args.command}")
-
-    return partial(classname, config=config_file()), args.tmp_dir, save
-
-
-def setup(parser: argparse.ArgumentParser) -> DistributedObject:
-    # KONFAI arguments
-    konfai = parser.add_argument_group("KonfAI arguments")
-    konfai.add_argument("type", type=State, choices=list(State))
-    konfai.add_argument("-y", action="store_true", help="Accept overwrite")
-    konfai.add_argument("-tb", action="store_true", help="Start TensorBoard")
-    konfai.add_argument("-c", "--config", type=str, default="None", help="Configuration file location")
-    konfai.add_argument(
-        "-g",
-        "--gpu",
-        type=str,
-        default=(os.environ["CUDA_VISIBLE_DEVICES"] if "CUDA_VISIBLE_DEVICES" in os.environ else ""),
-        help="List of GPU",
-    )
-    konfai.add_argument(
-        "--cpu", type=int, choices=range(1, 128), default=1, help="Number of CPU cores to use when --gpu is empty."
-    )
-    konfai.add_argument(
-        "--num-workers",
-        "--num_workers",
-        default=0,
-        type=int,
-        help="Number of workers per DataLoader & GPU",
-    )
-    konfai.add_argument(
-        "-models_dir",
-        "--MODELS_DIRECTORY",
-        type=str,
-        default="./Models/",
-        help="Models location",
-    )
-    konfai.add_argument(
-        "-checkpoints_dir",
-        "--CHECKPOINTS_DIRECTORY",
-        type=str,
-        default="./Checkpoints/",
-        help="Checkpoints location",
-    )
-    konfai.add_argument("-model", "--MODEL", type=str, default="", help="URL Model")
-    konfai.add_argument(
-        "-predictions_dir",
-        "--PREDICTIONS_DIRECTORY",
-        type=str,
-        default="./Predictions/",
-        help="Predictions location",
-    )
-    konfai.add_argument(
-        "-evaluation_dir",
-        "--EVALUATIONS_DIRECTORY",
-        type=str,
-        default="./Evaluations/",
-        help="Evaluations location",
-    )
-    konfai.add_argument(
-        "-statistics_dir",
-        "--STATISTICS_DIRECTORY",
-        type=str,
-        default="./Statistics/",
-        help="Statistics location",
-    )
-    konfai.add_argument(
-        "-setups_dir",
-        "--SETUPS_DIRECTORY",
-        type=str,
-        default="./Setups/",
-        help="Setups location",
-    )
-
-    konfai.add_argument("-log", action="store_true", help="Enable logging to a file")
-    konfai.add_argument("-quiet", action="store_false", help="Suppress console output for a quieter execution")
-
-    konfai.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
-    args = parser.parse_args()
-    config = vars(args)
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = config["gpu"]
-    os.environ["KONFAI_NB_CORES"] = str(config["cpu"])
-
-    os.environ["KONFAI_WORKERS"] = str(config["num_workers"])
-    os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = config["CHECKPOINTS_DIRECTORY"]
-    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = config["PREDICTIONS_DIRECTORY"]
-    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = config["EVALUATIONS_DIRECTORY"]
-    os.environ["KONFAI_STATISTICS_DIRECTORY"] = config["STATISTICS_DIRECTORY"]
-    os.environ["KONFAI_SETUPS_DIRECTORY"] = config["SETUPS_DIRECTORY"]
-
-    os.environ["KONFAI_STATE"] = str(config["type"])
-
-    os.environ["KONFAI_MODEL"] = config["MODEL"]
-
-    os.environ["KONFAI_OVERWRITE"] = str(config["y"])
-    os.environ["KONFAI_CONFIG_MODE"] = "Done"
-    if config["tb"]:
-        os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
-
-    os.environ["KONFAI_VERBOSE"] = str(config["quiet"])
-
-    if config["config"] == "None":
-        if config["type"] is State.PREDICTION:
-            os.environ["KONFAI_config_file"] = "Prediction.yml"
-        elif config["type"] is State.EVALUATION:
-            os.environ["KONFAI_config_file"] = "Evaluation.yml"
-        else:
-            os.environ["KONFAI_config_file"] = "Config.yml"
-    else:
-        os.environ["KONFAI_config_file"] = config["config"]
-    torch.autograd.set_detect_anomaly(True)
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-    if config["type"] is State.PREDICTION:
-        from konfai.predictor import Predictor
-
-        os.environ["KONFAI_ROOT"] = "Predictor"
-        return Predictor(config=config_file())
-    elif config["type"] is State.EVALUATION:
-        from konfai.evaluator import Evaluator
-
-        os.environ["KONFAI_ROOT"] = "Evaluator"
-        return Evaluator(config=config_file())
-    else:
-        from konfai.trainer import Trainer
-
-        os.environ["KONFAI_ROOT"] = "Trainer"
-        return Trainer(config=config_file())
+def run_distributed_app(
+    func: Callable[..., DistributedObject],
+) -> Callable[..., None]:
+
+    sig = inspect.signature(func)
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> None:
+        params = sig.parameters
+        kwargs_fun = {k: v for k, v in kwargs.items() if k in params}
+
+        bound = sig.bind_partial(*args, **kwargs_fun)
+        bound.apply_defaults()
+        gpu = bound.arguments.get("gpu", [])
+        cpu = bound.arguments.get("cpu", 1)
+        if cpu is None:
+            cpu = 1
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu if i >= 0])
+        os.environ["KONFAI_OVERWRITE"] = str(bound.arguments.get("overwrite"))
+
+        os.environ["KONFAI_CONFIG_MODE"] = "Done"
+        if bound.arguments.get("tensorboard"):
+            os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
+
+        torch.autograd.set_detect_anomaly(True)
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+        os.environ["KONFAI_VERBOSE"] = str(not bound.arguments.get("quiet"))
+        try:
+            with func(*args, **kwargs_fun) as distributed_object:
+                with Log(distributed_object.name, 0):
+                    world_size = len(gpu)
+                    if world_size == 0:
+                        world_size = cpu
+                    distributed_object.setup(world_size)
+                    with TensorBoard(distributed_object.name):
+                        if world_size > 1:
+                            mp.spawn(distributed_object, nprocs=world_size)
+                        else:
+                            distributed_object(0)
+
+        except KeyboardInterrupt:
+            print("\n[KonfAI] Manual interruption (Ctrl+C)")
+        """
+         try:
+            with setup(parser) as distributed_object:
+                args = parser.parse_args()
+                config = vars(args)
+                os.environ["KONFAI_OVERWRITE"] = "True"
+                os.environ["KONFAI_CLUSTER"] = "True"
+
+                n_gpu = len(config["gpu"].split(","))
+                distributed_object.setup(n_gpu * int(config["num_nodes"]))
+                import submitit
+
+                executor = submitit.AutoExecutor(folder="./Cluster/")
+                executor.update_parameters(
+                    name=config["name"],
+                    mem_gb=config["memory"],
+                    gpus_per_node=n_gpu,
+                    tasks_per_node=n_gpu // distributed_object.size,
+                    cpus_per_task=1,
+                    nodes=config["num_nodes"],
+                    timeout_min=config["time_limit"],
+                )
+                with TensorBoard(distributed_object.name):
+                    executor.submit(distributed_object)
+        except KeyboardInterrupt:
+            print("\n[KonfAI] Manual interruption (Ctrl+C)")
+        """
+
+    return wrapper
 
 
 def setup_gpu(world_size: int, port: int, rank: int | None = None) -> tuple[int | None, int | None]:
@@ -1051,7 +628,7 @@ def setup_gpu(world_size: int, port: int, rank: int | None = None) -> tuple[int 
     if global_rank >= world_size:
         return None, None
     # print("tcp://{}:{}".format(host_name, port))
-    if dist.is_nccl_available() and torch.cuda.is_available():
+    if dist.is_nccl_available() and torch.cuda.is_available() and len(cuda_visible_devices()):
         torch.cuda.empty_cache()
         dist.init_process_group(
             backend="nccl",
@@ -1100,7 +677,7 @@ def _resample(data: torch.Tensor, size: list[int]) -> torch.Tensor:
     else:
         mode = "trilinear"
     return (
-        F.interpolate(
+        torch.nn.functional.interpolate(
             data.type(torch.float32).unsqueeze(0),
             size=tuple(reversed(size)),
             mode=mode,
@@ -1126,9 +703,9 @@ def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
     else:
         mode = "bilinear"
     return (
-        F.grid_sample(
+        torch.nn.functional.grid_sample(
             data.unsqueeze(0).type(torch.float32),
-            F.affine_grid(
+            torch.nn.functional.affine_grid(
                 matrix[:, :-1, ...].type(torch.float32),
                 [1] + list(data.shape),
                 align_corners=True,
@@ -1213,83 +790,76 @@ SUPPORTED_EXTENSIONS = [
 
 
 class KonfAIError(Exception):
+    def __init__(self, *args: str) -> None:
+        super().__init__(*args)
 
-    def __init__(self, type_error: str, *messages: str) -> None:
-        super().__init__(
-            f"\n[{type_error}] {messages[0]}" + ("\n" if len(messages) > 0 else "") + "\n→\t".join(messages[1:])
-        )
-
-
-class ConfigError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Config", *message)
-
-
-class DatasetManagerError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("DatasetManager", *message)
+    def __str__(self) -> str:
+        if not self.args:
+            return "\n[Error]"
+        type_error = str(self.args[0])
+        messages = [str(m) for m in self.args[1:]]
+        if not messages:
+            return f"\n[{type_error}]"
+        head = f"[{type_error}] {messages[0]}"
+        if len(messages) == 1:
+            return "\n" + head
+        return "\n" + head + "\n→\t" + "\n→\t".join(messages[1:])
 
 
-class MeasureError(KonfAIError):
+class NamedKonfAIError(KonfAIError):
+    TYPE: str = "Error"
 
-    def __init__(self, *message) -> None:
-        super().__init__("Measure", *message)
-
-
-class TrainerError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Trainer", *message)
+    @classmethod
+    def make(cls, *messages: str) -> "NamedKonfAIError":
+        return cls(cls.TYPE, *messages)
 
 
-class AugmentationError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Augmentation", *message)
+class EvaluatorError(NamedKonfAIError):
+    TYPE = "Evaluator"
 
 
-class EvaluatorError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Evaluator", *message)
+class ConfigError(NamedKonfAIError):
+    TYPE = "Config"
 
 
-class PredictorError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Predictor", *message)
+class DatasetManagerError(NamedKonfAIError):
+    TYPE = "DatasetManager"
 
 
-class TransformError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Transform", *message)
+class MeasureError(NamedKonfAIError):
+    TYPE = "Measure"
 
 
-class AppRepositoryHFError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Repo Hugging Face", *message)
+class TrainerError(NamedKonfAIError):
+    TYPE = "Trainer"
 
 
-class AppDirectoryError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Model Directory", *message)
+class AugmentationError(NamedKonfAIError):
+    TYPE = "Augmentation"
 
 
-class AppError(KonfAIError):
-
-    def __init__(self, *message) -> None:
-        super().__init__("Model Config", *message)
+class PredictorError(NamedKonfAIError):
+    TYPE = "Predictor"
 
 
-class AppMetadataError(KonfAIError):
+class TransformError(NamedKonfAIError):
+    TYPE = "Transform"
 
-    def __init__(self, *message) -> None:
-        super().__init__("Model metadata", *message)
+
+class AppRepositoryHFError(NamedKonfAIError):
+    TYPE = "Repo Hugging Face"
+
+
+class AppDirectoryError(NamedKonfAIError):
+    TYPE = "Model Directory"
+
+
+class AppError(NamedKonfAIError):
+    TYPE = "Model Config"
+
+
+class AppMetadataError(NamedKonfAIError):
+    TYPE = "Model metadata"
 
 
 def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
@@ -1297,12 +867,12 @@ def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
     model_names = []
     try:
         tree = api.list_repo_tree(repo_id=repo_id)
+        for entry in tree:
+            model_name = entry.path
+            if isinstance(entry, RepoFolder) and is_model_repo(repo_id, model_name)[0]:
+                model_names.append(model_name)
     except Exception as e:
         raise AppRepositoryHFError(f"Unable to access repository '{repo_id}': {e}")
-    for entry in tree:
-        model_name = entry.path
-        if isinstance(entry, RepoFolder) and is_model_repo(repo_id, model_name)[0]:
-            model_names.append(model_name)
     return model_names
 
 
@@ -1439,9 +1009,7 @@ class ModelLoad(ABC):
                 uncertainty_support = True
         return evaluation_support, uncertainty_support
 
-    def download_inference(
-        self, number_of_model: int, prediction_file: str = "Prediction.yml"
-    ) -> tuple[list[Path], Path, list[Path]]:
+    def download_inference(self, number_of_model: int, prediction_file: str) -> tuple[list[Path], Path, list[Path]]:
         filenames = self._get_filenames()
         models_path = []
         codes_path = []
@@ -1461,18 +1029,16 @@ class ModelLoad(ABC):
             elif "requirements.txt" in filename:
                 with open(file_path, encoding="utf-8") as f:
                     required_lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
                     installed = {
                         dist.metadata["Name"].lower(): dist.version
                         for dist in importlib.metadata.distributions()
                         if dist.metadata.get("Name")
                     }
-
+                    missing_or_outdated = []
                     for line in required_lines:
                         req = Requirement(line)
                         name = req.name.lower()
                         installed_version_str = installed.get(name)
-                        missing_or_outdated = []
                         if installed_version_str is None:
                             missing_or_outdated.append(line)
                             continue
@@ -1490,6 +1056,11 @@ class ModelLoad(ABC):
                             raise AppRepositoryHFError(f"Failed to install packages: {e}") from e
             elif "app.json" not in filename:
                 codes_path.append(file_path)
+        if inference_file_path is None:
+            raise AppError(
+                f"Prediction file '{prediction_file}' was not found in the remote archive. "
+                f"Available files: {', '.join(filenames)}"
+            )
         return models_path, inference_file_path, codes_path
 
     def download_train(self) -> list[Path]:
@@ -1499,24 +1070,36 @@ class ModelLoad(ABC):
             files_path.append(self._download(filename))
         return files_path
 
-    def download_evaluation(self, evaluation_file: str = "Evaluation.yml") -> tuple[Path, list[Path]]:
+    def download_evaluation(self, evaluation_file: str) -> tuple[Path, list[Path]]:
         filenames = self._get_filenames()
         codes_path = []
+        evaluation_file_path = None
         for filename in filenames:
             if evaluation_file in filename:
                 evaluation_file_path = self._download(filename)
             elif filename.endswith(".py"):
                 codes_path.append(self._download(filename))
+        if evaluation_file_path is None:
+            raise AppError(
+                f"Evaluation file '{evaluation_file}' was not found in the remote archive. "
+                f"Available files: {', '.join(filenames)}"
+            )
         return evaluation_file_path, codes_path
 
-    def download_uncertainty(self, uncertainty_file: str = "Uncertainty.yml") -> tuple[Path, list[Path]]:
+    def download_uncertainty(self, uncertainty_file: str) -> tuple[Path, list[Path]]:
         filenames = self._get_filenames()
         codes_path = []
+        uncertainty_file_path = None
         for filename in filenames:
             if uncertainty_file in filename:
                 uncertainty_file_path = self._download(filename)
             elif filename.endswith(".py"):
                 codes_path.append(self._download(filename))
+        if uncertainty_file_path is None:
+            raise AppError(
+                f"Uncertainty file '{uncertainty_file}' was not found in the remote archive. "
+                f"Available files: {', '.join(filenames)}"
+            )
         return uncertainty_file_path, codes_path
 
     def install_inference(
@@ -1524,7 +1107,7 @@ class ModelLoad(ABC):
         number_of_augmentation: int,
         number_of_model: int,
         number_of_mc_dropout: int,
-        prediction_file="Prediction.yml",
+        prediction_file: str,
     ) -> list[Path]:
         if not number_of_model:
             number_of_model = self._number_of_models
@@ -1536,7 +1119,7 @@ class ModelLoad(ABC):
                     f"Invalid value provided for '--MODEL': '{number_of_model}'. ",
                     "The value must be an integer (e.g. 1, 2, 3).",
                 )
-        models_path, inference_file_path, codes_path = self.download_inference(number_of_model)
+        models_path, inference_file_path, codes_path = self.download_inference(number_of_model, prediction_file)
         shutil.copy2(inference_file_path, prediction_file)
         self.set_number_of_augmentation(prediction_file, number_of_augmentation)
         for code_path in codes_path:
@@ -1545,24 +1128,24 @@ class ModelLoad(ABC):
 
         return models_path
 
-    def install_evaluation(self, evaluation_file="Evaluation.yml") -> None:
+    def install_evaluation(self, evaluation_file: str) -> None:
         evaluation_file_path, codes_path = self.download_evaluation(evaluation_file)
         shutil.copy2(evaluation_file_path, evaluation_file)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
 
-    def install_uncertainty(self, uncertainty_file="Uncertainty.yml") -> None:
+    def install_uncertainty(self, uncertainty_file: str) -> None:
         uncertainty_file_path, codes_path = self.download_uncertainty(uncertainty_file)
         shutil.copy2(uncertainty_file_path, uncertainty_file)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
 
-    def install_fine_tune(self, path: Path, display_name: str) -> list[Path]:
-
-        target_dir = path.expanduser().resolve()
-        target_dir.mkdir(parents=True, exist_ok=True)
+    def install_fine_tune(
+        self, config_file: str, path: Path, display_name: str, epochs: int, it_validation: int | None
+    ) -> list[Path]:
+        path.mkdir(parents=True, exist_ok=True)
         src_paths = self.download_train()
         models_path = []
 
@@ -1597,7 +1180,7 @@ class ModelLoad(ABC):
             if src.is_dir():
                 for item in src.rglob("*"):
                     rel = item.relative_to(src)
-                    dest = target_dir / rel
+                    dest = path / rel
                     if item.is_dir():
                         dest.mkdir(parents=True, exist_ok=True)
                         continue
@@ -1618,7 +1201,7 @@ class ModelLoad(ABC):
                         models_path.append(item)
 
             elif src.is_file() or src.is_symlink():
-                dest = target_dir / src.name
+                dest = path / src.name
                 dest.parent.mkdir(parents=True, exist_ok=True)
 
                 if str(src).endswith(".pt"):
@@ -1632,6 +1215,18 @@ class ModelLoad(ABC):
                 shutil.copy2(src, dest)
 
         metadata_file = path / "app.json"
+        if not metadata_file.exists():
+            raise ConfigError(
+                f"Metadata file not found: '{metadata_file}'.",
+                "Ensure the metadata file exists and the provided path is correct.",
+            )
+
+        if not Path(config_file).exists():
+            raise ConfigError(
+                f"Configuration file not found: '{config_file}'.",
+                "Ensure the configuration file exists and the provided path is correct.",
+            )
+
         # Load existing metadata
         with open(metadata_file, encoding="utf-8") as f:
             model_metadata = json.load(f)
@@ -1642,6 +1237,16 @@ class ModelLoad(ABC):
         # Save back to disk (UTF-8, pretty JSON)
         with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(model_metadata, f, indent=2, ensure_ascii=False)
+
+        yaml = YAML()
+        with open(config_file) as f:
+            data = yaml.load(f)
+            data["Trainer"]["epochs"] = epochs
+            data["Trainer"]["it_validation"] = it_validation
+
+        with open(config_file, "w") as f:
+            yaml.dump(data, f)
+
         return models_path
 
 

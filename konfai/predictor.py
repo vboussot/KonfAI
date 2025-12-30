@@ -15,14 +15,23 @@ from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from konfai import checkpoints_directory, config_file, konfai_root, path_to_models, predictions_directory
+from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
 from konfai.data.data_manager import DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
 from konfai.data.transform import Transform, TransformInverse, TransformLoader
 from konfai.network.network import Model, ModelLoader, NetState, Network
-from konfai.utils.config import config
+from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.utils import DataLog, DistributedObject, NeedDevice, PredictorError, State, description, get_module
+from konfai.utils.utils import (
+    DataLog,
+    DistributedObject,
+    NeedDevice,
+    PredictorError,
+    State,
+    description,
+    get_module,
+    run_distributed_app,
+)
 
 
 class Reduction(ABC):
@@ -117,17 +126,17 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 
         if self._patch_combine is not None:
             module, name = get_module(self._patch_combine, "konfai.data.patching")
-            self.patch_combine = config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
-                getattr(importlib.import_module(module), name)
-            )(config=None)
+            self.patch_combine = apply_config(f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset")(
+                getattr(module, name)
+            )()
 
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
         if module == "konfai.predictor":
-            self.reduction = getattr(importlib.import_module(module), name)()
+            self.reduction = getattr(module, name)()
         else:
-            self.reduction = config(
+            self.reduction = apply_config(
                 f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{self.reduction_classpath}"
-            )(getattr(importlib.import_module(module), name))(config=None)
+            )(getattr(module, name))()
 
     def set_patch_config(
         self,
@@ -178,18 +187,33 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         super().write(self.group, name, layer.numpy(), self.attributes[index][0][0])
         self.attributes.pop(index)
 
+    def __str__(self) -> str:
+        params = {
+            "filename": self.filename,
+            "group": self.group,
+            "before_reduction_transforms": self.before_reduction_transforms,
+            "after_reduction_transforms": self.after_reduction_transforms,
+            "final_transforms": self.final_transforms,
+            "patch_combine": self.patch_combine,
+            "reduction": self.patch_combine,
+        }
+        return str(params)
 
+    def __repr__(self) -> builtins.str:
+        return str(self)
+
+
+@config("OutputDataset")
 class OutSameAsGroupDataset(OutputDataset):
 
-    @config("OutputDataset")
     def __init__(
         self,
         same_as_group: str = "default",
-        dataset_filename: str = "default:./Dataset:mha",
+        dataset_filename: str = "default|./Dataset:mha",
         group: str = "default",
-        before_reduction_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
-        after_reduction_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
-        final_transforms: dict[str, TransformLoader] = {"default:Normalize": TransformLoader()},
+        before_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
+        after_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
+        final_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
         patch_combine: str | None = None,
         reduction: str = "Mean",
     ) -> None:
@@ -300,16 +324,16 @@ class OutSameAsGroupDataset(OutputDataset):
         return result
 
 
+@config("OutputDataset")
 class OutputDatasetLoader:
 
-    @config("OutputDataset")
     def __init__(self, name_class: str = "OutSameAsGroupDataset") -> None:
         self.name_class = name_class
 
     def get_output_dataset(self, layer_name: str) -> OutputDataset:
-        return getattr(importlib.import_module("konfai.predictor"), self.name_class)(
-            config=None, konfai_args=f"Predictor.outputs_dataset.{layer_name}"
-        )
+        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(
+            getattr(importlib.import_module("konfai.predictor"), self.name_class)
+        )()
 
 
 class _Predictor:
@@ -338,7 +362,7 @@ class _Predictor:
         global_rank: int,
         local_rank: int,
         autocast: bool,
-        predict_path: str,
+        predict_path: Path,
         data_log: list[str] | None,
         outputs_dataset: dict[str, OutputDataset],
         model_composite: DDP,
@@ -380,7 +404,7 @@ class _Predictor:
                     int(data.split("/")[2]),
                 )
         self.tb = (
-            SummaryWriter(log_dir=predict_path + "Metric/")
+            SummaryWriter(log_dir=predict_path / "Metric")
             if len(
                 [
                     network
@@ -622,6 +646,7 @@ class ModelComposite(Network):
         return final_outputs
 
 
+@config("Predictor")
 class Predictor(DistributedObject):
     """
     KonfAI's main prediction controller.
@@ -642,7 +667,6 @@ class Predictor(DistributedObject):
         data_log (list[str] | None): List of tensors to log during inference.
     """
 
-    @config("Predictor")
     def __init__(
         self,
         model: ModelLoader = ModelLoader(),
@@ -652,7 +676,7 @@ class Predictor(DistributedObject):
         manual_seed: int | None = None,
         gpu_checkpoints: list[str] | None = None,
         autocast: bool = False,
-        outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default:Default": OutputDatasetLoader()},
+        outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default|Default": OutputDatasetLoader()},
         data_log: list[str] | None = None,
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
@@ -660,9 +684,13 @@ class Predictor(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
-        self.combine_classpath = combine
-        self.autocast = autocast
+        module, name = get_module(combine, "konfai.predictor")
+        if module.__name__ == "konfai.predictor":
+            self.combine = getattr(module, name)()
+        else:
+            self.combine = apply_config(f"{konfai_root()}.{combine}")(getattr(module, name))()
 
+        self.autocast = autocast
         self.model = model.get_model(train=False)
         self.it = 0
         self.outputs_dataset_loader = outputs_dataset if outputs_dataset else {}
@@ -672,11 +700,10 @@ class Predictor(DistributedObject):
         }
 
         self.datasets_filename = []
-        self.predict_path = predictions_directory() + self.name + "/"
+        self.predict_path = predictions_directory() / self.name
         for output_dataset in self.outputs_dataset.values():
             self.datasets_filename.append(output_dataset.filename)
-            output_dataset.filename = f"{self.predict_path}{output_dataset.filename}"
-
+            output_dataset.filename = str(self.predict_path / output_dataset.filename) + "/"
         self.data_log = data_log
         modules = []
         for i, _ in self.model.named_modules():
@@ -694,6 +721,9 @@ class Predictor(DistributedObject):
                     )
 
         self.gpu_checkpoints = gpu_checkpoints
+
+    def set_models(self, path_to_models: list[Path | str]) -> None:
+        self.path_to_models = path_to_models
 
     def _load(self) -> list[dict[str, dict[str, torch.Tensor]]]:
         """
@@ -714,36 +744,21 @@ class Predictor(DistributedObject):
         Raises:
             Exception: If a model path does not exist or cannot be loaded.
         """
-        model_paths = path_to_models()
         state_dicts = []
-        for model_path in model_paths:
-            if model_path.startswith("https://"):
+        for path_to_model in self.path_to_models:
+            if isinstance(path_to_model, str) and path_to_model.startswith("https://"):
                 try:
                     state_dicts.append(
-                        torch.hub.load_state_dict_from_url(url=model_path, map_location="cpu", check_hash=True)
+                        torch.hub.load_state_dict_from_url(url=path_to_model, map_location="cpu", check_hash=True)
                     )
                 except Exception:
-                    raise Exception(f"Model : {model_path} does not exist !")
-            elif len(model_path):
-                if model_path != "":
-                    path = ""
-                    name = model_path
-                else:
-                    if self.name.endswith(".pt"):
-                        path = checkpoints_directory() + "/".join(self.name.split("/")[:-1]) + "/StateDict/"
-                        name = self.name.split("/")[-1]
-                    else:
-                        path = checkpoints_directory() + self.name + "/StateDict/"
-                        if os.path.exists(path):
-                            name = sorted(os.listdir(path))[-1]
-                        else:
-                            return []
-                if os.path.exists(path + name):
-                    state_dicts.append(
-                        torch.load(path + name, map_location=torch.device("cpu"), weights_only=False)  # nosec B614
-                    )  # nosec B614
-                else:
-                    raise Exception(f"Model : {path + name} does not exist !")
+                    raise Exception(f"Model : {path_to_model} does not exist !")
+            elif Path(path_to_model).exists():
+                state_dicts.append(
+                    torch.load(str(path_to_model), map_location=torch.device("cpu"), weights_only=False)  # nosec B614
+                )  # nosec B614
+            else:
+                raise ValueError(f"Invalid model path entry: {path_to_model}")
         return state_dicts
 
     def setup(self, world_size: int):
@@ -768,7 +783,7 @@ class Predictor(DistributedObject):
             Exception: If a specified model file or URL is invalid or inaccessible.
         """
         for dataset_filename in self.datasets_filename:
-            path = self.predict_path + dataset_filename
+            path = self.predict_path / dataset_filename
             if os.path.exists(path) and len(list(Path(path).rglob("*.yml"))):
                 if os.environ["KONFAI_OVERWRITE"] != "True":
                     accept = builtins.input(
@@ -780,7 +795,7 @@ class Predictor(DistributedObject):
             if not os.path.exists(path):
                 os.makedirs(path)
 
-        shutil.copyfile(config_file(), self.predict_path + "Prediction.yml")
+        shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
 
         self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
         self.model.init_outputs_group()
@@ -798,15 +813,7 @@ class Predictor(DistributedObject):
                     "Please check that the name matches exactly a submodule or" "output of your model architecture.",
                 )
 
-        module, name = get_module(self.combine_classpath, "konfai.predictor")
-        if module == "konfai.predictor":
-            combine = getattr(importlib.import_module(module), name)()
-        else:
-            combine = config(f"{konfai_root()}.{self.combine_classpath}")(
-                getattr(importlib.import_module(module), name)
-            )(config=None)
-
-        self.model_composite = ModelComposite(self.model, len(path_to_models()), combine)
+        self.model_composite = ModelComposite(self.model, len(self.path_to_models), self.combine)
         self.model_composite.load(self._load())
 
         if (
@@ -819,6 +826,7 @@ class Predictor(DistributedObject):
             exit(0)
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
+
         self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
         for name, output_dataset in self.outputs_dataset.items():
             output_dataset.load(
@@ -846,7 +854,7 @@ class Predictor(DistributedObject):
 
         model_composite = (
             Network.to(self.model_composite, local_rank * self.size)
-            if torch.cuda.is_available()
+            if len(cuda_visible_devices())
             else self.model_composite
         )
         has_trainable_params = any(p.requires_grad for p in model_composite.parameters())
@@ -867,3 +875,40 @@ class Predictor(DistributedObject):
             *dataloaders,
         ) as p:
             p.run()
+
+    def __str__(self) -> str:
+        params = {
+            "model": self.model,
+            "dataset": self.dataset,
+            "combine": self.combine,
+            "train_name": self.name,
+            "manual_seed": self.manual_seed,
+            "gpu_checkpoints": self.gpu_checkpoints,
+            "autocast": self.autocast,
+            "outputs_dataset": self.outputs_dataset,
+            "data_log": self.data_log,
+        }
+        return str(params)
+
+    def __repr__(self) -> str:
+        return str(self)
+
+
+@run_distributed_app
+def predict(
+    models: list[Path],
+    overwrite: bool = False,
+    gpu: list[int] | None = cuda_visible_devices(),
+    cpu: int = 1,
+    quiet: bool = False,
+    tb: bool = False,
+    prediction_file: Path | str = Path("./Prediction.yml").resolve(),
+    predictions_dir: Path | str = Path("./Predictions").resolve(),
+) -> DistributedObject:
+    os.environ["KONFAI_config_file"] = str(Path(prediction_file).resolve())
+    os.environ["KONFAI_ROOT"] = "Predictor"
+    os.environ["KONFAI_STATE"] = str(State.PREDICTION)
+    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = str(Path(predictions_dir).resolve())
+    predictor = apply_config()(Predictor)()
+    predictor.set_models(models)
+    return predictor
