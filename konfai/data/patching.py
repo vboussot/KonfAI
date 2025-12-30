@@ -1,5 +1,4 @@
 import copy
-import importlib
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -12,7 +11,7 @@ import torch.nn.functional as F  # noqa: N812
 
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.transform import Save, Transform
-from konfai.utils.config import config
+from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import get_module, get_patch_slices_from_shape
 
@@ -268,9 +267,9 @@ class Patch(ABC):
         return len(self._patch_slices[a])
 
 
+@config("Patch")
 class DatasetPatch(Patch):
 
-    @config("Patch")
     def __init__(
         self,
         patch_size: list[int] = [128, 128, 128],
@@ -284,9 +283,9 @@ class DatasetPatch(Patch):
         pass
 
 
+@config("Patch")
 class ModelPatch(Patch):
 
-    @config("Patch")
     def __init__(
         self,
         patch_size: list[int] = [128, 128, 128],
@@ -302,7 +301,7 @@ class ModelPatch(Patch):
     def init(self, key: str):
         if self._patch_combine is not None:
             module, name = get_module(self._patch_combine, "konfai.data.patching")
-            self.patch_combine = config(key)(getattr(importlib.import_module(module), name))(config=None)
+            self.patch_combine = apply_config(key)(getattr(module, name))()
         if self.patch_size is not None and self.overlap is not None:
             if self.patch_combine is not None:
                 self.patch_combine.set_patch_config([i for i in self.patch_size if i > 1], self.overlap)

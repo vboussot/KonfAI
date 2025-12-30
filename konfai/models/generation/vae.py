@@ -94,7 +94,7 @@ class VAE(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         dim: int = 3,
@@ -151,7 +151,7 @@ class LinearVAE(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
     ) -> None:

@@ -49,14 +49,16 @@ class ResBlock(AbstractResBlock):
                 blocks.ConvBlock(
                     in_channels,
                     out_channels,
-                    blocks.BlockConfig(
-                        kernel_size=1,
-                        stride=2,
-                        padding=0,
-                        bias=False,
-                        activation="None",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    ),
+                    [
+                        blocks.BlockConfig(
+                            kernel_size=1,
+                            stride=2,
+                            padding=0,
+                            bias=False,
+                            activation="None",
+                            norm_mode=blocks.NormMode.BATCH.name,
+                        )
+                    ],
                     dim=dim,
                     alias=[["0"], ["1"], []],
                 ),
@@ -70,14 +72,16 @@ class ResBlock(AbstractResBlock):
             blocks.ConvBlock(
                 in_channels,
                 out_channels,
-                blocks.BlockConfig(
-                    kernel_size=3,
-                    stride=2 if downsample else 1,
-                    padding=1,
-                    bias=False,
-                    activation="ReLU",
-                    norm_mode=blocks.NormMode.BATCH.name,
-                ),
+                [
+                    blocks.BlockConfig(
+                        kernel_size=3,
+                        stride=2 if downsample else 1,
+                        padding=1,
+                        bias=False,
+                        activation="ReLU",
+                        norm_mode=blocks.NormMode.BATCH.name,
+                    )
+                ],
                 dim=dim,
                 alias=[["conv1"], ["bn1"], []],
             ),
@@ -87,14 +91,16 @@ class ResBlock(AbstractResBlock):
             blocks.ConvBlock(
                 out_channels,
                 out_channels,
-                blocks.BlockConfig(
-                    kernel_size=3,
-                    stride=1,
-                    padding=1,
-                    bias=False,
-                    activation="None",
-                    norm_mode=blocks.NormMode.BATCH.name,
-                ),
+                [
+                    blocks.BlockConfig(
+                        kernel_size=3,
+                        stride=1,
+                        padding=1,
+                        bias=False,
+                        activation="None",
+                        norm_mode=blocks.NormMode.BATCH.name,
+                    )
+                ],
                 dim=dim,
                 alias=[["conv2"], ["bn2"], []],
             ),
@@ -111,14 +117,16 @@ class ResBottleneckBlock(AbstractResBlock):
             blocks.ConvBlock(
                 in_channels,
                 out_channels // 4,
-                blocks.BlockConfig(
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                    bias=False,
-                    activation="ReLU",
-                    norm_mode=blocks.NormMode.BATCH.name,
-                ),
+                [
+                    blocks.BlockConfig(
+                        kernel_size=1,
+                        stride=1,
+                        padding=0,
+                        bias=False,
+                        activation="ReLU",
+                        norm_mode=blocks.NormMode.BATCH.name,
+                    )
+                ],
                 dim=dim,
                 alias=[["conv1"], ["bn1"], []],
             ),
@@ -128,14 +136,16 @@ class ResBottleneckBlock(AbstractResBlock):
             blocks.ConvBlock(
                 out_channels // 4,
                 out_channels // 4,
-                blocks.BlockConfig(
-                    kernel_size=3,
-                    stride=2 if downsample else 1,
-                    padding=1,
-                    bias=False,
-                    activation="ReLU",
-                    norm_mode=blocks.NormMode.BATCH.name,
-                ),
+                [
+                    blocks.BlockConfig(
+                        kernel_size=3,
+                        stride=2 if downsample else 1,
+                        padding=1,
+                        bias=False,
+                        activation="ReLU",
+                        norm_mode=blocks.NormMode.BATCH.name,
+                    )
+                ],
                 dim=dim,
                 alias=[["conv2"], ["bn2"], []],
             ),
@@ -145,14 +155,16 @@ class ResBottleneckBlock(AbstractResBlock):
             blocks.ConvBlock(
                 out_channels // 4,
                 out_channels,
-                blocks.BlockConfig(
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                    bias=False,
-                    activation="ReLU",
-                    norm_mode=blocks.NormMode.BATCH.name,
-                ),
+                [
+                    blocks.BlockConfig(
+                        kernel_size=1,
+                        stride=1,
+                        padding=0,
+                        bias=False,
+                        activation="ReLU",
+                        norm_mode=blocks.NormMode.BATCH.name,
+                    )
+                ],
                 dim=dim,
                 alias=[["conv3"], ["bn3"], []],
             ),
@@ -164,14 +176,16 @@ class ResBottleneckBlock(AbstractResBlock):
                 blocks.ConvBlock(
                     in_channels,
                     out_channels,
-                    blocks.BlockConfig(
-                        kernel_size=1,
-                        stride=2 if downsample else 1,
-                        padding=0,
-                        bias=False,
-                        activation="None",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    ),
+                    [
+                        blocks.BlockConfig(
+                            kernel_size=1,
+                            stride=2 if downsample else 1,
+                            padding=0,
+                            bias=False,
+                            activation="None",
+                            norm_mode=blocks.NormMode.BATCH.name,
+                        )
+                    ],
                     dim=dim,
                     alias=[["0"], ["1"], []],
                 ),
@@ -228,14 +242,16 @@ class ResNetStem(network.ModuleArgsDict):
             blocks.ConvBlock(
                 in_channels,
                 out_features,
-                blocks.BlockConfig(
-                    kernel_size=7,
-                    stride=2,
-                    padding=3,
-                    bias=False,
-                    activation="ReLU",
-                    norm_mode=blocks.NormMode.BATCH.name,
-                ),
+                [
+                    blocks.BlockConfig(
+                        kernel_size=7,
+                        stride=2,
+                        padding=3,
+                        bias=False,
+                        activation="ReLU",
+                        norm_mode=blocks.NormMode.BATCH.name,
+                    )
+                ],
                 dim=dim,
                 alias=[["conv1"], ["bn1"], []],
             ),
@@ -295,7 +311,7 @@ class ResNet(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         patch: ModelPatch = ModelPatch(),

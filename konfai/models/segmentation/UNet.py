@@ -127,9 +127,11 @@ class UNet(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
-        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
+        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {
+            "UNetBlock_0:Head:Argmax": network.TargetCriterionsLoader()
+        },
         patch: ModelPatch | None = None,
         dim: int = 3,
         channels: list[int] = [1, 64, 128, 256, 512, 1024],

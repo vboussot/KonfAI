@@ -34,14 +34,13 @@ from konfai.utils.utils import (
 
 class GroupTransform:
 
-    @config()
     def __init__(
         self,
-        transforms: dict[str, TransformLoader] = {
-            "default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()
+        transforms: dict[str, TransformLoader] | None = {
+            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
         },
-        patch_transforms: dict[str, TransformLoader] = {
-            "default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()
+        patch_transforms: dict[str, TransformLoader] | None = {
+            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
         },
         is_input: bool = True,
     ) -> None:
@@ -60,7 +59,6 @@ class GroupTransform:
                 )
                 transform.set_datasets(datasets)
                 self.transforms.append(transform)
-
         if self._patch_transforms is not None:
             for classpath, transform_loader in self._patch_transforms.items():
                 transform = transform_loader.get_transform(
@@ -77,35 +75,39 @@ class GroupTransform:
         for transform in self.patch_transforms:
             transform.to(device)
 
+    def __str__(self) -> str:
+        params = {"transforms": self.transforms, "patch_transforms": self.patch_transforms}
+        return str(params)
+
+    def __repr__(self) -> str:
+        return str(self)
+
 
 class GroupTransformMetric(GroupTransform):
 
-    @config()
     def __init__(
         self,
         transforms: dict[str, TransformLoader] = {
-            "default:Normalize:Standardize:Unsqueeze:TensorCast:ResampleIsotropic:ResampleResize": TransformLoader()
+            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
         },
     ):
-        super().__init__(transforms, None)
+        super().__init__(transforms, {})
 
 
 class Group(dict[str, GroupTransform]):
 
-    @config()
     def __init__(
         self,
-        groups_dest: dict[str, GroupTransform] = {"default:group_dest": GroupTransform()},
+        groups_dest: dict[str, GroupTransform] = {"default|Labels": GroupTransform()},
     ):
         super().__init__(groups_dest)
 
 
 class GroupMetric(dict[str, GroupTransformMetric]):
 
-    @config()
     def __init__(
         self,
-        groups_dest: dict[str, GroupTransformMetric] = {"default:group_dest": GroupTransformMetric()},
+        groups_dest: dict[str, GroupTransformMetric] = {"default|group_dest": GroupTransformMetric()},
     ):
         super().__init__(groups_dest)
 
@@ -182,11 +184,11 @@ class DatasetIter(data.Dataset):
             if len(indexs) > 0:
                 memory_lock = threading.Lock()
 
-                def desc():
+                def desc(i: int = 0):
                     return (
                         f"Caching {label}: "
                         f"{get_memory_info()} | "
-                        f"{memory_forecast(memory_init, self.nb_dataset)} | "
+                        f"{memory_forecast(memory_init, i, self.nb_dataset)} | "
                         f"{get_cpu_info()}"
                     )
 
@@ -195,7 +197,7 @@ class DatasetIter(data.Dataset):
                 def process(index):
                     self._load_data(index)
                     with memory_lock:
-                        pbar.set_description(desc())
+                        pbar.set_description(desc(pbar.n + 1))
                         pbar.update(1)
 
                 cpu_count = os.cpu_count() or 1
@@ -329,7 +331,6 @@ class Subset:
 
 class TrainSubset(Subset):
 
-    @config()
     def __init__(
         self,
         subset: str | list[int] | list[str] | None = None,
@@ -340,7 +341,6 @@ class TrainSubset(Subset):
 
 class PredictionSubset(Subset):
 
-    @config()
     def __init__(self, subset: str | list[int] | list[str] | None = None) -> None:
         super().__init__(subset, False)
 
@@ -367,6 +367,8 @@ class Data(ABC):
         self.validation = validation
         self.data_augmentations_list = data_augmentations_list
         self.batch_size = batch_size
+        self.use_cache = use_cache
+        self.inline_augmentations = inline_augmentations
 
         self.datasetIter = partial(
             DatasetIter,
@@ -399,6 +401,7 @@ class Data(ABC):
                 1,
             ]
         )
+
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 data[group_dest] = [
@@ -602,7 +605,7 @@ class Data(ABC):
         data, mapping = self._get_datasets(list(subset_names), dataset_name)
 
         index = []
-        if isinstance(self.validation, float) or isinstance(self.validation, int):
+        if isinstance(self.validation, float):
             if self.validation <= 0 or self.validation >= 1:
                 raise DatasetManagerError(
                     "Validation must be a float between 0 and 1.",
@@ -700,14 +703,31 @@ class Data(ABC):
                 )
         return data_loaders, train_names, validation_names
 
+    def __str__(self) -> str:
+        params = {
+            "dataset_filenames": self.dataset_filenames,
+            "groups_src": self.groups_src,
+            "patch": self.patch,
+            "use_cache": self.use_cache,
+            "subset": self.subset,
+            "batch_size": self.batch_size,
+            "validation": self.validation,
+            "inline_augmentations": self.inline_augmentations,
+            "data_augmentations_list": self.data_augmentations_list,
+        }
+        return str(params)
 
+    def __repr__(self) -> str:
+        return str(self)
+
+
+@config("Dataset")
 class DataTrain(Data):
 
-    @config("Dataset")
     def __init__(
         self,
-        dataset_filenames: list[str] = ["default:./Dataset"],
-        groups_src: dict[str, Group] = {"default:group_src": Group()},
+        dataset_filenames: list[str] = ["default|./Dataset:mha"],
+        groups_src: dict[str, Group] = {"default|Labels": Group()},
         augmentations: dict[str, DataAugmentationsList] | None = {"DataAugmentation_0": DataAugmentationsList()},
         inline_augmentations: bool = False,
         patch: DatasetPatch | None = DatasetPatch(),
@@ -729,12 +749,12 @@ class DataTrain(Data):
         )
 
 
+@config("Dataset")
 class DataPrediction(Data):
 
-    @config("Dataset")
     def __init__(
         self,
-        dataset_filenames: list[str] = ["default:./Dataset"],
+        dataset_filenames: list[str] = ["default|./Dataset"],
         groups_src: dict[str, Group] = {"default": Group()},
         augmentations: dict[str, DataAugmentationsList] | None = {"DataAugmentation_0": DataAugmentationsList()},
         patch: DatasetPatch | None = DatasetPatch(),
@@ -755,12 +775,12 @@ class DataPrediction(Data):
         )
 
 
+@config("Dataset")
 class DataMetric(Data):
 
-    @config("Dataset")
     def __init__(
         self,
-        dataset_filenames: list[str] = ["default:./Dataset"],
+        dataset_filenames: list[str] = ["default|./Dataset:mha"],
         groups_src: dict[str, GroupMetric] = {"default": GroupMetric()},
         subset: PredictionSubset = PredictionSubset(),
         validation: str | None = None,

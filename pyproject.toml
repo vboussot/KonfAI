@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "konfai"
-version = "1.4.3"
+dynamic = ["version"]
 description = "Modular and configurable Deep Learning framework with YAML and PyTorch"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 
 authors = [
@@ -47,3 +47,8 @@ cluster = ["submitit"]
 
 [tool.poetry.dev-dependencies]
 pytest = "^8.0"
+
+[tool.setuptools_scm]
+tag_regex = "^v(?P<version>.*)$"
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"

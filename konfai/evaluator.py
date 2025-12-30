@@ -1,5 +1,4 @@
 import builtins
-import importlib
 import json
 import os
 import shutil
@@ -11,11 +10,18 @@ import torch
 import tqdm
 from torch.utils.data import DataLoader
 
-from konfai import config_file, evaluations_directory, konfai_root
+from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import DataMetric
-from konfai.utils.config import config
+from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Dataset
-from konfai.utils.utils import DistributedObject, EvaluatorError, get_module, synchronize_data
+from konfai.utils.utils import (
+    DistributedObject,
+    EvaluatorError,
+    State,
+    get_module,
+    run_distributed_app,
+    synchronize_data,
+)
 
 
 class CriterionsAttr:
@@ -31,7 +37,6 @@ class CriterionsAttr:
     - Logging preferences
     """
 
-    @config()
     def __init__(self) -> None:
         pass
 
@@ -49,10 +54,9 @@ class CriterionsLoader:
 
     """
 
-    @config()
     def __init__(
         self,
-        criterions_loader: dict[str, CriterionsAttr] = {"default:torch:nn:CrossEntropyLoss:Dice:NCC": CriterionsAttr()},
+        criterions_loader: dict[str, CriterionsAttr] = {"default|torch:nn:CrossEntropyLoss|Dice|NCC": CriterionsAttr()},
     ) -> None:
         self.criterions_loader = criterions_loader
 
@@ -61,10 +65,10 @@ class CriterionsLoader:
         for module_classpath, criterions_attr in self.criterions_loader.items():
             module, name = get_module(module_classpath, "konfai.metric.measure")
             criterions[
-                config(
+                apply_config(
                     f"{konfai_root()}.metrics.{output_group}.targets_criterions.{target_group}"
                     f".criterions_loader.{module_classpath}"
-                )(getattr(importlib.import_module(module), name))(config=None)
+                )(getattr(module, name))()
             ] = criterions_attr
         return criterions
 
@@ -82,7 +86,6 @@ class TargetCriterionsLoader:
             to a `CriterionsLoader` instance that defines its associated loss functions.
     """
 
-    @config()
     def __init__(
         self,
         targets_criterions: dict[str, CriterionsLoader] = {"default": CriterionsLoader()},
@@ -122,7 +125,7 @@ class Statistics:
         filename (str): Path to the output JSON file that will store the final results.
     """
 
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: Path) -> None:
         self.measures: dict[str, dict[str, float]] = {}
         self.filename = filename
 
@@ -197,7 +200,6 @@ class Statistics:
             result["aggregates"][metric_name] = Statistics.get_statistic(values)
 
         with open(self.filename, "w") as f:
-            print(result)
             f.write(json.dumps(result, indent=4))
 
     def read(self):
@@ -225,6 +227,7 @@ class Statistics:
         return result
 
 
+@config("Evaluator")
 class Evaluator(DistributedObject):
     """
     Distributed evaluation engine for computing metrics on model predictions.
@@ -248,22 +251,21 @@ class Evaluator(DistributedObject):
         metrics (dict): Instantiated metrics organized by output and target groups.
     """
 
-    @config("Evaluator")
     def __init__(
         self,
-        train_name: str = "default:TRAIN_01",
+        train_name: str = "default|TRAIN_01",
         metrics: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()},
         dataset: DataMetric = DataMetric(),
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             exit(0)
         super().__init__(train_name)
-        self.metric_path = evaluations_directory() + self.name + "/"
+        self.metric_path = evaluations_directory() / self.name
         self.metricsLoader = metrics if metrics else {}
         self.dataset = dataset
         self.metrics = {k: v.get_targets_criterions(k) for k, v in self.metricsLoader.items()}
-        self.statistics_train = Statistics(self.metric_path + "Metric_TRAIN.json")
-        self.statistics_validation = Statistics(self.metric_path + "Metric_VALIDATION.json")
+        self.statistics_train = Statistics(self.metric_path / "Metric_TRAIN.json")
+        self.statistics_validation = Statistics(self.metric_path / "Metric_VALIDATION.json")
 
     def update(self, data_dict: dict[str, tuple[torch.Tensor, str]], statistics: Statistics) -> dict[str, float]:
         """
@@ -348,7 +350,7 @@ class Evaluator(DistributedObject):
         Raises:
             EvaluatorError: If any metric output or target group is missing in the dataset's group mapping.
         """
-        if os.path.exists(self.metric_path) and len(list(Path(self.metric_path).rglob("*.yml"))):
+        if self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
             if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = builtins.input(
                     f"The metric {self.name} already exists ! Do you want to overwrite it (yes,no) : "
@@ -358,12 +360,11 @@ class Evaluator(DistributedObject):
 
                 shutil.rmtree(self.metric_path)
 
-        if not os.path.exists(self.metric_path):
+        if not self.metric_path.exists():
             os.makedirs(self.metric_path)
-        metric_namefile_src = config_file().replace(".yml", "")
         shutil.copyfile(
-            metric_namefile_src + ".yml",
-            f"{self.metric_path}{metric_namefile_src}.yml",
+            config_file(),
+            self.metric_path / config_file().name,
         )
 
         self.dataloader, _, _ = self.dataset.get_data(world_size)
@@ -464,3 +465,20 @@ class Evaluator(DistributedObject):
             outputs = synchronize_data(world_size, gpu, self.statistics_validation.measures)
             if global_rank == 0:
                 self.statistics_validation.write(outputs)
+
+
+@run_distributed_app
+def evaluate(
+    overwrite: bool = False,
+    gpu: list[int] | None = cuda_visible_devices(),
+    cpu: int = 1,
+    quiet: bool = False,
+    tb: bool = False,
+    evaluations_file: Path | str = Path("./Evaluation.yml").resolve(),
+    evaluations_dir: Path | str = Path("./Evaluations").resolve(),
+) -> DistributedObject:
+    os.environ["KONFAI_config_file"] = str(Path(evaluations_file).resolve())
+    os.environ["KONFAI_ROOT"] = "Evaluator"
+    os.environ["KONFAI_STATE"] = str(State.EVALUATION)
+    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = str(Path(evaluations_dir).resolve())
+    return apply_config()(Evaluator)()

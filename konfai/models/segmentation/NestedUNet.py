@@ -117,7 +117,7 @@ class NestedUNet(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         patch: ModelPatch | None = None,
@@ -344,7 +344,7 @@ class UNetpp(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         patch: ModelPatch | None = None,

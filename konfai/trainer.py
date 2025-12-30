@@ -1,5 +1,6 @@
 import os
 import shutil
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -12,16 +13,15 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from konfai import (
     checkpoints_directory,
     config_file,
+    cuda_visible_devices,
     current_date,
     konfai_state,
-    path_to_models,
-    setups_directory,
     statistics_directory,
 )
 from konfai.data.data_manager import DataTrain
 from konfai.network.network import Model, ModelLoader, NetState, Network
-from konfai.utils.config import config
-from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, description
+from konfai.utils.config import apply_config, config
+from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, description, run_distributed_app
 
 
 class EarlyStoppingBase:
@@ -40,6 +40,7 @@ class EarlyStoppingBase:
         return False
 
 
+@config("EarlyStopping")
 class EarlyStopping(EarlyStoppingBase):
     """
     Implements early stopping logic with configurable patience and monitored metrics.
@@ -51,7 +52,6 @@ class EarlyStopping(EarlyStoppingBase):
         mode (str): "min" or "max" depending on optimization direction.
     """
 
-    @config("EarlyStopping")
     def __init__(
         self,
         monitor: list[str] | None = None,
@@ -159,7 +159,7 @@ class _Trainer:
 
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
         self.it = it
-        self.tb = SummaryWriter(log_dir=statistics_directory() + self.train_name + "/")
+        self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self.data_log: dict[str, tuple[DataLog, int]] = {}
         if data_log is not None:
             for data in data_log:
@@ -175,6 +175,7 @@ class _Trainer:
         """Closes the SummaryWriter if used."""
         if self.tb is not None:
             self.tb.close()
+        self.checkpoint_save(None)
 
     def run(self) -> None:
         """
@@ -298,7 +299,7 @@ class _Trainer:
             self.model_ema.module.set_state(NetState.TRAIN)
         return self._validation_log(data_dict)
 
-    def checkpoint_save(self, loss: float) -> None:
+    def checkpoint_save(self, loss: float | None) -> None:
         """
         Saves model and optimizer states. Keeps either all checkpoints or only the best one.
 
@@ -308,16 +309,16 @@ class _Trainer:
         if self.global_rank != 0:
             return
 
-        path = checkpoints_directory() + self.train_name + "/"
-        os.makedirs(path, exist_ok=True)
+        path = checkpoints_directory() / self.train_name
+        path.mkdir(parents=True, exist_ok=True)
 
         name = current_date() + ".pt"
-        save_path = os.path.join(path, name)
+        save_path = path / name
 
         save_dict = {
             "epoch": self.epoch,
             "it": self.it,
-            "loss": loss,
+            "loss": loss if loss else 0,
             "Model": self.model.module.state_dict(),
         }
 
@@ -348,20 +349,20 @@ class _Trainer:
 
         torch.save(save_dict, save_path)
 
-        if self.save_checkpoint_mode == "BEST":
-            all_checkpoints = sorted([os.path.join(path, f) for f in os.listdir(path) if f.endswith(".pt")])
+        if self.save_checkpoint_mode == "BEST" and loss is not None:
+            all_checkpoints = sorted(path.glob("*.pt"))
             best_ckpt = None
             best_loss = float("inf")
 
             for f in all_checkpoints:
-                d = torch.load(f, weights_only=True)
+                d = torch.load(f, map_location=torch.device("cpu"), weights_only=False)  # nosec B614
                 if d.get("loss", float("inf")) < best_loss:
                     best_loss = d["loss"]
                     best_ckpt = f
 
             for f in all_checkpoints:
                 if f != best_ckpt and f != save_path:
-                    os.remove(f)
+                    f.unlink()
 
     @torch.no_grad()
     def _log(
@@ -475,6 +476,7 @@ class _Trainer:
         return self._log("Validation", data_dict)
 
 
+@config("Trainer")
 class Trainer(DistributedObject):
     """
     Public API for training a model using the KonfAI framework.
@@ -502,12 +504,11 @@ class Trainer(DistributedObject):
         save_checkpoint_mode (str): Either "BEST" or "ALL".
     """
 
-    @config("Trainer")
     def __init__(
         self,
         model: ModelLoader = ModelLoader(),
         dataset: DataTrain = DataTrain(),
-        train_name: str = "default:TRAIN_01",
+        train_name: str = "default|TRAIN_01",
         manual_seed: int | None = None,
         epochs: int = 100,
         it_validation: int | None = None,
@@ -553,11 +554,14 @@ class Trainer(DistributedObject):
         self.gradient_checkpoints = gradient_checkpoints
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
-        self.config_namefile_src = config_file().replace(".yml", "")
+        self.config_namefile_src = config_file().name.replace(".yml", "")
         self.config_namefile = (
-            setups_directory() + self.name + "/" + self.config_namefile_src.split("/")[-1] + "_" + str(self.it) + ".yml"
+            statistics_directory() / self.name / f"{self.config_namefile_src.split("/")[-1]}_{self.it}.yml"
         )
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
+
+    def set_model(self, path_to_model: Path) -> None:
+        self.path_to_model = str(path_to_model)
 
     def __exit__(self, exc_type, value, traceback):
         """Exit training context and trigger save of model/checkpoints."""
@@ -571,29 +575,21 @@ class Trainer(DistributedObject):
         Returns:
             dict: State dictionary loaded from checkpoint.
         """
-        path_to_model = path_to_models()[0]
-        if path_to_model.startswith("https://"):
+        if self.path_to_model.startswith("https://"):
             try:
                 state_dict = {
-                    path_to_model.split(":")[1]: torch.hub.load_state_dict_from_url(
-                        url=path_to_model.split(":")[0], map_location="cpu", check_hash=True
+                    self.path_to_model.split(":")[1]: torch.hub.load_state_dict_from_url(
+                        url=self.path_to_model.split(":")[0], map_location="cpu", check_hash=True
                     )
                 }
             except Exception:
-                raise Exception(f"Model : {path_to_model} does not exist !")
+                raise Exception(f"Model : {self.path_to_model} does not exist !")
+        elif Path(self.path_to_model).exists():
+            state_dict = torch.load(
+                str(self.path_to_model), map_location=torch.device("cpu"), weights_only=False
+            )  # nosec B614
         else:
-            if path_to_model != "":
-                path = ""
-                name = path_to_model
-            else:
-                path = checkpoints_directory() + self.name + "/"
-                if os.listdir(path):
-                    name = sorted(os.listdir(path))[-1]
-
-            if os.path.exists(path + name):
-                state_dict = torch.load(path + name, weights_only=True, map_location="cpu")
-            else:
-                raise Exception(f"Model : {self.name} does not exist !")
+            raise ValueError(f"Invalid model path entry: {self.path_to_model}")
 
         if "epoch" in state_dict:
             self.epoch = state_dict["epoch"]
@@ -602,14 +598,10 @@ class Trainer(DistributedObject):
         return state_dict
 
     def _save(self) -> None:
-        """
-        Serializes model and EMA model (if any) in both state_dict and full model formats.
-        Also saves optimizer states and YAML config snapshot.
-        """
-        if os.path.exists(self.config_namefile):
+        if self.config_namefile.exists():
             os.rename(
                 self.config_namefile,
-                self.config_namefile.replace(".yml", "") + "_" + str(self.it) + ".yml",
+                self.config_namefile.parent / f"{self.config_namefile.name.replace(".yml", "")}_{self.it}.yml",
             )
 
     def _avg_fn(self, averaged_model_parameter: float, model_parameter, num_averaged):
@@ -633,7 +625,7 @@ class Trainer(DistributedObject):
             world_size (int): Total number of distributed processes.
         """
         state = State[konfai_state()]
-        if state != State.RESUME and os.path.exists(checkpoints_directory() + self.name + "/"):
+        if state != State.RESUME and (checkpoints_directory() / self.name).exists():
             if os.environ["KONFAI_OVERWRITE"] != "True":
                 accept = input(f"The model {self.name} already exists ! Do you want to overwrite it (yes,no) : ")
                 if accept != "yes":
@@ -641,10 +633,9 @@ class Trainer(DistributedObject):
             for directory_path in [
                 statistics_directory(),
                 checkpoints_directory(),
-                setups_directory(),
             ]:
-                if os.path.exists(directory_path + self.name + "/"):
-                    shutil.rmtree(directory_path + self.name + "/")
+                if (directory_path / self.name).exists():
+                    (directory_path / self.name).unlink()
 
         state_dict = {}
         if state != State.TRAIN:
@@ -664,15 +655,14 @@ class Trainer(DistributedObject):
             if state_dict is not None:
                 self.model_ema.module.load(state_dict, init=False, ema=True)
 
-        if not os.path.exists(setups_directory() + self.name + "/"):
-            os.makedirs(setups_directory() + self.name + "/")
+        (statistics_directory() / self.name).mkdir(exist_ok=True)
         shutil.copyfile(self.config_namefile_src + ".yml", self.config_namefile)
 
         self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
-        with open(setups_directory() + self.name + "/Train_" + str(self.it) + ".txt", "w") as f:
+        with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
             for name in train_names:
                 f.write(name + "\n")
-        with open(setups_directory() + self.name + "/Validation_" + str(self.it) + ".txt", "w") as f:
+        with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
             for name in validation_names:
                 f.write(name + "\n")
 
@@ -693,7 +683,7 @@ class Trainer(DistributedObject):
             local_rank (int): Local rank within the node.
             dataloaders (list[DataLoader]): Training and validation dataloaders.
         """
-        model = Network.to(self.model, local_rank * self.size) if torch.cuda.is_available() else self.model
+        model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
         model = DDP(model, static_graph=True) if dist.is_initialized() else Model(model)
 
         if self.model_ema is not None:
@@ -717,3 +707,31 @@ class Trainer(DistributedObject):
             *dataloaders,
         ) as t:
             t.run()
+
+
+@run_distributed_app
+def train(
+    command: State = State.TRAIN,
+    overwrite: bool = False,
+    model: Path | str | None = None,
+    gpu: list[int] | None = cuda_visible_devices(),
+    cpu: int | None = None,
+    quiet: bool = False,
+    tensorboard: bool = False,
+    config: Path | str = Path("./Config.yml"),
+    checkpoints_dir: Path | str = Path("./Checkpoints/"),
+    statistics_dir: Path | str = Path("./Statistics/"),
+) -> DistributedObject:
+    os.environ["KONFAI_config_file"] = str(Path(config).resolve())
+    os.environ["KONFAI_ROOT"] = "Trainer"
+    os.environ["KONFAI_STATE"] = str(command)
+    os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = str(Path(checkpoints_dir).resolve())
+    os.environ["KONFAI_STATISTICS_DIRECTORY"] = str(Path(statistics_dir).resolve())
+    trainer = apply_config()(Trainer)()
+    if model is not None:
+        trainer.set_model(Path(model))
+    return trainer
+
+
+if __name__ == "__main__":
+    train(State.TRAIN, False, None)

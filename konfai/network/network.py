@@ -6,7 +6,12 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from enum import Enum
 from functools import partial
-from typing import Any, Self
+from typing import Any
+
+try:
+    from typing import Self  # Python ≥ 3.11
+except ImportError:
+    from typing_extensions import Self  # Python ≤ 3.10
 
 import numpy as np
 import torch
@@ -16,7 +21,7 @@ from torch.utils.checkpoint import checkpoint
 from konfai import konfai_root
 from konfai.data.patching import Accumulator, ModelPatch
 from konfai.metric.schedulers import Scheduler
-from konfai.utils.config import config
+from konfai.utils.config import apply_config, config
 from konfai.utils.utils import MeasureError, State, TrainerError, get_device, get_gpu_memory, get_module
 
 
@@ -37,19 +42,17 @@ class PatchIndexed:
 
 class OptimizerLoader:
 
-    @config("Optimizer")
     def __init__(self, name: str = "AdamW") -> None:
         self.name = name
 
     def get_optimizer(self, key: str, parameter: Iterator[torch.nn.parameter.Parameter]) -> torch.optim.Optimizer:
-        return config(f"{konfai_root()}.Model.{key}.Optimizer")(
+        return apply_config(f"{konfai_root()}.Model.{key}.optimizer")(
             getattr(importlib.import_module("torch.optim"), self.name)
-        )(parameter, config=None)
+        )(parameter)
 
 
 class LRSchedulersLoader:
 
-    @config()
     def __init__(self, nb_step: int = 0) -> None:
         self.nb_step = nb_step
 
@@ -58,10 +61,10 @@ class LRSchedulersLoader:
     ) -> torch.optim.lr_scheduler._LRScheduler:
         for m in ["torch.optim.lr_scheduler", "konfai.metric.schedulers"]:
             module, name = get_module(scheduler_classname, m)
-            if hasattr(importlib.import_module(module), name):
-                return config(f"{konfai_root()}.Model.{key}.schedulers.{scheduler_classname}")(
-                    getattr(importlib.import_module(module), name)
-                )(optimizer, config=None)
+            if hasattr(module, name):
+                return apply_config(f"{konfai_root()}.Model.{key}.schedulers.{scheduler_classname}")(
+                    getattr(module, name)
+                )(optimizer)
         raise TrainerError(
             f"Unknown scheduler {scheduler_classname}, tried importing from: 'torch.optim.lr_scheduler' and "
             "'konfai.metric.schedulers', but no valid match was found. "
@@ -71,22 +74,20 @@ class LRSchedulersLoader:
 
 class LossSchedulersLoader:
 
-    @config()
     def __init__(self, nb_step: int = 0) -> None:
         self.nb_step = nb_step
 
     def getschedulers(self, key: str, scheduler_classname: str) -> torch.optim.lr_scheduler._LRScheduler:
-        return config(f"{key}.{scheduler_classname}")(
+        return apply_config(f"{key}.{scheduler_classname}")(
             getattr(importlib.import_module("konfai.metric.schedulers"), scheduler_classname)
-        )(config=None)
+        )()
 
 
 class CriterionsAttr:
 
-    @config()
     def __init__(
         self,
-        schedulers: dict[str, LossSchedulersLoader] = {"default:Constant": LossSchedulersLoader(0)},
+        schedulers: dict[str, LossSchedulersLoader] = {"default|Constant": LossSchedulersLoader(0)},
         is_loss: bool = True,
         group: int = 0,
         start: int = 0,
@@ -105,10 +106,9 @@ class CriterionsAttr:
 
 class CriterionsLoader:
 
-    @config()
     def __init__(
         self,
-        criterions_loader: dict[str, CriterionsAttr] = {"default:torch:nn:CrossEntropyLoss:Dice:NCC": CriterionsAttr()},
+        criterions_loader: dict[str, CriterionsAttr] = {"default|torch:nn:CrossEntropyLoss|Dice|NCC": CriterionsAttr()},
     ) -> None:
         self.criterions_loader = criterions_loader
 
@@ -118,7 +118,7 @@ class CriterionsLoader:
         criterions = {}
         for module_classpath, criterions_attr in self.criterions_loader.items():
             module, name = get_module(module_classpath, "konfai.metric.measure")
-            criterions_attr.isTorchCriterion = module.startswith("torch")
+            criterions_attr.isTorchCriterion = module.__name__.startswith("torch")
             for (
                 scheduler_classname,
                 schedulers,
@@ -132,21 +132,20 @@ class CriterionsLoader:
                     )
                 ] = schedulers.nb_step
             criterions[
-                config(
+                apply_config(
                     f"{konfai_root()}.Model.{model_classname}.outputs_criterions."
                     f"{output_group}.targets_criterions.{target_group}."
                     f"criterions_loader.{module_classpath}"
-                )(getattr(importlib.import_module(module), name))(config=None)
+                )(getattr(module, name))()
             ] = criterions_attr
         return criterions
 
 
 class TargetCriterionsLoader:
 
-    @config()
     def __init__(
         self,
-        targets_criterions: dict[str, CriterionsLoader] = {"default": CriterionsLoader()},
+        targets_criterions: dict[str, CriterionsLoader] = {"Labels": CriterionsLoader()},
     ) -> None:
         self.targets_criterions = targets_criterions
 
@@ -1005,9 +1004,7 @@ class Network(ModuleArgsDict, ABC):
         if state != State.PREDICTION:
             self.scaler = torch.amp.GradScaler("cuda", enabled=autocast)
             if self.optimizerLoader:
-                self.optimizer = self.optimizerLoader.get_optimizer(
-                    key, self.parameters(state == State.TRANSFER_LEARNING)
-                )
+                self.optimizer = self.optimizerLoader.get_optimizer(key, self.parameters(False))
                 self.optimizer.zero_grad()
 
             if self.lr_schedulers_loader and self.optimizer:
@@ -1273,7 +1270,7 @@ class MinimalModel(Network):
         self,
         model: Network,
         optimizer: OptimizerLoader = OptimizerLoader(),
-        schedulers: dict[str, LRSchedulersLoader] = {"default:ReduceLROnPlateau": LRSchedulersLoader(0)},
+        schedulers: dict[str, LRSchedulersLoader] = {"default|StepLR": LRSchedulersLoader(0)},
         outputs_criterions: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()},
         patch: ModelPatch | None = None,
         dim: int = 3,
@@ -1295,11 +1292,11 @@ class MinimalModel(Network):
         self.add_module("Model", model)
 
 
+@config("Model")
 class ModelLoader:
 
-    @config("Model")
-    def __init__(self, classpath: str = "default:segmentation.UNet.UNet") -> None:
-        self.module, self.name = get_module(classpath, "konfai.models")
+    def __init__(self, classpath: str = "default|segmentation.UNet.UNet") -> None:
+        self.classpath = classpath
 
     def get_model(
         self,
@@ -1313,17 +1310,18 @@ class ModelLoader:
             "init_gain",
         ],
     ) -> Network:
+        module, name = get_module(self.classpath, "konfai.models")
+
         if not konfai_args:
             konfai_args = f"{konfai_root()}.Model"
-        konfai_args += "." + self.name
-        model = config(konfai_args)(getattr(importlib.import_module(self.module), self.name))(
-            config=None, konfai_without=konfai_without if not train else []
-        )
+        konfai_args += "." + name
+
+        model = apply_config(konfai_args)(getattr(module, name))(konfai_without=konfai_without if not train else [])
         if not isinstance(model, Network):
-            model = config(konfai_args)(partial(MinimalModel, model))(
-                config=None, konfai_without=konfai_without + ["model"] if not train else []
+            model = apply_config(konfai_args)(partial(MinimalModel, model))(
+                konfai_without=konfai_without + ["model"] if not train else []
             )
-            model.set_name(self.name)
+            model.set_name(name)
         return model
 
 

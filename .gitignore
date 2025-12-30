@@ -3,12 +3,9 @@
 __pycache__/
 dist
 examples
-.Test
 .coverage
 .pytest_cache
 docs
-tests
 konfai/metric/models
 .vscode
 .mypy_cache
-test
