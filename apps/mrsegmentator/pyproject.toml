@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "konfai"
+name = "mrsegmentator-konfai"
 dynamic = ["version"]
-description = "A Modular and configurable Deep Learning framework with YAML and PyTorch"
+description = "Fast and lightweight MRSegmentator CLI powered by the KonfAI framework."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -15,18 +15,7 @@ authors = [
 ]
 
 dependencies = [
-  "torch",
-  "tqdm",
-  "numpy",
-  "ruamel.yaml",
-  "psutil",
-  "tensorboard",
-  "SimpleITK",
-  "lxml",
-  "h5py",
-  "nvidia-ml-py",
-  "requests",
-  "huggingface_hub"
+"konfai==1.4.5",
 ]
 
 [project.urls]
@@ -36,19 +25,9 @@ Issues = "https://github.com/vboussot/KonfAI/issues"
 License = "https://www.apache.org/licenses/LICENSE-2.0"
 
 [project.scripts]
-konfai = "konfai.main:main"
-konfai-apps = "konfai.main:main_apps"
-konfai-cluster = "konfai.main:cluster"
-
-[project.optional-dependencies]
-vtk = ["vtk"]
-lpips = ["lpips"]
-cluster = ["submitit"]
+mrsegmentator-konfai = "mrsegmentator_konfai.cli:main"
 
 [tool.setuptools_scm]
+root = "../.."
 tag_regex = "^v(?P<version>.*)$"
 local_scheme = "no-local-version"
-
-[tool.setuptools.packages.find]
-include = ["konfai*"]
-exclude = ["apps*"]

@@ -13,7 +13,7 @@ import SimpleITK as sitk  # noqa: N813
 
 from konfai import cuda_visible_devices
 from konfai.utils.dataset import Dataset
-from konfai.utils.utils import SUPPORTED_EXTENSIONS, ModelDirectory, ModelHF, ModelLoad, State
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, MinimalLog, ModelDirectory, ModelHF, ModelLoad, State
 
 
 def run_distributed_app(
@@ -37,7 +37,8 @@ def run_distributed_app(
             os.makedirs(tmp_dir, exist_ok=True)
             os.chdir(str(tmp_dir))
             sys.path.insert(0, os.getcwd())
-            func(*args, **kwargs)
+            with MinimalLog():
+                func(*args, **kwargs)
         except KeyboardInterrupt:
             print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
             exit(0)
@@ -218,7 +219,7 @@ class KonfAIApp:
     def pipeline(
         self,
         inputs: list[list[Path]],
-        gt: list[list[Path]],
+        gt: list[list[Path]] | None,
         output: Path = Path("./Output/"),
         ensemble: int = 0,
         tta: int = 0,
@@ -226,6 +227,7 @@ class KonfAIApp:
         prediction_file: str = "Prediction.yml",
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
+        uncertainty: bool = True,
         uncertainty_file: str = "Uncertainty.yml",
         gpu: list[int] = cuda_visible_devices(),
         cpu: int = 0,
@@ -241,8 +243,10 @@ class KonfAIApp:
                     inference_stacks.append(f)
                 else:
                     outputs.append(f)
-        self.evaluate([outputs], gt, output / "Evaluations", mask, evaluation_file, gpu, cpu, quiet, tmp_dir)
-        self.uncertainty([inference_stacks], output / "Uncertainties", uncertainty_file, gpu, cpu, quiet, tmp_dir)
+        if gt is not None:
+            self.evaluate([outputs], gt, output / "Evaluations", mask, evaluation_file, gpu, cpu, quiet, tmp_dir)
+        if uncertainty:
+            self.uncertainty([inference_stacks], output / "Uncertainties", uncertainty_file, gpu, cpu, quiet, tmp_dir)
 
     @run_distributed_app
     def fine_tune(

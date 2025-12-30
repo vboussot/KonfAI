@@ -336,63 +336,80 @@ class DataLog(Enum):
             raise ValueError(f"Unsupported DataLog type: {self}")
 
 
-class Log:
-    def __init__(self, name: str, rank: int) -> None:
-        if konfai_state() == "PREDICTION":
-            path = predictions_directory()
-        elif konfai_state() == "EVALUATION":
-            path = evaluations_directory()
-        else:
-            path = statistics_directory()
-        self.verbose = os.environ.get("KONFAI_VERBOSE", "True") == "True"
-        self.log_path = os.path.join(path, name)
-        os.makedirs(self.log_path, exist_ok=True)
-        self.rank = rank
-        self.file = open(os.path.join(self.log_path, f"log_{rank}.txt"), "w", buffering=1)
-        self.stdout_bak = sys.stdout
-        self.stderr_bak = sys.stderr
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+class MinimalLog:
+    def __init__(self, rank: int = 0) -> None:
+        self._stdout_bak = sys.stdout
+        self._stderr_bak = sys.stderr
         self._buffered_line = ""
+        self.verbose = os.environ.get("KONFAI_VERBOSE", "True") == "True"
+        self.rank = rank
 
     def __enter__(self):
-        self.file.__enter__()
         sys.stdout = cast(TextIO, self)
         sys.stderr = cast(TextIO, self)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.file.__exit__(exc_type, exc_val, exc_tb)
-        sys.stdout = self.stdout_bak
-        sys.stderr = self.stderr_bak
+        sys.stdout = self._stdout_bak
+        sys.stderr = self._stderr_bak
 
     def write(self, msg: str):
         if not msg:
             return
-        ansi_escape = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-        msg_clean = ansi_escape.sub("", msg)
+        msg_clean = ANSI_ESCAPE_RE.sub("", msg)
         if "\r" in msg_clean or "[A" in msg:
             msg_clean = msg_clean.split("\r")[-1].strip()
             self._buffered_line = msg_clean
         else:
             self._buffered_line = msg_clean.strip()
 
-        if self._buffered_line:
-            self.file.write(self._buffered_line + "\n")
-            self.file.flush()
         if self.verbose and (self.rank == 0 or "KONFAI_CLUSTER" in os.environ):
-            if sys.__stdout__ is not None:
-                sys.__stdout__.write(msg)
-                sys.__stdout__.flush()
+            self._stdout_bak.write(msg)
+            self._stdout_bak.flush()
 
     def flush(self):
-        self.file.flush()
-
-    def isatty(self):
-        return False
+        self._stdout_bak.flush()
 
     def fileno(self):
         if sys.__stdout__ is None:
             raise RuntimeError("sys.__stdout__ is None, cannot get fileno")
         return sys.__stdout__.fileno()
+
+
+class Log(MinimalLog):
+    def __init__(self, name: str, rank: int) -> None:
+        super().__init__(rank)
+        if konfai_state() == "PREDICTION":
+            path = predictions_directory()
+        elif konfai_state() == "EVALUATION":
+            path = evaluations_directory()
+        else:
+            path = statistics_directory()
+        self.log_path = path / name
+        self.log_path.mkdir(parents=True, exist_ok=True)
+        self.file = open(self.log_path / f"log_{rank}.txt", "w", buffering=1)
+
+    def __enter__(self):
+        super().__enter__()
+        self.file.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        super().__exit__(exc_type, exc_val, exc_tb)
+        self.file.__exit__(exc_type, exc_val, exc_tb)
+
+    def write(self, msg: str):
+        super().write(msg)
+        if self._buffered_line:
+            self.file.write(self._buffered_line + "\n")
+            self.file.flush()
+
+    def flush(self):
+        super().flush()
+        self.file.flush()
 
 
 class TensorBoard:

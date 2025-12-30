@@ -4,11 +4,83 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from konfai import cuda_visible_devices
 from konfai.utils.utils import State
 
 sys.path.insert(0, os.getcwd())
+
+
+def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bool = True) -> dict[str, Any]:
+    parser.add_argument(
+        "-i",
+        "--inputs",
+        type=lambda x: Path(x).resolve(),
+        nargs="+",
+        action="append",
+        required=True,
+        help="Input path(s): provide one or multiple volume files, or a dataset directory.",
+    )
+
+    parser.add_argument(
+        "--gt",
+        type=lambda x: Path(x).resolve(),
+        nargs="+",
+        action="append",
+        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
+    )
+
+    parser.add_argument(
+        "--mask",
+        type=lambda x: Path(x).resolve(),
+        nargs="+",
+        action="append",
+        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
+    )
+
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=lambda x: Path(x).resolve(),
+        default=Path("./Output").resolve(),
+        help="Output directory / file",
+    )
+    if with_uncertainty:
+        parser.add_argument("-uncertainty", action="store_true", help="Run uncertainty workflow.")
+
+    device_group = parser.add_mutually_exclusive_group()
+    devices = cuda_visible_devices()
+    device_group.add_argument(
+        "--gpu",
+        type=int,
+        nargs="+",
+        choices=devices,
+        default=devices,
+        help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
+    )
+
+    def non_negative_int(value: str) -> int:
+        ivalue = int(value)
+        if ivalue <= 0:
+            raise argparse.ArgumentTypeError("CPU value must be > 0")
+        return ivalue
+
+    device_group.add_argument(
+        "--cpu",
+        type=non_negative_int,
+        default=None,
+        help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
+    )
+
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
+
+    kwargs = vars(parser.parse_args())
+    if kwargs["cpu"] is not None:
+        kwargs["gpu"] = []
+    if not with_uncertainty:
+        kwargs["uncertainty"] = False
+    return kwargs
 
 
 def main_apps():
@@ -164,6 +236,8 @@ def main_apps():
         "--uncertainty_file", type=str, default="Uncertainty.yml", help="Optional uncertainty config filename"
     )
 
+    pipe_p.add_argument("-uncertainty", action="store_true", help="Run uncertainty workflow.")
+
     # -----------------
     # 5) FINE-TUNE
     # -----------------
@@ -224,7 +298,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
             type=int,
             nargs="+",
             choices=devices,
-            default=devices[0],
+            default=devices[0] if len(devices) else [],
             help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
         )
 
