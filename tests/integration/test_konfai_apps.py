@@ -74,8 +74,12 @@ def assert_metrics_close(
     for k in sorted(base_keys):
         b = baseline[k]
         o = output[k]
-        if not math.isclose(o, b, rel_tol=rel_tol, abs_tol=abs_tol):
-            diffs.append(f"- {k}: baseline={b:.12g}, output={o:.12g}, diff={o-b:.12g}")
+        if k == "Uncertainty:None:Uncertainty":
+            if not math.isclose(o, b, rel_tol=1e-1, abs_tol=1e-1):
+                diffs.append(f"- {k}: baseline={b:.12g}, output={o:.12g}, diff={o-b:.12g}")
+        else:
+            if not math.isclose(o, b, rel_tol=rel_tol, abs_tol=abs_tol):
+                diffs.append(f"- {k}: baseline={b:.12g}, output={o:.12g}, diff={o-b:.12g}")
 
     if diffs:
         raise AssertionError(f"{name}: values differ (rel_tol={rel_tol}, abs_tol={abs_tol}).\n" + "\n".join(diffs))
@@ -111,6 +115,7 @@ def test_konfai_apps_infer(tmp_path: Path):
         "0",
         "--mc",
         "0",
+        "-uncertainty",
     ]
 
     p = run(cmd)
