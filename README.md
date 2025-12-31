@@ -1,6 +1,6 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vboussot/KonfAI/blob/main/LICENSE)
 [![PyPI version](https://img.shields.io/pypi/v/konfai)](https://pypi.org/project/konfai/)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/vboussot/KonfAI/actions/workflows/KonfAI_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/KonfAI_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
 
@@ -28,7 +28,7 @@ For more details on the design principles and scientific background, refer to th
 
 ## 🔧 Key Features
 
-- 🔀 Full training/prediction/evaluation orchestration via YAML configuration file
+- 🔀 Full training/prediction/evaluation orchestration via YAML configuration files
 - 🧩 Modular plugin-like structure (transforms, augmentations, models, losses, schedulers)
 - 🔄 Dynamic criterion scheduling per head / target
 - 🧠 Multi-branch / multi-output model support
@@ -83,12 +83,15 @@ konfai EVALUATION
 A **KonfAI App** is a self-contained workflow package built with KonfAI.  
 It defines how a model is executed, how outputs are generated, and how optional evaluation or uncertainty workflows are performed.
 
+Several ready-to-use KonfAI Apps are available directly in the repository under the [`apps/`](https://github.com/vboussot/KonfAI/tree/main/apps) directory.
+
 They can be executed **identically** from:
 
 | Interface | Command |
 |----------|---------|
-| 🖥️ CLI | `konfai-apps infer ...` |
+| 🖥️ CLI | `konfai-apps infer / eval / uncertainty / pipeline  app name` |
 | 🧠 3D Slicer | Via **SlicerKonfAI** GUI https://github.com/vboussot/SlicerKonfAI |
+| 🐍 Python API | Via `konfai.app.KonfAIApp` |
 
 ---
 
@@ -136,13 +139,15 @@ konfai-apps uncertainty my_app -i input.mha
 
 Pipeline (inference → evaluation → uncertainty):
 ```bash
-konfai-apps pipeline my_app -i input.mha --with-eval --gt gt.mha --with-uncertainty
+konfai-apps pipeline my_app -i input.mha --gt gt.mha -uncertainty
 ```
 
 Fine-tuning:
 ```bash
-konfai-apps fine-tune my_app -d ./Dataset --epochs 20
+konfai-apps fine-tune my_app name -d ./Dataset --epochs 20
 ```
+
+More detailed documentation and usage examples for each app are available in the corresponding subdirectories of the `apps/` folder.
 
 ---
 

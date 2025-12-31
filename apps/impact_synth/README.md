@@ -1,7 +1,8 @@
-[![PyPI version](https://img.shields.io/pypi/v/impact_synth_konfai.svg?color=blue)](https://pypi.org/project/impact_synth_konfai/)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![KonfAI](https://img.shields.io/badge/framework-KonfAI-orange.svg)](https://github.com/vboussot/KonfAI)
+[![PyPI version](https://img.shields.io/pypi/v/impact_synth_konfai.svg?color=blue)](https://pypi.org/project/impact_synth_konfai/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![CI](https://github.com/vboussot/KonfAI/actions/workflows/KonfAI_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/KonfAI_ci.yml)
+[![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://arxiv.org/abs/2510.21358)
 
 # IMPACT-Synth-KonfAI
 
@@ -26,14 +27,13 @@ The official **IMPACT-Synth models** are available on [Hugging Face](https://hug
 
 From PyPI:
 ```bash
-pip install Impact-Synth-KonfAI
+python -m pip install impact-synth-konfai
 ```
 
 From source:
 ```bash
-git clone https://github.com/vboussot/Impact-Synth-KonfAI.git
-cd Impact-Synth-KonfAI
-pip install .
+git clone https://github.com/vboussot/KonfAI.git
+python -m pip install -e apps/impact_synth
 ```
 ---
 
@@ -42,28 +42,30 @@ pip install .
 Perform image-to-sCT synthesis:
 
 ```bash
-impact-synth-konfai -i input.nii.gz -o sCT.nii.gz
+impact-synth-konfai MR -i path/to/input.nii.gz -o ./Output/
 ```
 
 ### Optional arguments
 
 | Flag | Description | Default |
 |------|--------------|----------|
+| `MODEL` | Input modality / model name on Hugging Face | `MR` or  `CBCT`|
 | `-i`, `--input` | Path to the input file | *required* |
-| `-o`, `--output` | Path to save the synthetic CT | `sCT.mha` |
-| `-m`, `--model` | Model name on Hugging Face | `MR` |
+| `-o`, `--output` | Path to save the synthetic CT | `./Output/` |
+| `--gt` | Path to reference CT (ground truth), if available (enables evaluation workflows) | *unset* |
+| `--mask` | Path to region-of-interest mask used for evaluation and uncertainty analysis | *unset* |
 | `--tta` | Number of test-time augmentations (TTA) | `2` |
 | `--ensemble` | Number of models to ensemble | `5` |
 | `--mc_dropout` | Monte Carlo dropout samples for uncertainty | `1` |
-| `--uncertainty` | Save uncertainty maps | `False` |
-| `-g`, `--gpu` | GPU list (e.g. `0` or `0,1`) | CPU if unset |
+| `-uncertainty` | Save uncertainty maps | `False` |
+| `--gpu` | GPU list (e.g. `0` or `0,1`) | CPU if unset |
 | `--cpu` | Number of CPU cores (if no GPU) | `1` |
 | `-q`, `--quiet` | Suppress console output | `False` |
 
 ### Example
 
 ```bash
-impact-synth-konfai -i patient01.nii.gz -o sCT_patient01.nii.gz --gpu 0 --tta 2 --ensemble 5 --uncertainty
+impact-synth-konfai CBCT -i patient01.nii.gz -o patient01 --gpu 0 --tta 2 --ensemble 5 -uncertainty
 ```
 
 ---
@@ -73,7 +75,7 @@ impact-synth-konfai -i patient01.nii.gz -o sCT_patient01.nii.gz --gpu 0 --tta 2 
 - ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
 - 🤗 **Automatic model download** from Hugging Face
 - 🧩 **Multi-model ensembling** and **test-time augmentation (TTA)**
-- 🧠 **Handles uncertainty estimation** 
+- 🧠 **Supports evaluation workflows with reference data, and uncertainty estimation without reference**
 - 🧾 **Multi-format compatibility:** supports all major medical image formats handled by ITK
 
 ---
@@ -94,7 +96,6 @@ If you use **IMPACT-Synth-KonfAI** in your work, please cite:
 
 ## 🔗 Links
 
-- 🧠 **KonfAI Framework:** [github.com/vboussot/KonfAI](https://github.com/vboussot/KonfAI)  
 - 🤗 **Model Hub:** [huggingface.co/VBoussot/IMPACT-Synth](https://huggingface.co/VBoussot/ImpactSynth)  
 - 📦 **PyPI Package:** [pypi.org/project/impact_synth_konfai](https://pypi.org/project/impact_synth_konfai)  
 
