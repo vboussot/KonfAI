@@ -156,7 +156,12 @@ def main_apps():
     # -----------------
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
     add_common_args(infer_p)
-    infer_p.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble")
+    group = infer_p.add_mutually_exclusive_group()
+    group.add_argument("--ensemble", type=int, default=0, help="Number of models in the ensemble (auto-select).")
+    group.add_argument(
+        "--ensemble_models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use."
+    )
+
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
     infer_p.add_argument("--mc_dropout", type=int, default=0, help="Monte Carlo dropout samples")
     infer_p.add_argument(
@@ -208,7 +213,11 @@ def main_apps():
 
     pipe_p.add_argument("--mc_dropout", type=int, default=0, help="Number of Monte Carlo dropout samples.")
     pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
-    pipe_p.add_argument("--ensemble", type=int, default=0, help="Number of models in ensemble.")
+    group = pipe_p.add_mutually_exclusive_group()
+    group.add_argument("--ensemble", type=int, default=0, help="Number of models in the ensemble (auto-select).")
+    group.add_argument(
+        "--ensemble_models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use."
+    )
     pipe_p.add_argument(
         "--prediction_file", type=str, default="Prediction.yml", help="Optional prediction config filename"
     )
@@ -298,7 +307,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
             type=int,
             nargs="+",
             choices=devices,
-            default=devices[0] if len(devices) else [],
+            default=[devices[0]] if len(devices) else [],
             help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
         )
 

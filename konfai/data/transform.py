@@ -785,7 +785,7 @@ class KonfAIInference(Transform):
         self,
         repo_id: str = "VBoussot/MRSegmentator-KonfAI",
         model_name: str = "MRSegmentator",
-        number_of_ensemble: int = 0,
+        checkpoints_name: list[str] = ["fold_0"],
         number_of_tta: int = 0,
         number_of_mc_dropout: int = 0,
         per_channel: bool = False,
@@ -793,7 +793,7 @@ class KonfAIInference(Transform):
         super().__init__()
         self.repo_id = repo_id
         self.model_name = model_name
-        self.number_of_ensemble = number_of_ensemble
+        self.checkpoints_name = checkpoints_name
         self.number_of_tta = number_of_tta
         self.number_of_mc_dropout = number_of_mc_dropout
         self.per_channel = per_channel
@@ -805,7 +805,8 @@ class KonfAIInference(Transform):
         konfai_app.infer(
             [[dataset_path]],
             output_path,
-            self.number_of_ensemble,
+            0,
+            self.checkpoints_name,
             self.number_of_tta,
             self.number_of_mc_dropout,
             gpu=gpu,
@@ -877,23 +878,3 @@ class Variance(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
-
-
-class TotalSegmentator(Transform):
-
-    def __init__(self, task: str = "total"):
-        super().__init__()
-        self.task = task
-
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        from totalsegmentator.python_api import totalsegmentator
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            image = data_to_image(tensor.numpy(), cache_attribute)
-            sitk.WriteImage(image, tmpdir + "/image.nii.gz")
-            seg = totalsegmentator(tmpdir + "/image.nii.gz", tmpdir, task=self.task, skip_saving=True, quiet=True)
-        return (
-            torch.from_numpy(np.array(np.asanyarray(seg.dataobj), copy=True).astype(np.uint8, copy=False))
-            .permute(2, 1, 0)
-            .unsqueeze(0)
-        )

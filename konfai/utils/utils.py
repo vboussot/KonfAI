@@ -572,48 +572,42 @@ def run_distributed_app(
         torch.autograd.set_detect_anomaly(True)
         os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
         os.environ["KONFAI_VERBOSE"] = str(not bound.arguments.get("quiet"))
+        is_cluster = "resubmit" in kwargs
+        if is_cluster:
+            os.environ["KONFAI_OVERWRITE"] = "True"
+            os.environ["KONFAI_CLUSTER"] = "True"
         try:
             with func(*args, **kwargs_fun) as distributed_object:
                 with Log(distributed_object.name, 0):
-                    world_size = len(gpu)
-                    if world_size == 0:
-                        world_size = cpu
-                    distributed_object.setup(world_size)
-                    with TensorBoard(distributed_object.name):
-                        if world_size > 1:
-                            mp.spawn(distributed_object, nprocs=world_size)
-                        else:
-                            distributed_object(0)
+                    if is_cluster:
+                        distributed_object.setup(len(gpu) * kwargs["num_nodes"])
+                        import submitit
+
+                        executor = submitit.AutoExecutor(folder="./Cluster/")
+                        executor.update_parameters(
+                            name=kwargs["name"],
+                            mem_gb=kwargs["memory"],
+                            gpus_per_node=len(gpu),
+                            tasks_per_node=len(gpu) // distributed_object.size,
+                            cpus_per_task=1,
+                            nodes=kwargs["num_nodes"],
+                            timeout_min=kwargs["time_limit"],
+                        )
+                        with TensorBoard(distributed_object.name):
+                            executor.submit(distributed_object)
+                    else:
+                        world_size = len(gpu)
+                        if world_size == 0:
+                            world_size = cpu
+                        distributed_object.setup(world_size)
+                        with TensorBoard(distributed_object.name):
+                            if world_size > 1:
+                                mp.spawn(distributed_object, nprocs=world_size)
+                            else:
+                                distributed_object(0)
 
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
-        """
-         try:
-            with setup(parser) as distributed_object:
-                args = parser.parse_args()
-                config = vars(args)
-                os.environ["KONFAI_OVERWRITE"] = "True"
-                os.environ["KONFAI_CLUSTER"] = "True"
-
-                n_gpu = len(config["gpu"].split(","))
-                distributed_object.setup(n_gpu * int(config["num_nodes"]))
-                import submitit
-
-                executor = submitit.AutoExecutor(folder="./Cluster/")
-                executor.update_parameters(
-                    name=config["name"],
-                    mem_gb=config["memory"],
-                    gpus_per_node=n_gpu,
-                    tasks_per_node=n_gpu // distributed_object.size,
-                    cpus_per_task=1,
-                    nodes=config["num_nodes"],
-                    timeout_min=config["time_limit"],
-                )
-                with TensorBoard(distributed_object.name):
-                    executor.submit(distributed_object)
-        except KeyboardInterrupt:
-            print("\n[KonfAI] Manual interruption (Ctrl+C)")
-        """
 
     return wrapper
 
@@ -807,16 +801,22 @@ SUPPORTED_EXTENSIONS = [
 
 
 class KonfAIError(Exception):
-    def __init__(self, *args: str) -> None:
-        super().__init__(*args)
+    TYPE: str | None = None
 
     def __str__(self) -> str:
         if not self.args:
             return "\n[Error]"
-        type_error = str(self.args[0])
-        messages = [str(m) for m in self.args[1:]]
+
+        if isinstance(getattr(self, "TYPE", None), str) and self.TYPE:
+            type_error = self.TYPE
+            messages = [str(m) for m in self.args]
+        else:
+            type_error = str(self.args[0])
+            messages = [str(m) for m in self.args[1:]]
+
         if not messages:
             return f"\n[{type_error}]"
+
         head = f"[{type_error}] {messages[0]}"
         if len(messages) == 1:
             return "\n" + head
@@ -825,10 +825,6 @@ class KonfAIError(Exception):
 
 class NamedKonfAIError(KonfAIError):
     TYPE: str = "Error"
-
-    @classmethod
-    def make(cls, *messages: str) -> "NamedKonfAIError":
-        return cls(cls.TYPE, *messages)
 
 
 class EvaluatorError(NamedKonfAIError):
@@ -893,56 +889,51 @@ def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
     return model_names
 
 
-def is_model_directory(model_path: Path) -> tuple[bool, str, int]:
-    fold_names = []
+def is_model_directory(model_path: Path) -> tuple[bool, str, list[str]]:
+    checkpoints_name = []
     found_metadata_file = False
     for filename in model_path.glob("*"):
-        if str(filename).endswith(".pt"):
-            fold_names.append(filename)
+        if filename.name.endswith(".pt"):
+            checkpoints_name.append(filename.name)
         elif str(filename).endswith("app.json"):
             found_metadata_file = True
 
-    # if len(fold_names) == 0:
-    #    return False, f"No '.pt' model files were found in '{model_path}'.", 0
-
-    # if not found_prediction_file:
-    #    return False, f"Missing 'Prediction.yml' in '{model_path}'.", 0
-
     if not found_metadata_file:
-        return False, f"Missing 'app.json' in '{model_path}'.", 0
-    return True, "", len(fold_names)
+        return False, f"Missing 'app.json' in '{model_path}'.", []
+    return True, "", checkpoints_name
 
 
-def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, int]:
+def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, list[str]]:
     """
     Check whether the Hugging Face repository structure is valid for KonfAI.
     Required files:
     - a app file
     """
     api = HfApi()
-    fold_names = []
+    checkpoints_name = []
     found_metadata_file = False
 
     try:
         tree = api.list_repo_tree(repo_id=repo_id, path_in_repo=model_name)
     except Exception as e:
-        return False, f"Unable to access repository '{repo_id}': {e}", 0
+        return False, f"Unable to access repository '{repo_id}': {e}", []
 
     for filename in tree:
         if filename.path.endswith(".pt"):
-            fold_names.append(filename.path)
+            checkpoints_name.append(Path(filename.path).name)
         elif filename.path.endswith("app.json"):
             found_metadata_file = True
 
     if not found_metadata_file:
-        return False, f"Missing 'app.json' in '{repo_id}/{model_name}'.", 0
-    return True, "", len(fold_names)
+        return False, f"Missing 'app.json' in '{repo_id}/{model_name}'.", []
+    return True, "", checkpoints_name
 
 
 class ModelLoad(ABC):
 
-    def __init__(self, model_name: str, number_of_models: int) -> None:
-        self._number_of_models = number_of_models
+    def __init__(self, model_name: str, checkpoints_name: list[str]) -> None:
+        self._number_of_models = len(checkpoints_name)
+        self._checkpoints_name = checkpoints_name
         self._model_name = model_name
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
         metadata_file_path = self._download("app.json")
@@ -967,6 +958,12 @@ class ModelLoad(ABC):
             raise AppMetadataError("The field 'mc_dropout' must be an integer.")
 
         self._display_name = str(model_metadata["display_name"])
+        self._terminology = {}
+        if "terminology" in model_metadata:
+            self._terminology = {int(k): v for k, v in model_metadata["terminology"].items()}
+
+    def get_checkpoints_name(self):
+        return self._checkpoints_name
 
     def get_display_name(self):
         return self._display_name
@@ -976,6 +973,9 @@ class ModelLoad(ABC):
 
     def get_mc_dropout(self):
         return self._mc_dropout
+
+    def get_terminology(self):
+        return self._terminology
 
     def get_number_of_models(self):
         return self._number_of_models
@@ -1026,17 +1026,28 @@ class ModelLoad(ABC):
                 uncertainty_support = True
         return evaluation_support, uncertainty_support
 
-    def download_inference(self, number_of_model: int, prediction_file: str) -> tuple[list[Path], Path, list[Path]]:
+    def download_inference(
+        self, number_of_model: int, name_of_models: list[str], prediction_file: str
+    ) -> tuple[list[Path], Path, list[Path]]:
         filenames = self._get_filenames()
         models_path = []
         codes_path = []
         i = 0
+        inference_file_path = None
+        filename_filter = [prediction_file, "requirements.txt", "app.json"] + [
+            name if name.endswith(".pt") else name + ".pt" for name in name_of_models
+        ]
+        available_models = []
         for filename in filenames:
             if filename.endswith(".pt"):
-                i += 1
-                if i > number_of_model:
+                available_models.append(filename)
+            if filename not in filename_filter and not filename.endswith(".py"):
+                if not len(name_of_models) and filename.endswith(".pt"):
+                    i += 1
+                    if i > number_of_model:
+                        continue
+                else:
                     continue
-
             file_path = self._download(filename)
 
             if prediction_file in filename:
@@ -1077,6 +1088,12 @@ class ModelLoad(ABC):
             raise AppError(
                 f"Prediction file '{prediction_file}' was not found in the remote archive. "
                 f"Available files: {', '.join(filenames)}"
+            )
+        if len(models_path) == 0:
+            raise AppError(
+                f"No model was found matching the requested model name(s): {name_of_models}.",
+                f"Available models: {available_models}.",
+                "Please check that the checkpoint exists.",
             )
         return models_path, inference_file_path, codes_path
 
@@ -1123,20 +1140,16 @@ class ModelLoad(ABC):
         self,
         number_of_augmentation: int,
         number_of_model: int,
+        name_of_models: list[str],
         number_of_mc_dropout: int,
         prediction_file: str,
     ) -> list[Path]:
-        if not number_of_model:
+        if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = self._number_of_models
-        else:
-            try:
-                number_of_model = int(number_of_model)
-            except ValueError:
-                raise AppError(
-                    f"Invalid value provided for '--MODEL': '{number_of_model}'. ",
-                    "The value must be an integer (e.g. 1, 2, 3).",
-                )
-        models_path, inference_file_path, codes_path = self.download_inference(number_of_model, prediction_file)
+
+        models_path, inference_file_path, codes_path = self.download_inference(
+            number_of_model, name_of_models, prediction_file
+        )
         shutil.copy2(inference_file_path, prediction_file)
         self.set_number_of_augmentation(prediction_file, number_of_augmentation)
         for code_path in codes_path:
@@ -1232,15 +1245,16 @@ class ModelLoad(ABC):
                 shutil.copy2(src, dest)
 
         metadata_file = path / "app.json"
+        config_file_path = path / config_file
         if not metadata_file.exists():
             raise ConfigError(
                 f"Metadata file not found: '{metadata_file}'.",
                 "Ensure the metadata file exists and the provided path is correct.",
             )
 
-        if not Path(config_file).exists():
+        if not Path(config_file_path).exists():
             raise ConfigError(
-                f"Configuration file not found: '{config_file}'.",
+                f"Configuration file not found: '{config_file_path}'.",
                 "Ensure the configuration file exists and the provided path is correct.",
             )
 
@@ -1256,12 +1270,12 @@ class ModelLoad(ABC):
             json.dump(model_metadata, f, indent=2, ensure_ascii=False)
 
         yaml = YAML()
-        with open(config_file) as f:
+        with open(config_file_path) as f:
             data = yaml.load(f)
             data["Trainer"]["epochs"] = epochs
             data["Trainer"]["it_validation"] = it_validation
 
-        with open(config_file, "w") as f:
+        with open(config_file_path, "w") as f:
             yaml.dump(data, f)
 
         return models_path
@@ -1271,12 +1285,12 @@ class ModelDirectory(ModelLoad):
 
     def __init__(self, model_directory: Path, model_name: str):
         self._model_directory = model_directory
-        _, err_message, number_of_models = is_model_directory(model_directory / model_name)
+        _, err_message, checkpoints_name = is_model_directory(model_directory / model_name)
 
         if err_message:
             raise AppDirectoryError(err_message)
 
-        super().__init__(model_name, number_of_models)
+        super().__init__(model_name, checkpoints_name)
 
     def _get_filenames(self) -> list[str]:
         return [filename.name for filename in (self._model_directory / self._model_name).glob("*")]
@@ -1292,16 +1306,16 @@ class ModelHF(ModelLoad):
 
     def __init__(self, repo_id: str, model_name: str):
         self._repo_id, self.model_name = repo_id, model_name
-        _, err_message, number_of_models = is_model_repo(self._repo_id, self.model_name)
+        _, err_message, checkpoints_name = is_model_repo(self._repo_id, self.model_name)
         if err_message:
             raise AppRepositoryHFError(err_message)
 
-        super().__init__(self.model_name, number_of_models)
+        super().__init__(self.model_name, checkpoints_name)
 
     def _get_filenames(self) -> list[str]:
         api = HfApi()
         tree = api.list_repo_tree(repo_id=self._repo_id, path_in_repo=self.model_name)
-        return [filename.path for filename in tree]
+        return [Path(filename.path).name for filename in tree]
 
     def _download(self, filename: str) -> Path:
         if not filename.startswith(self._model_name):
