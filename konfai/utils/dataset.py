@@ -1,6 +1,7 @@
 import ast
 import copy
 import csv
+import glob
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -13,6 +14,7 @@ import torch
 from lxml import etree  # nosec B410
 
 from konfai import current_date
+from konfai.utils.utils import SUPPORTED_EXTENSIONS
 
 
 class Attribute(dict[str, Any]):
@@ -343,11 +345,7 @@ class Dataset:
 
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             attributes = Attribute()
-            if os.path.exists(f"{self.filename}{name}.{self.file_format}"):
-                image = sitk.ReadImage(f"{self.filename}{name}.{self.file_format}")
-                data, attributes_tmp = image_to_data(image)
-                attributes.update(attributes_tmp)
-            elif os.path.exists(f"{self.filename}{name}.itk.txt"):
+            if os.path.exists(f"{self.filename}{name}.itk.txt"):
                 data = sitk.ReadTransform(f"{self.filename}{name}.itk.txt")
                 transforms = []
                 if isinstance(data, sitk.CompositeTransform):
@@ -394,6 +392,14 @@ class Dataset:
                 data = np.asarray(data)
             elif os.path.exists(f"{self.filename}{name}.npy"):
                 data = np.load(f"{self.filename}{name}.npy")
+            else:
+                pattern = f"{self.filename}{name}.*"
+                matches = glob.glob(pattern)
+                if matches:
+                    path = matches[0]
+                    image = sitk.ReadImage(path)
+                    data, attributes_tmp = image_to_data(image)
+                    attributes.update(attributes_tmp)
             return data, attributes
 
         def is_vtk_polydata(self, obj):
@@ -490,12 +496,8 @@ class Dataset:
                 np.save(f"{self.filename}{name}.npy", data)
 
         def is_exist(self, group: str, name: str | None = None) -> bool:
-            return (
-                os.path.exists(f"{self.filename}{group}.{self.file_format}")
-                or os.path.exists(f"{self.filename}{group}.itk.txt")
-                or os.path.exists(f"{self.filename}{group}.fcsv")
-                or os.path.exists(f"{self.filename}{group}.npy")
-            )
+            base = f"{self.filename}{group}"
+            return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
 
         def get_names(self, group: str) -> list[str]:
             raise NotImplementedError()

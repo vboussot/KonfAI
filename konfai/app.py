@@ -114,7 +114,8 @@ class KonfAIApp:
             shutil.rmtree(dataset_path)
         for i, input_path in enumerate(inputs):
             for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
-                KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{file.suffix}")
+                suffix = "".join(file.suffixes)
+                KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
         dataset_path = Path("./Dataset/")
@@ -127,7 +128,8 @@ class KonfAIApp:
                 reader.ReadImageInformation()
                 n_channels = reader.GetNumberOfComponents()
                 if n_channels > 1:
-                    KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{file.suffix}")
+                    suffix = "".join(file.suffixes)
+                    KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
                 else:
                     raise FileNotFoundError(
                         "Invalid input volume for inference: a multi-channel volume stack is required, "
@@ -137,7 +139,8 @@ class KonfAIApp:
     def _write_gt_to_dataset(self, gt: list[list[Path]]) -> None:
         for i, gt_path in enumerate(gt):
             for idx, file in enumerate(KonfAIApp._list_supported_files(gt_path)):
-                KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Reference_{i}{file.suffix}"))
+                suffix = "".join(file.suffixes)
+                KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Reference_{i}{suffix}"))
 
     def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
         if mask is None:
@@ -149,7 +152,8 @@ class KonfAIApp:
         else:
             for i, mask_path in enumerate(mask):
                 for idx, file in enumerate(KonfAIApp._list_supported_files(mask_path)):
-                    KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Mask_{i}{file.suffix}"))
+                    suffix = "".join(file.suffixes)
+                    KonfAIApp.symlink(file, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
 
     @run_distributed_app
     def infer(
@@ -157,6 +161,7 @@ class KonfAIApp:
         inputs: list[list[Path]],
         output: Path = Path("./Output/").resolve(),
         ensemble: int = 0,
+        ensemble_models: list[str] = [],
         tta: int = 0,
         mc_dropout: int = 0,
         prediction_file: str = "Prediction.yml",
@@ -166,7 +171,7 @@ class KonfAIApp:
         tmp_dir: Path = Path(tempfile.mkdtemp(prefix="konfai_app_")),
     ) -> None:
         self._write_inputs_to_dataset(inputs)
-        models_path = self.model.install_inference(tta, ensemble, mc_dropout, prediction_file)
+        models_path = self.model.install_inference(tta, ensemble, ensemble_models, mc_dropout, prediction_file)
         from konfai.predictor import predict
 
         predict(models_path, True, gpu, cpu, quiet, False, Path(prediction_file).resolve())
@@ -222,6 +227,7 @@ class KonfAIApp:
         gt: list[list[Path]] | None,
         output: Path = Path("./Output/"),
         ensemble: int = 0,
+        ensemble_models: list[str] = [],
         tta: int = 0,
         mc_dropout: int = 0,
         prediction_file: str = "Prediction.yml",
@@ -234,7 +240,19 @@ class KonfAIApp:
         quiet: bool = False,
         tmp_dir: Path = Path(tempfile.mkdtemp(prefix="konfai_app_")),
     ) -> None:
-        self.infer(inputs, output / "Predictions", ensemble, tta, mc_dropout, prediction_file, gpu, cpu, quiet, tmp_dir)
+        self.infer(
+            inputs,
+            output / "Predictions",
+            ensemble,
+            ensemble_models,
+            tta,
+            mc_dropout,
+            prediction_file,
+            gpu,
+            cpu,
+            quiet,
+            tmp_dir,
+        )
         outputs = []
         inference_stacks = []
         for f in (output / "Predictions").rglob("*"):
