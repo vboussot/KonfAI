@@ -124,7 +124,7 @@ class KonfAIApp:
         for i, input_path in enumerate(inputs):
             for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
                 reader = sitk.ImageFileReader()
-                reader.SetFileName(file)
+                reader.SetFileName(str(file))
                 reader.ReadImageInformation()
                 n_channels = reader.GetNumberOfComponents()
                 if n_channels > 1:

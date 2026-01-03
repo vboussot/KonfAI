@@ -15,7 +15,7 @@ authors = [
 ]
 
 dependencies = [
-"konfai==1.4.6",
+"konfai==1.4.7",
 ]
 
 [project.urls]
