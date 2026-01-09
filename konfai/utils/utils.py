@@ -1089,7 +1089,7 @@ class ModelLoad(ABC):
                 f"Prediction file '{prediction_file}' was not found in the remote archive. "
                 f"Available files: {', '.join(filenames)}"
             )
-        if len(models_path) == 0:
+        if len(name_of_models) > 0 and len(models_path) == 0:
             raise AppError(
                 f"No model was found matching the requested model name(s): {name_of_models}.",
                 f"Available models: {available_models}.",
