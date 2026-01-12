@@ -56,7 +56,7 @@ impact-synth-konfai MR -i path/to/input.nii.gz -o ./Output/
 | `--mask` | Path to region-of-interest mask used for evaluation and uncertainty analysis | *unset* |
 | `--tta` | Number of test-time augmentations (TTA) | `2` |
 | `--ensemble` | Number of models to ensemble | `5` |
-| `--mc_dropout` | Monte Carlo dropout samples for uncertainty | `1` |
+| `--mc` | Monte Carlo dropout samples for uncertainty | `1` |
 | `-uncertainty` | Save uncertainty maps | `False` |
 | `--gpu` | GPU list (e.g. `0` or `0,1`) | CPU if unset |
 | `--cpu` | Number of CPU cores (if no GPU) | `1` |

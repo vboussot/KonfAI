@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from abc import ABC, abstractmethod
 
@@ -578,7 +594,7 @@ class Elastix(DataAugmentation):
         return new_locs
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
-        print(f"Compute Displacement Field for index {index}")
+        print(f"[KonfAI] Compute Displacement Field for index {index}")
         self.displacement_fields[index] = []
         self.displacement_fields_true[index] = []
         for i, (shape, cache_attribute) in enumerate(zip(shapes, caches_attribute)):
@@ -624,7 +640,7 @@ class Elastix(DataAugmentation):
             self.displacement_fields_true[index].append(displacement)
             new_locs = grid + torch.unsqueeze(torch.from_numpy(displacement), 0).type(torch.float32)
             self.displacement_fields[index].append(Elastix._format_loc(new_locs, shape))
-            print(f"Compute in progress : {(i + 1) / len(shapes) * 100:.2f} %")
+            print(f"[KonfAI] Compute in progress : {(i + 1) / len(shapes) * 100:.2f} %")
         return shapes
 
     def _compute(

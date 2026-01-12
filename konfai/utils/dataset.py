@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 import copy
 import csv
@@ -133,7 +149,7 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     return size, attributes
 
 
-def read_landmarks(filename: str) -> np.ndarray | None:
+def read_landmarks(filename: Path) -> np.ndarray | None:
     data = None
     with open(filename, newline="") as csvfile:
         reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
@@ -143,6 +159,29 @@ def read_landmarks(filename: str) -> np.ndarray | None:
             data[i] = np.array(row[1:4], dtype=np.double)
         csvfile.close()
     return data
+
+
+def write_landmarks(data: np.ndarray, filename: Path) -> None:
+    with open(filename, "w") as f:
+        f.write(
+            "# Markups fiducial file version = 4.6\n# CoordinateSystem = 0\n#"
+            " columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n",
+        )
+        for i in range(data.shape[0]):
+            f.write(
+                "vtkMRMLMarkupsFiducialNode_"
+                + str(i + 1)
+                + ","
+                + str(data[i, 0])
+                + ","
+                + str(data[i, 1])
+                + ","
+                + str(data[i, 2])
+                + ",0,0,0,1,1,1,0,F-"
+                + str(i + 1)
+                + ",,vtkMRMLScalarVolumeNode1\n"
+            )
+        f.close()
 
 
 class Dataset:
@@ -372,7 +411,7 @@ class Dataset:
 
                 data = np.asarray(padded_datas)
             elif os.path.exists(f"{self.filename}{name}.fcsv"):
-                data = read_landmarks(f"{self.filename}{name}.fcsv")
+                data = read_landmarks(Path(f"{self.filename}{name}.fcsv"))
             elif os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
                     result = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
@@ -444,26 +483,7 @@ class Dataset:
                 self.data_to_file(name, data_to_image(data, attributes), attributes)
             elif len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0:
                 data = np.round(data, 4)
-                with open(f"{self.filename}{name}.fcsv", "w") as f:
-                    f.write(
-                        "# Markups fiducial file version = 4.6\n# CoordinateSystem = 0\n#"
-                        " columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n",
-                    )
-                    for i in range(data.shape[0]):
-                        f.write(
-                            "vtkMRMLMarkupsFiducialNode_"
-                            + str(i + 1)
-                            + ","
-                            + str(data[i, 0])
-                            + ","
-                            + str(data[i, 1])
-                            + ","
-                            + str(data[i, 2])
-                            + ",0,0,0,1,1,1,0,F-"
-                            + str(i + 1)
-                            + ",,vtkMRMLScalarVolumeNode1\n"
-                        )
-                    f.close()
+                write_landmarks(data, Path(f"{self.filename}{name}.fcsv"))
             elif "path" in attributes:
                 if os.path.exists(f"{self.filename}{name}.xml"):
                     with open(f"{self.filename}{name}.xml", "rb") as xml_file:

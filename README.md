@@ -92,6 +92,7 @@ They can be executed **identically** from:
 | 🖥️ CLI | `konfai-apps infer / eval / uncertainty / pipeline  app name` |
 | 🧠 3D Slicer | Via **SlicerKonfAI** GUI https://github.com/vboussot/SlicerKonfAI |
 | 🐍 Python API | Via `konfai.app.KonfAIApp` |
+| 🌐 Remote Server (client/server mode) |
 
 ---
 
@@ -114,7 +115,7 @@ Example `app.json`:
     "short_description": "Segmentation of lung lobes on CBCT scans.",
     "description": "This App synthesizes CT-like contrast from CBCT then segments lung lobes.",
     "tta": 4,
-    "mc_dropout": 0
+    "mc": 0
 }
 ```
 
@@ -146,6 +147,10 @@ Fine-tuning:
 ```bash
 konfai-apps fine-tune my_app name -d ./Dataset --epochs 20
 ```
+
+The very same commands can be executed on a remote KonfAI Apps server by adding
+--host, --port, and --token. This allows heavy workloads to run on shared GPU
+machines while keeping a lightweight local client.
 
 More detailed documentation and usage examples for each app are available in the corresponding subdirectories of the `apps/` folder.
 

@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import importlib.util
 import inspect
 import itertools
@@ -25,7 +41,7 @@ import requests
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from packaging.requirements import Requirement
 from ruamel.yaml import YAML
@@ -34,6 +50,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
 
 from konfai import (
+    RemoteServer,
     cuda_visible_devices,
     evaluations_directory,
     konfai_state,
@@ -73,9 +90,12 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
         model_ema_loss_desc = loss_desc(model_ema)
         if len(model_ema_loss_desc) > 2:
             result += f"Loss EMA {model_ema_loss_desc} "
-    result += gpu_info()
+    gpu_str = gpu_info()
+    result += gpu_str
+    if gpu_str:
+        result += " | "
     if show_memory:
-        result += f" | {get_memory_info()}"
+        result += get_memory_info()
     return result
 
 
@@ -447,7 +467,7 @@ class TensorBoard:
                 ip = "127.0.0.1"
             finally:
                 s.close()
-            print(f"Tensorboard : http://{ip}:{os.environ['KONFAI_TENSORBOARD_PORT']}/")
+            print(f"[KonfAI] Tensorboard : http://{ip}:{os.environ['KONFAI_TENSORBOARD_PORT']}/")
         return self
 
     def __exit__(self, exc_type, value, traceback):
@@ -749,7 +769,7 @@ def download_url(model_name: str, url: str) -> str:
         return str(file)
 
     try:
-        print(f"[FOCUS] Downloading {model_name} to {file}")
+        print(f"Downloading {model_name} to {file}")
         with requests.get(url + model_name, stream=True, timeout=10) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0))
@@ -859,12 +879,8 @@ class TransformError(NamedKonfAIError):
     TYPE = "Transform"
 
 
-class AppRepositoryHFError(NamedKonfAIError):
-    TYPE = "Repo Hugging Face"
-
-
-class AppDirectoryError(NamedKonfAIError):
-    TYPE = "Model Directory"
+class AppRepositoryError(NamedKonfAIError):
+    TYPE = "App repository"
 
 
 class AppError(NamedKonfAIError):
@@ -875,116 +891,190 @@ class AppMetadataError(NamedKonfAIError):
     TYPE = "Model metadata"
 
 
-def get_available_models_on_hf_repo(repo_id: str) -> list[str]:
+class KonfAIAppClientError(NamedKonfAIError):
+    TYPE = "KonfAI App client"
+
+
+def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str]:
+    r = requests.get(
+        f"{remote_server.get_url()}/repo_apps_list", headers=remote_server.get_headers(), timeout=remote_server.timeout
+    )
+    r.raise_for_status()
+
+    data = r.json()
+    apps = data.get("apps")
+
+    if not isinstance(apps, list):
+        raise ValueError("Invalid response from remote server: expected 'apps' list.")
+
+    return [str(a) for a in apps]
+
+
+def get_available_apps_on_hf_repo(repo_id: str) -> list[str]:
     api = HfApi()
-    model_names = []
+    app_names: list[str] = []
+
     try:
         tree = api.list_repo_tree(repo_id=repo_id)
         for entry in tree:
-            model_name = entry.path
-            if isinstance(entry, RepoFolder) and is_model_repo(repo_id, model_name)[0]:
-                model_names.append(model_name)
-    except Exception as e:
-        raise AppRepositoryHFError(f"Unable to access repository '{repo_id}': {e}")
-    return model_names
+            app_name = Path(entry.path).name
+            if (
+                isinstance(entry, RepoFolder)
+                and is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name))[0]
+            ):
+                app_names.append(app_name)
+    except Exception:
+        print(f"[KonfAI-Apps] Unable to access the online repository {repo_id}, falling back to the local cache.")
+
+        try:
+            snapshot_dir = snapshot_download(
+                repo_id=repo_id,
+                repo_type="model",
+                local_files_only=True,
+                revision="main",
+            )  # nosec B615
+        except Exception as e2:
+            raise AppRepositoryError(f"Unable to access repository '{repo_id}' (online and offline): {e2}")
+
+        root = Path(snapshot_dir)
+        for p in root.iterdir():
+            if p.is_dir():
+                app_name = p.name
+                if is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name))[0]:
+                    app_names.append(app_name)
+
+    return app_names
 
 
-def is_model_directory(model_path: Path) -> tuple[bool, str, list[str]]:
-    checkpoints_name = []
-    found_metadata_file = False
-    for filename in model_path.glob("*"):
-        if filename.name.endswith(".pt"):
-            checkpoints_name.append(filename.name)
-        elif str(filename).endswith("app.json"):
-            found_metadata_file = True
-
-    if not found_metadata_file:
-        return False, f"Missing 'app.json' in '{model_path}'.", []
-    return True, "", checkpoints_name
-
-
-def is_model_repo(repo_id: str, model_name: str) -> tuple[bool, str, list[str]]:
+def is_app_repo(filenames: list[str]) -> tuple[bool, str, list[str]]:
     """
     Check whether the Hugging Face repository structure is valid for KonfAI.
     Required files:
     - a app file
     """
-    api = HfApi()
     checkpoints_name = []
     found_metadata_file = False
 
-    try:
-        tree = api.list_repo_tree(repo_id=repo_id, path_in_repo=model_name)
-    except Exception as e:
-        return False, f"Unable to access repository '{repo_id}': {e}", []
-
-    for filename in tree:
-        if filename.path.endswith(".pt"):
-            checkpoints_name.append(Path(filename.path).name)
-        elif filename.path.endswith("app.json"):
+    for filename in filenames:
+        if filename.endswith(".pt"):
+            checkpoints_name.append(filename)
+        elif filename.endswith("app.json"):
             found_metadata_file = True
 
     if not found_metadata_file:
-        return False, f"Missing 'app.json' in '{repo_id}/{model_name}'.", []
+        return False, "Missing 'app.json' in apps.", []
     return True, "", checkpoints_name
 
 
-class ModelLoad(ABC):
+class AppRepositoryInfo(ABC):
+    def __init__(
+        self,
+        app_name: str,
+        checkpoints_name: list[str],
+        display_name: str,
+        maximum_tta: int = 1,
+        mc_dropout: int = 0,
+        terminology: dict[int, str] | None = None,
+        number_of_models: int | None = None,
+        description: str = "",
+        short_description: str = "",
+    ) -> None:
+        super().__init__()
 
-    def __init__(self, model_name: str, checkpoints_name: list[str]) -> None:
-        self._number_of_models = len(checkpoints_name)
+        self._app_name = app_name
         self._checkpoints_name = checkpoints_name
-        self._model_name = model_name
+        self._display_name = display_name
+        self._maximum_tta = maximum_tta
+        self._mc_dropout = mc_dropout
+        self._terminology = terminology
+        self._number_of_models = number_of_models if number_of_models is not None else len(checkpoints_name)
+        self._description = description
+        self._short_description = short_description
+
+    def get_checkpoints_name(self) -> list[str]:
+        return self._checkpoints_name
+
+    def get_display_name(self) -> str:
+        return self._display_name
+
+    def get_maximum_tta(self) -> int:
+        return self._maximum_tta
+
+    def get_mc_dropout(self) -> int:
+        return self._mc_dropout
+
+    def get_terminology(self) -> dict[int, str] | None:
+        return self._terminology
+
+    def get_number_of_models(self) -> int:
+        return self._number_of_models
+
+    def get_description(self) -> str:
+        return self._description
+
+    def get_short_description(self) -> str:
+        return self._short_description
+
+    @abstractmethod
+    def has_capabilities(self) -> tuple[bool, bool, bool]:
+        pass
+
+    @abstractmethod
+    def get_name(self) -> str:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def download_config_file(self) -> list[Path]:
+        raise NotImplementedError()
+
+
+class LocalAppRepository(AppRepositoryInfo):
+
+    def __init__(self, app_name: str) -> None:
+        self._app_name = app_name
+        _, err_message, checkpoints_name = is_app_repo(self._get_filenames())
+        if err_message:
+            raise AppRepositoryError(err_message)
+
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
         metadata_file_path = self._download("app.json")
         with open(metadata_file_path, encoding="utf-8") as f:
-            model_metadata = json.load(f)
+            app_repository_metadata = json.load(f)
 
-        missing = [k for k in required_keys if k not in model_metadata]
+        missing = [k for k in required_keys if k not in app_repository_metadata]
         if missing:
             raise AppMetadataError(f"Missing keys in app.json: {', '.join(missing)}")
 
-        self._description = str(model_metadata["description"])
-        self._short_description = str(model_metadata["short_description"])
+        description = str(app_repository_metadata["description"])
+        short_description = str(app_repository_metadata["short_description"])
 
         try:
-            self._maximum_tta = int(model_metadata["tta"])
+            maximum_tta = int(app_repository_metadata["tta"])
         except Exception:
             raise AppMetadataError("The field 'tta' must be an integer.")
 
         try:
-            self._mc_dropout = int(model_metadata["mc_dropout"])
+            mc_dropout = int(app_repository_metadata["mc_dropout"])
         except Exception:
             raise AppMetadataError("The field 'mc_dropout' must be an integer.")
 
-        self._display_name = str(model_metadata["display_name"])
-        self._terminology = {}
-        if "terminology" in model_metadata:
-            self._terminology = {int(k): v for k, v in model_metadata["terminology"].items()}
+        display_name = str(app_repository_metadata["display_name"])
 
-    def get_checkpoints_name(self):
-        return self._checkpoints_name
+        terminology: dict[int, str] | None = None
+        if "terminology" in app_repository_metadata:
+            terminology = {int(k): v for k, v in app_repository_metadata["terminology"].items()}
 
-    def get_display_name(self):
-        return self._display_name
-
-    def get_maximum_tta(self):
-        return self._maximum_tta
-
-    def get_mc_dropout(self):
-        return self._mc_dropout
-
-    def get_terminology(self):
-        return self._terminology
-
-    def get_number_of_models(self):
-        return self._number_of_models
-
-    def get_description(self):
-        return self._description
-
-    def get_short_description(self):
-        return self._short_description
+        super().__init__(
+            app_name=app_name,
+            checkpoints_name=checkpoints_name,
+            display_name=display_name,
+            maximum_tta=maximum_tta,
+            mc_dropout=mc_dropout,
+            terminology=terminology,
+            number_of_models=len(checkpoints_name),
+            description=description,
+            short_description=short_description,
+        )
 
     def set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
@@ -1003,19 +1093,16 @@ class ModelLoad(ABC):
             yaml.dump(data, f)
 
     @abstractmethod
-    def _get_filenames(self):
+    def _get_filenames(self) -> list[str]:
         raise NotImplementedError()
 
     @abstractmethod
     def _download(self, filename: str) -> Path:
         raise NotImplementedError()
 
-    @abstractmethod
-    def get_name(self) -> str:
-        raise NotImplementedError()
-
-    def has_capabilities(self) -> tuple[bool, bool]:
+    def has_capabilities(self) -> tuple[bool, bool, bool]:
         filenames = self._get_filenames()
+        inference_support = False
         evaluation_support = False
         uncertainty_support = False
 
@@ -1024,7 +1111,22 @@ class ModelLoad(ABC):
                 evaluation_support = True
             elif filename.endswith("Uncertainty.yml"):
                 uncertainty_support = True
-        return evaluation_support, uncertainty_support
+            elif filename.endswith("Config.yml"):
+                inference_support = True
+        return inference_support, evaluation_support, uncertainty_support
+
+    def download_config_file(self) -> list[Path]:
+        filenames = self._get_filenames()
+        files_path = []
+        for filename in filenames:
+            if (
+                filename.endswith(".py")
+                or filename.endswith(".yml")
+                or filename == "app.json"
+                or filename == "requirements.txt"
+            ):
+                files_path.append(self._download(filename))
+        return files_path
 
     def download_inference(
         self, number_of_model: int, name_of_models: list[str], prediction_file: str
@@ -1081,7 +1183,7 @@ class ModelLoad(ABC):
                                 [sys.executable, "-m", "pip", "install", *missing_or_outdated],  # nosec B603
                             )
                         except subprocess.CalledProcessError as e:
-                            raise AppRepositoryHFError(f"Failed to install packages: {e}") from e
+                            raise AppRepositoryError(f"Failed to install packages: {e}") from e
             elif "app.json" not in filename:
                 codes_path.append(file_path)
         if inference_file_path is None:
@@ -1089,7 +1191,7 @@ class ModelLoad(ABC):
                 f"Prediction file '{prediction_file}' was not found in the remote archive. "
                 f"Available files: {', '.join(filenames)}"
             )
-        if len(name_of_models) > 0 and len(models_path) == 0:
+        if len(models_path) == 0:
             raise AppError(
                 f"No model was found matching the requested model name(s): {name_of_models}.",
                 f"Available models: {available_models}.",
@@ -1173,10 +1275,10 @@ class ModelLoad(ABC):
                 shutil.copy2(code_path, code_path.name)
 
     def install_fine_tune(
-        self, config_file: str, path: Path, display_name: str, epochs: int, it_validation: int | None
+        self, config_file: str, display_name: str, epochs: int, it_validation: int | None
     ) -> list[Path]:
-        path.mkdir(parents=True, exist_ok=True)
         src_paths = self.download_train()
+        path = Path.cwd()
         models_path = []
 
         overwrite_all = None
@@ -1190,7 +1292,7 @@ class ModelLoad(ABC):
                 return overwrite_all
 
             while True:
-                print(f"\nFile already exists: {dest_path}")
+                print(f"KonfAI-Apps] File already exists: {dest_path}")
                 choice = input("Overwrite? [y]es / [n]o / [a]ll / [s]kip_all: ").strip().lower()
 
                 if choice == "y":
@@ -1204,7 +1306,7 @@ class ModelLoad(ABC):
                     overwrite_all = False
                     return False
                 else:
-                    print("Invalid input. Please choose y / n / a / s.")
+                    print("[KonfAI-Apps] Invalid input. Please choose y / n / a / s.")
 
         for src in src_paths:
             if src.is_dir():
@@ -1260,14 +1362,14 @@ class ModelLoad(ABC):
 
         # Load existing metadata
         with open(metadata_file, encoding="utf-8") as f:
-            model_metadata = json.load(f)
+            app_repository_metadata = json.load(f)
 
         # Modify the metadata
-        model_metadata["display_name"] = display_name
+        app_repository_metadata["display_name"] = display_name
 
         # Save back to disk (UTF-8, pretty JSON)
         with open(metadata_file, "w", encoding="utf-8") as f:
-            json.dump(model_metadata, f, indent=2, ensure_ascii=False)
+            json.dump(app_repository_metadata, f, indent=2, ensure_ascii=False)
 
         yaml = YAML()
         with open(config_file_path) as f:
@@ -1281,49 +1383,172 @@ class ModelLoad(ABC):
         return models_path
 
 
-class ModelDirectory(ModelLoad):
+class LocalAppRepositoryFromDirectory(LocalAppRepository):
 
-    def __init__(self, model_directory: Path, model_name: str):
-        self._model_directory = model_directory
-        _, err_message, checkpoints_name = is_model_directory(model_directory / model_name)
+    def __init__(self, app_directory: Path, app_name: str):
+        self._app_directory = app_directory
+        super().__init__(app_name)
 
-        if err_message:
-            raise AppDirectoryError(err_message)
-
-        super().__init__(model_name, checkpoints_name)
+    @staticmethod
+    def get_filenames(app_directory: Path, app_name: str) -> list[str]:
+        return [filename.name for filename in (app_directory / app_name).glob("*")]
 
     def _get_filenames(self) -> list[str]:
-        return [filename.name for filename in (self._model_directory / self._model_name).glob("*")]
+        return LocalAppRepositoryFromDirectory.get_filenames(self._app_directory, self._app_name)
 
     def _download(self, filename: str) -> Path:
-        return self._model_directory / self._model_name / filename
+        return self._app_directory / self._app_name / filename
 
     def get_name(self) -> str:
-        return str(self._model_directory / self._model_name)
+        return str(self._app_directory / self._app_name)
 
 
-class ModelHF(ModelLoad):
+class LocalAppRepositoryFromHF(LocalAppRepository):
 
-    def __init__(self, repo_id: str, model_name: str):
-        self._repo_id, self.model_name = repo_id, model_name
-        _, err_message, checkpoints_name = is_model_repo(self._repo_id, self.model_name)
-        if err_message:
-            raise AppRepositoryHFError(err_message)
+    def __init__(self, repo_id: str, app_name: str):
+        self._repo_id = repo_id
+        super().__init__(app_name)
 
-        super().__init__(self.model_name, checkpoints_name)
+    @staticmethod
+    def get_filenames(repo_id: str, app_name: str) -> list[str]:
+        try:
+            api = HfApi()
+            tree = api.list_repo_tree(repo_id=repo_id, path_in_repo=app_name)
+            return [Path(filename.path).name for filename in tree]
+        except Exception:
+            print(
+                f"[KonfAI-Apps] Unable to access the online repository {repo_id}:{app_name}"
+                " falling back to the local cache."
+            )
+
+            snapshot_dir = snapshot_download(
+                repo_id=repo_id,
+                repo_type="model",
+                local_files_only=True,
+                revision="main",
+            )  # nosec B615
+            folder = Path(snapshot_dir) / app_name
+            if not folder.exists():
+                return []
+            return [p.name for p in folder.iterdir() if p.is_file()]
 
     def _get_filenames(self) -> list[str]:
-        api = HfApi()
-        tree = api.list_repo_tree(repo_id=self._repo_id, path_in_repo=self.model_name)
-        return [Path(filename.path).name for filename in tree]
+        return LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name)
 
     def _download(self, filename: str) -> Path:
-        if not filename.startswith(self._model_name):
-            filename = self._model_name + "/" + filename
-        file_path = hf_hub_download(
-            repo_id=self._repo_id, filename=filename, repo_type="model", revision=None
-        )  # nosec B615
+        if not filename.startswith(self._app_name):
+            filename = self._app_name + "/" + filename
+        try:
+            file_path = hf_hub_download(
+                repo_id=self._repo_id, filename=filename, repo_type="model", revision=None
+            )  # nosec B615
+        except Exception:
+            print(
+                f"[KonfAI-Apps] Cannot reach the online repository "
+                f"'{self._repo_id}:{filename}'. Using the local cache instead."
+            )
+            file_path = hf_hub_download(
+                repo_id=self._repo_id, filename=filename, repo_type="model", revision=None, local_files_only=True
+            )  # nosec B615
         return Path(file_path)
 
     def get_name(self) -> str:
-        return f"{self._repo_id}:{self._model_name}"
+        return f"{self._repo_id}:{self._app_name}"
+
+
+class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
+    def __init__(self, remote_server: RemoteServer, app_name: str) -> None:
+        self._remote_server = remote_server
+        url = f"{remote_server.get_url()}/repo_apps/{app_name}"
+        r = requests.get(url, headers=remote_server.get_headers(), timeout=remote_server.timeout)
+        r.raise_for_status()
+        data: dict[str, Any] = r.json()
+
+        if not data.get("available", False):
+            raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
+        self._has_capabilities = data["has_capabilities"]
+        super().__init__(
+            app_name=data["app"],
+            checkpoints_name=list(data["checkpoints"]),
+            display_name=str(data["display_name"]),
+            maximum_tta=int(data["maximum_tta"]),
+            mc_dropout=int(data["mc_dropout"]),
+            terminology=data["terminology"],
+            number_of_models=int(data["number_of_models"]),
+            description=str(data["description"]),
+            short_description=str(data["short_description"]),
+        )
+
+    def has_capabilities(self) -> tuple[bool, bool, bool]:
+        return self._has_capabilities
+
+    def get_name(self) -> str:
+        return self._app_name
+
+    def download_config_file(self) -> list[Path]:
+        import tempfile
+        import zipfile
+
+        def safe_name(s: str) -> str:
+            return re.sub(r"[^a-zA-Z0-9._-]+", "_", s)
+
+        url = f"{self._remote_server.get_url()}/repo_apps_config/{self._app_name}"
+        r = requests.get(url, headers=self._remote_server.get_headers(), timeout=self._remote_server.timeout)
+        r.raise_for_status()
+
+        base_tmp = Path(tempfile.gettempdir())
+        folder_name = safe_name(
+            f"konfai_remote_app_{self._remote_server.host}_{self._remote_server.port}_{self._app_name}"
+        )
+        app_tmp = base_tmp / folder_name
+
+        if app_tmp.exists():
+            shutil.rmtree(app_tmp, ignore_errors=True)
+        app_tmp.mkdir(parents=True, exist_ok=True)
+
+        zip_filename = safe_name(f"{self._app_name}_configs.zip")
+        zip_path = app_tmp / zip_filename
+
+        with open(zip_path, "wb") as f:
+            f.write(r.content)
+
+        extract_dir = app_tmp / "configs"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+
+        files = [p for p in extract_dir.iterdir() if p.is_file()]
+        if not files:
+            raise AppRepositoryError(f"No configuration files received for remote app '{self._app_name}'.")
+
+        return files
+
+
+def get_app_repository_info(app_id: str) -> AppRepositoryInfo:
+    """
+    Supported formats:
+    - "repo_id:app_name"        -> LocalAppRepositoryFromHF
+    - "/path/to/app_repository" -> LocalAppRepositoryFromDirectory
+    - "host:port:app_name"      -> AppRepositoryInfoFromRemoteServer
+    """
+    # Remote: host:port:app_name  (port must be int)
+    if app_id.count(":") > 2:
+        host, port_str, name_and_token = app_id.split(":", 2)
+        name_and_token_split = name_and_token.split("|")
+        name = name_and_token
+        token = None
+        if len(name_and_token_split) == 2:
+            name, token = name_and_token_split
+        if port_str.isdigit():
+            remote = RemoteServer(host, int(port_str), token)
+            return AppRepositoryInfoFromRemoteServer(remote, name)
+
+    # HF: repo_id:app_name (single ':')
+    if ":" in app_id:
+        repo_id, name = app_id.split(":", 1)
+        return LocalAppRepositoryFromHF(repo_id, name)
+
+    # Local directory
+    path = Path(app_id)
+    return LocalAppRepositoryFromDirectory(path.parent, path.name)

@@ -1,18 +1,78 @@
+#!/usr/bin/env python3
+#
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import importlib
+import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from konfai import cuda_visible_devices
+from konfai import RemoteServer, cuda_visible_devices
 from konfai.utils.utils import State
 
 sys.path.insert(0, os.getcwd())
 
 
 def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bool = True) -> dict[str, Any]:
+    """
+    Add shared CLI arguments for KonfAI "apps-style" commands and parse them.
+
+    This helper is used for commands that operate on medical volumes/datasets and
+    share the same input/output/device semantics. It adds:
+    - inputs (required, multi-group via `action="append"`)
+    - optional ground-truth and mask (same grouping behavior)
+    - output directory
+    - optional `-uncertainty` flag (when enabled by `with_uncertainty`)
+    - mutually exclusive device selection:
+        * `--gpu <ids...>` (default: [])
+        * `--cpu <n>`     (default: None, must be > 0)
+    - quiet flag
+
+    Grouping semantics
+    ------------------
+    `action="append"` + `nargs="+"` means the user can provide multiple groups.
+    Each occurrence of `--inputs ...` creates one group. Example:
+
+        --inputs volA.mha volB.mha --inputs volC.mha
+
+    yields:
+        inputs = [[volA, volB], [volC]]
+
+    Post-processing
+    ---------------
+    - If `--cpu` is provided, GPU usage is disabled (`gpu=[]`).
+    - If `with_uncertainty` is False, `uncertainty` is forced to False.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        Parser to which arguments are added.
+    with_uncertainty : bool
+        Whether to expose the `-uncertainty` flag and return an `uncertainty`
+        key in the parsed kwargs.
+
+    Returns
+    -------
+    dict[str, Any]
+        Parsed CLI arguments as a kwargs dictionary.
+    """
     parser.add_argument(
         "-i",
         "--inputs",
@@ -50,13 +110,11 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
         parser.add_argument("-uncertainty", action="store_true", help="Run uncertainty workflow.")
 
     device_group = parser.add_mutually_exclusive_group()
-    devices = cuda_visible_devices()
     device_group.add_argument(
         "--gpu",
         type=int,
         nargs="+",
-        choices=devices,
-        default=devices,
+        default=[],
         help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
     )
 
@@ -84,12 +142,57 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
 
 def main_apps():
-    parser = argparse.ArgumentParser(prog="konfai-apps", description="KonfAI Apps – Apps for Medical AI Models")
+    """
+    Entry point for the `konfai-apps` command-line interface.
+
+    This CLI provides two execution modes:
+    - Local mode (default): runs apps locally via `KonfAIApp`.
+    - Remote mode: when `--host` is provided, submits jobs to an app server via
+      `KonfAIAppClient(RemoteServer(...))`.
+
+    Supported subcommands
+    ---------------------
+    - infer       : inference for one or more input groups
+    - eval        : evaluation using ground-truth (and optional mask)
+    - uncertainty : uncertainty estimation workflow
+    - pipeline    : inference + evaluation + optional uncertainty
+    - fine-tune   : fine-tuning on a dataset directory
+
+    Parsing details
+    ---------------
+    - Input paths are resolved to absolute paths.
+    - Device selection is mutually exclusive: either GPU ids or CPU workers.
+
+    Execution details
+    -----------------
+    - For remote mode: the client calls `/apps/{app}/{command}` on the server and
+      streams logs / downloads results.
+    - For local mode: the app is executed in-process.
+
+    Notes
+    -----
+    For the `fine-tune` command, this CLI sets:
+        kwargs["tmp_dir"] = kwargs["output"]
+    so that the app uses the output directory as its working directory.
+    """
+    parser = argparse.ArgumentParser(
+        prog="konfai-apps", description="KonfAI Apps – Apps for Medical AI Models", allow_abbrev=False
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_args(parser: argparse.ArgumentParser, is_fine_tune: bool = False):
         parser.add_argument("app", type=str, help="KonfAI App name")
+
+        parser.add_argument("--host", type=str, default=None, help="Server host")
+        parser.add_argument("--port", type=int, default=8000, help="Server port")
+        parser.add_argument(
+            "--token",
+            type=str,
+            default=os.environ.get("KONFAI_API_TOKEN"),
+            help="Bearer token (or use KONFAI_API_TOKEN env var)",
+        )
+
         if not is_fine_tune:
             parser.add_argument(
                 "-i",
@@ -118,19 +221,18 @@ def main_apps():
 
         if not is_fine_tune:
             parser.add_argument(
+                "--tmp-dir",
                 "--tmp_dir",
                 type=lambda x: Path(x).resolve(),
-                default=Path(tempfile.mkdtemp(prefix="konfai_app_")),
+                default=None,
                 help="Temporary directory (optional).",
             )
         device_group = parser.add_mutually_exclusive_group()
-        devices = cuda_visible_devices()
         device_group.add_argument(
             "--gpu",
             type=int,
             nargs="+",
-            choices=devices,
-            default=devices,
+            default=[],
             help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
         )
 
@@ -159,13 +261,21 @@ def main_apps():
     group = infer_p.add_mutually_exclusive_group()
     group.add_argument("--ensemble", type=int, default=0, help="Number of models in the ensemble (auto-select).")
     group.add_argument(
-        "--ensemble_models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use."
+        "--ensemble-models",
+        "--ensemble_models",
+        nargs="+",
+        default=[],
+        help="Explicit list of model identifiers/paths to use.",
     )
 
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
-    infer_p.add_argument("--mc_dropout", type=int, default=0, help="Monte Carlo dropout samples")
+    infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
     infer_p.add_argument(
-        "--prediction_file", type=str, default="Prediction.yml", help="Optional prediction config filename"
+        "--prediction-file",
+        "--prediction_file",
+        type=str,
+        default="Prediction.yml",
+        help="Optional prediction config filename",
     )
 
     # -----------------
@@ -191,7 +301,11 @@ def main_apps():
     )
 
     eval_p.add_argument(
-        "--evaluation_file", type=str, default="Evaluation.yml", help="Optional evaluation config filename"
+        "--evaluation-file",
+        "--evaluation_file",
+        type=str,
+        default="Evaluation.yml",
+        help="Optional evaluation config filename",
     )
 
     # -----------------
@@ -200,7 +314,11 @@ def main_apps():
     unc_p = subparsers.add_parser("uncertainty", help="Compute model uncertainty for a KonfAI App.")
     add_common_args(unc_p)
     unc_p.add_argument(
-        "--uncertainty_file", type=str, default="Uncertainty.yml", help="Optional uncertainty config filename"
+        "--uncertainty-file",
+        "--uncertainty_file",
+        type=str,
+        default="Uncertainty.yml",
+        help="Optional uncertainty config filename",
     )
 
     # -----------------
@@ -211,15 +329,24 @@ def main_apps():
     )
     add_common_args(pipe_p)
 
-    pipe_p.add_argument("--mc_dropout", type=int, default=0, help="Number of Monte Carlo dropout samples.")
-    pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
     group = pipe_p.add_mutually_exclusive_group()
     group.add_argument("--ensemble", type=int, default=0, help="Number of models in the ensemble (auto-select).")
     group.add_argument(
-        "--ensemble_models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use."
+        "--ensemble-models",
+        "--ensemble_models",
+        nargs="+",
+        default=[],
+        help="Explicit list of model identifiers/paths to use.",
     )
+    pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
+    pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
+
     pipe_p.add_argument(
-        "--prediction_file", type=str, default="Prediction.yml", help="Optional prediction config filename"
+        "--prediction-file",
+        "--prediction_file",
+        type=str,
+        default="Prediction.yml",
+        help="Optional prediction config filename",
     )
     pipe_p.add_argument(
         "--gt",
@@ -239,10 +366,18 @@ def main_apps():
     )
 
     pipe_p.add_argument(
-        "--evaluation_file", type=str, default="Evaluation.yml", help="Optional evaluation config filename"
+        "--evaluation-file",
+        "--evaluation_file",
+        type=str,
+        default="Evaluation.yml",
+        help="Optional evaluation config filename",
     )
     pipe_p.add_argument(
-        "--uncertainty_file", type=str, default="Uncertainty.yml", help="Optional uncertainty config filename"
+        "--uncertainty-file",
+        "--uncertainty_file",
+        type=str,
+        default="Uncertainty.yml",
+        help="Optional uncertainty config filename",
     )
 
     pipe_p.add_argument("-uncertainty", action="store_true", help="Run uncertainty workflow.")
@@ -255,18 +390,28 @@ def main_apps():
     ft_p.add_argument("name", type=str, help="New KonfAI App display name")
     ft_p.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs")
     ft_p.add_argument(
-        "--it_validation", type=int, default=1000, help="Number of training iterations between validation runs."
+        "--it-validation",
+        "--it_validation",
+        type=int,
+        default=1000,
+        help="Number of training iterations between validation runs.",
     )
 
     parser.add_argument("--version", action="version", version=importlib.metadata.version("konfai"))
 
     kwargs = vars(parser.parse_args())
-    if kwargs["cpu"] is not None:
-        kwargs["gpu"] = []
 
-    from konfai.app import KonfAIApp
+    from konfai.app import AbstractKonfAIApp, KonfAIApp, KonfAIAppClient
 
-    konfai_app = KonfAIApp(kwargs.pop("app"))
+    host = kwargs.pop("host")
+    port = kwargs.pop("port")
+    token = kwargs.pop("token")
+
+    konfai_app: AbstractKonfAIApp
+    if host is not None:
+        konfai_app = KonfAIAppClient(kwargs.pop("app"), RemoteServer(host, port, token))
+    else:
+        konfai_app = KonfAIApp(kwargs.pop("app"))
     command = kwargs.pop("command")
     if command == "infer":
         konfai_app.infer(**kwargs)
@@ -281,8 +426,142 @@ def main_apps():
         konfai_app.fine_tune(**kwargs)
 
 
+def main_apps_server():
+    """
+    Entry point for launching the KonfAI Apps FastAPI server (uvicorn).
+
+    This command wraps uvicorn startup and optionally configures bearer-token
+    authentication through environment variables.
+
+    Auth modes
+    ----------
+    - off    : no token required (not recommended beyond trusted environments)
+    - bearer : requires a token (default). The token is read from an environment
+              variable (default: KONFAI_API_TOKEN) or can be overridden via
+              `--token` (development convenience).
+
+    Parameters (CLI)
+    ----------------
+    --host        : bind address (default: 127.0.0.1)
+    --port        : bind port (default: 8000)
+    --auth        : "off" | "bearer"
+    --token-env   : environment variable name holding the bearer token
+    --token       : token override (dev only; avoid in production)
+
+    Raises
+    ------
+    SystemExit
+        If auth is enabled but no token is provided via env or `--token`.
+    """
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="KonfAI apps server", allow_abbrev=False)
+    parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+
+    parser.add_argument("--auth", choices=["off", "bearer"], default="bearer", help="Auth mode (default: bearer)")
+    parser.add_argument(
+        "--token-env", "--token_env", type=str, default="KONFAI_API_TOKEN", help="Env var name holding the bearer token"
+    )
+    parser.add_argument("--token", type=str, default=None, help="(dev) Bearer token override (NOT recommended in prod)")
+    parser.add_argument(
+        "--apps",
+        type=Path,
+        required=True,
+        help="Config file listing available apps (json).",
+    )
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Pre-download all apps listed in --apps into the local cache before starting the server.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate all apps listed in --apps (no download).",
+    )
+
+    args = parser.parse_args()
+
+    if args.auth == "bearer":
+        if args.token:
+            os.environ[args.token_env] = args.token
+        if not os.environ.get(args.token_env):
+            raise SystemExit(f"Auth is enabled but no token found. Set {args.token_env} or pass --token (dev).")
+
+    if args.apps:
+        if not args.apps.exists():
+            raise SystemExit(f"Config file not found: {args.apps}")
+
+        data = json.loads(args.apps.read_text(encoding="utf-8"))
+
+        if "apps" not in data or not isinstance(data["apps"], list):
+            raise SystemExit("Invalid config file: expected a JSON object with an 'apps' list.")
+
+        os.environ["KONFAI_APPS_CONFIG"] = json.dumps(data)
+    apps = []
+    if args.check or args.download:
+        from konfai.utils.utils import get_app_repository_info
+
+        errors = []
+        for app_id in data["apps"]:
+            try:
+                apps.append(get_app_repository_info(str(app_id)))
+                print(f"[KonfAI-Apps] OK: {app_id}", flush=True)
+            except Exception as e:
+                errors.append((app_id, str(e)))
+                print(f"[KonfAI-Apps] ERROR: {app_id} -> {e}", flush=True)
+
+        if errors:
+            raise SystemExit("One or more apps are invalid:\n" + "\n".join(f"  - {a}: {err}" for a, err in errors))
+
+        print("[KonfAI-Apps] All apps validated successfully.")
+
+    if args.download:
+        from konfai.utils.utils import LocalAppRepository, get_app_repository_info
+
+        for app in apps:
+            try:
+                if isinstance(app, LocalAppRepository):
+                    # force download of configs/checkpoints so cache is warm
+                    _ = app.download_train()
+                    print(f"[KonfAI-Apps] Cached: {app_id}", flush=True)
+            except Exception as e:
+                print(f"[KonfAI-Apps] Failed to cache '{app_id}': {e}", flush=True)
+
+    uvicorn.run("konfai.app_server:app", host=args.host, port=args.port, log_level="info", reload=False)
+
+
 def _run(parser: argparse.ArgumentParser) -> None:
-    # KONFAI arguments
+    """
+    Shared CLI builder and dispatcher for the main KonfAI training/inference commands.
+
+    This function:
+    1) defines common arguments used by TRAIN / RESUME / PREDICTION / EVALUATION
+       (config file, overwrite, device selection, quiet, tensorboard)
+    2) defines subcommands and their command-specific arguments
+    3) parses CLI args and dispatches to the correct implementation:
+       - `konfai.trainer.train` for TRAIN and RESUME
+       - `konfai.predictor.predict` for PREDICTION
+       - `konfai.evaluator.evaluate` for EVALUATION
+
+    Device selection
+    ----------------
+    GPU and CPU are mutually exclusive:
+    - `--gpu` accepts one or more GPU ids, constrained to available devices
+      returned by `cuda_visible_devices()`.
+    - `--cpu` accepts a strictly positive integer (number of workers).
+
+    Config handling
+    ---------------
+    If `--config` is omitted, the `config` key is removed from the argument dict,
+    so downstream functions can use their own default config filename.
+
+    Parameters
+    ----------
+    parser : argparse.ArgumentParser
+        The top-level parser created by the caller.
+    """
 
     def add_common_args(parser: argparse.ArgumentParser):
         parser.add_argument(
@@ -307,7 +586,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
             type=int,
             nargs="+",
             choices=devices,
-            default=[devices[0]] if len(devices) else [],
+            default=[],
             help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
         )
 
@@ -334,6 +613,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     train_p = subparsers.add_parser(str(State.TRAIN), help="Train a model from scratch.")
     add_common_args(train_p)
     train_p.add_argument(
+        "--checkpoints-dir",
         "--checkpoints_dir",
         type=str,
         default="./Checkpoints/",
@@ -341,6 +621,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     )
 
     train_p.add_argument(
+        "--statistics-dir",
         "--statistics_dir",
         type=str,
         default="./Statistics/",
@@ -357,6 +638,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     )
 
     resume_p.add_argument(
+        "-checkpoints-dir",
         "-checkpoints_dir",
         type=str,
         default="./Checkpoints/",
@@ -364,6 +646,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     )
 
     resume_p.add_argument(
+        "-statistics-dir",
         "-statistics_dir",
         type=str,
         default="./Statistics/",
@@ -383,6 +666,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     )
 
     predict_p.add_argument(
+        "--predictions-dir",
         "--predictions_dir",
         type=str,
         default="./Predictions/",
@@ -393,6 +677,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     add_common_args(eval_p)
 
     eval_p.add_argument(
+        "--evaluations-dir",
         "--evaluations_dir",
         type=str,
         default="./Evaluations/",
@@ -425,40 +710,42 @@ def _run(parser: argparse.ArgumentParser) -> None:
 
 def main():
     """
-    Entry point for launching KonfAI training locally.
+    Entry point for the `konfAI` command-line interface.
 
-    - Parses arguments (if any) via a setup parser.
-    - Initializes distributed environment based on available CUDA devices or CPU cores.
-    - Launches training via `mp.spawn`.
-    - Manages logging and TensorBoard context.
+    This function builds the top-level CLI parser and delegates the full argument
+    parsing and command dispatching to `_run(parser)`.
 
-    KeyboardInterrupt is caught to allow clean manual termination.
+    Supported commands are:
+    - TRAIN
+    - RESUME
+    - PREDICTION
+    - EVALUATION
+
+    Notes
+    -----
+    The actual execution logic is implemented in `konfai.trainer.train`,
+    `konfai.predictor.predict`, and `konfai.evaluator.evaluate`.
     """
     parser = argparse.ArgumentParser(
-        prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models"
+        prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models", allow_abbrev=False
     )
     _run(parser)
 
 
 def cluster():
     """
-    Entry point for launching KonfAI on a cluster using Submitit.
+    Entry point for running KonfAI with cluster-oriented CLI arguments.
 
-    - Parses cluster-specific arguments: job name, nodes, memory, time limit, etc.
-    - Sets up distributed environment based on number of nodes and GPUs.
-    - Configures Submitit executor with job specs.
-    - Submits the job to SLURM (or another Submitit-compatible backend).
+    This command extends the standard KonfAI CLI with a "Cluster manager arguments"
+    group (job name, nodes, memory, time limit, resubmit), then delegates parsing
+    and command dispatching to `_run(parser)`.
 
-    Environment variables:
-        KONFAI_OVERWRITE: Set to force overwrite of previous training runs.
-        KONFAI_CLUSTER: Mark this as a cluster job (used downstream).
-
-    Raises:
-        KeyboardInterrupt: On manual interruption.
-        Exception: Any submission-related error is printed and causes exit.
+    Notes
+    -----
+    - This function only defines extra CLI arguments.
     """
     parser = argparse.ArgumentParser(
-        prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models"
+        prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models", allow_abbrev=False
     )
 
     # Cluster manager arguments

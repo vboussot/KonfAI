@@ -1,7 +1,28 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import datetime
 import os
 from importlib import metadata
 from pathlib import Path
+
+import psutil
+import pynvml
+import requests
+from torch.cuda import get_device_name
 
 try:
     __version__ = metadata.version("konfai")
@@ -37,6 +58,26 @@ def konfai_root() -> str:
     return _get_env("KONFAI_ROOT")
 
 
+class RemoteServer:
+
+    def __init__(self, host: str, port: int, token: str | None) -> None:
+        self.host = host
+        self.port = port
+        self.token = token
+        self.timeout = 10
+
+    def __str__(self) -> str:
+        return f"{self.host}|{self.port}"
+
+    def get_headers(self) -> dict[str, str]:
+        if self.token:
+            return {"Authorization": f"Bearer {self.token}"}
+        return {}
+
+    def get_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
 def cuda_visible_devices() -> list[int]:
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         return [int(gpu) for gpu in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if gpu != ""]
@@ -47,6 +88,64 @@ def cuda_visible_devices() -> list[int]:
         if torch.cuda.is_available():
             devices = list(range(torch.cuda.device_count()))
     return devices
+
+
+def get_available_devices(
+    remote_server: RemoteServer | None = None, timeout_s: float = 2.0
+) -> tuple[list[int], list[str]]:
+    if remote_server is not None:
+        r = requests.get(
+            f"{remote_server.get_url()}/available_devices", headers=remote_server.get_headers(), timeout=timeout_s
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["devices_index"], data["devices_name"]
+    else:
+        devices_index = cuda_visible_devices()
+        return devices_index, [get_device_name(device_index) for device_index in devices_index]
+
+
+def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -> tuple[float, float]:
+    if remote_server is not None:
+        r = requests.get(
+            f"{remote_server.get_url()}/ram",
+            headers=remote_server.get_headers(),
+            timeout=timeout_s,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["used_gb"], data["total_gb"]
+    else:
+        ram = psutil.virtual_memory()
+        used_gb = (ram.total - ram.available) / (1024**3)
+        total_gb = ram.total / (1024**3)
+        return used_gb, total_gb
+
+
+def get_vram(
+    devices: list[int], remote_server: RemoteServer | None = None, timeout_s: float = 2.0
+) -> tuple[float, float]:
+    if remote_server is not None:
+        r = requests.get(
+            f"{remote_server.get_url()}/vram",
+            params=[("devices", device_index) for device_index in devices],
+            headers=remote_server.get_headers(),
+            timeout=timeout_s,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["used_gb"], data["total_gb"]
+    else:
+        used_gb = 0.0
+        total_gb = 0.0
+
+        pynvml.nvmlInit()
+        for device_index in devices:
+            info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(device_index))
+            used_gb += info.used / (1024**3)
+            total_gb += info.total / (1024**3)
+
+        return used_gb, total_gb
 
 
 def current_date() -> str:
@@ -82,6 +181,35 @@ def _try_import(import_name: str) -> str | None:
         return None
     except Exception as e:
         return f"{type(e).__name__}: {e}"
+
+
+def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[bool, str]:
+    try:
+        r = requests.get(
+            f"{remote_server.get_url()}/health",
+            headers=remote_server.get_headers(),
+            timeout=timeout_s,
+        )
+
+        if r.status_code == 401:
+            return False, "Unauthorized (invalid or missing token)"
+        if r.status_code == 403:
+            return False, "Forbidden"
+        if r.status_code != 200:
+            return False, f"HTTP {r.status_code}"
+
+        data = r.json()
+        if data.get("status") != "ok":
+            return False, f"Unexpected response: {data}"
+
+        return True, "OK"
+
+    except requests.exceptions.ConnectionError:
+        return False, "Connection refused"
+    except requests.exceptions.Timeout:
+        return False, "Timeout"
+    except Exception as e:
+        return False, str(e)
 
 
 def check_konfai_install() -> tuple[bool, dict]:

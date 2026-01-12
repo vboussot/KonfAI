@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 import tempfile
 from abc import ABC, abstractmethod
 from multiprocessing import get_context
@@ -787,7 +803,7 @@ class KonfAIInference(Transform):
         model_name: str = "MRSegmentator",
         checkpoints_name: list[str] = ["fold_0"],
         number_of_tta: int = 0,
-        number_of_mc_dropout: int = 0,
+        number_of_mc: int = 0,
         per_channel: bool = False,
     ):
         super().__init__()
@@ -795,7 +811,7 @@ class KonfAIInference(Transform):
         self.model_name = model_name
         self.checkpoints_name = checkpoints_name
         self.number_of_tta = number_of_tta
-        self.number_of_mc_dropout = number_of_mc_dropout
+        self.number_of_mc = number_of_mc
         self.per_channel = per_channel
 
     def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
@@ -808,7 +824,7 @@ class KonfAIInference(Transform):
             0,
             self.checkpoints_name,
             self.number_of_tta,
-            self.number_of_mc_dropout,
+            mc=0,
             gpu=gpu,
         )
 

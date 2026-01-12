@@ -9,3 +9,6 @@ docs
 konfai/metric/models
 .vscode
 .mypy_cache
+apps/impact_reg/impact_reg_konfai/bin
+apps/impact_reg/impact_reg_konfai/tests
+Local/

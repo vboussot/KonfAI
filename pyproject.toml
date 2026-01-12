@@ -38,12 +38,14 @@ License = "https://www.apache.org/licenses/LICENSE-2.0"
 [project.scripts]
 konfai = "konfai.main:main"
 konfai-apps = "konfai.main:main_apps"
+konfai-apps-server = "konfai.main:main_apps_server"
 konfai-cluster = "konfai.main:cluster"
 
 [project.optional-dependencies]
 vtk = ["vtk"]
 lpips = ["lpips"]
 cluster = ["submitit"]
+server = ["fastapi", "uvicorn", "python-multipart"]
 
 [tool.setuptools_scm]
 tag_regex = "^v(?P<version>.*)$"

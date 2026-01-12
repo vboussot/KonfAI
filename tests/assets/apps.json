@@ -1,0 +1,6 @@
+{
+  "apps": [
+    "VBoussot/ImpactSynth:CBCT",
+    "VBoussot/ImpactSynth:MR"
+  ]
+}
