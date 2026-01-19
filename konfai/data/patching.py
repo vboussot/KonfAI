@@ -357,7 +357,7 @@ class DatasetManager:
         self.data: list[torch.Tensor] = []
 
         for transform_function in transforms:
-            _shape = transform_function.transform_shape(self.name, _shape, cache_attribute)
+            _shape = transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute)
 
         self.patch = (
             DatasetPatch(

@@ -31,7 +31,7 @@ import numpy as np
 import requests
 import SimpleITK as sitk  # noqa: N813
 
-from konfai import RemoteServer, check_server, cuda_visible_devices
+from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -501,7 +501,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     self.download_result(job_id, output)
                     finished = True
                 except (CancelProcess, KeyboardInterrupt):
-                    print("\n[KonfAI-Apps] Interrupted (SIGINT/SIGTERM)")
+                    print("[KonfAI-Apps] Interrupted (SIGINT/SIGTERM)")
                 except requests.RequestException as e:
                     raise RuntimeError(f"Failed to submit job to remote KonfAI server: {e}") from e
                 finally:
@@ -615,7 +615,7 @@ class KonfAIApp(AbstractKonfAIApp):
     workspace.
     """
 
-    def __init__(self, app: str) -> None:
+    def __init__(self, app: str, download: bool, force_update: bool) -> None:
         """
         Create a local KonfAI app runner from either a HuggingFace model spec
         or a local directory.
@@ -634,12 +634,14 @@ class KonfAIApp(AbstractKonfAIApp):
         - AppRepository
         """
         self.app_repository: LocalAppRepository
-        app_repository_info = get_app_repository_info(app)
+        app_repository_info = get_app_repository_info(app, force_update or download)
         if not isinstance(app_repository_info, LocalAppRepository):
             raise TypeError(
                 f"KonfAI apps can only be executed from a local application repository. "
                 f"App '{app}' resolves to a {type(app_repository_info).__name__}, which is not local."
             )
+        if download:
+            app_repository_info.download_app()
         self.app_repository = app_repository_info
 
     @staticmethod
@@ -869,7 +871,17 @@ class KonfAIApp(AbstractKonfAIApp):
         - GPU defaults to `cuda_visible_devices()`.
         """
         self._write_inputs_to_dataset(inputs)
-        models_path = self.app_repository.install_inference(tta, ensemble, ensemble_models, mc, prediction_file)
+        available_vram = None
+        if len(gpu):
+            available_vram_per_device: list[float] = []
+            for device in gpu:
+                used_gb, total_gb = get_vram([device])
+                available_vram_per_device.append(total_gb - used_gb)
+
+            available_vram = min(available_vram_per_device)
+        models_path = self.app_repository.install_inference(
+            tta, ensemble, ensemble_models, mc, prediction_file, available_vram
+        )
         from konfai.predictor import predict
 
         predict(models_path, True, gpu, cpu, quiet, False, Path(prediction_file).resolve())

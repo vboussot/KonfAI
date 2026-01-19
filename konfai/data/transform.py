@@ -28,6 +28,7 @@ import torch.nn.functional as F  # noqa: N812
 from konfai import cuda_visible_devices
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
+from konfai.utils.ITK import box_with_mask, crop_with_mask
 from konfai.utils.utils import NeedDevice, TransformError, _affine_matrix, _resample_affine, get_module
 
 
@@ -40,7 +41,7 @@ class Transform(NeedDevice, ABC):
     def set_datasets(self, datasets: list[Dataset]):
         self.datasets = datasets
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
 
     @abstractmethod
@@ -330,7 +331,7 @@ class Padding(TransformInverse):
         ).squeeze(0)
         return result
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         for dim in range(len(self.padding) // 2):
             shape[-dim - 1] += sum(self.padding[dim * 2 : dim * 2 + 2])
         return shape
@@ -383,7 +384,7 @@ class Resample(TransformInverse, ABC):
         pass
 
     @abstractmethod
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         pass
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -399,7 +400,7 @@ class ResampleToResolution(Resample):
         super().__init__(inverse)
         self.spacing = torch.tensor([0 if s < 0 else s for s in spacing])
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
             TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
@@ -436,7 +437,7 @@ class ResampleToShape(Resample):
         super().__init__(inverse)
         self.shape = torch.tensor([0 if s < 0 else s for s in shape])
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
             TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
@@ -472,7 +473,7 @@ class ResampleTransform(TransformInverse):
         super().__init__(inverse)
         self.transforms = transforms
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return shape
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -671,7 +672,7 @@ class Flatten(Transform):
     def __init__(self) -> None:
         super().__init__()
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [np.prod(np.asarray(shape))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -684,7 +685,7 @@ class Permute(TransformInverse):
         super().__init__(inverse)
         self.dims = [0] + [int(d) + 1 for d in dims.split("|")]
 
-    def transform_shape(self, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [shape[it - 1] for it in self.dims[1:]]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -817,7 +818,7 @@ class KonfAIInference(Transform):
     def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
         from konfai.app import KonfAIApp
 
-        konfai_app = KonfAIApp(f"{self.repo_id}:{self.model_name}")
+        konfai_app = KonfAIApp(f"{self.repo_id}:{self.model_name}", False, False)
         konfai_app.infer(
             [[dataset_path]],
             output_path,
@@ -894,3 +895,59 @@ class Variance(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
+
+
+class Crop(Transform):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        data = None
+        for dataset in self.datasets:
+            if dataset.is_dataset_exist(group_src, name):
+                data, _ = dataset.read_data(group_src, name)
+                break
+        if data is None:
+            return shape
+        treshold = np.percentile(data, 5)
+        image = data_to_image((data > treshold).astype(np.uint8), cache_attribute)
+        box = box_with_mask(image, [1], [0] * (len(data.shape) - 1))
+        for i, ((_, b), s) in enumerate(zip(box, shape[1:])):
+            box[i][1] = s - b
+        cache_attribute["box"] = box
+        return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:])]
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "box" not in cache_attribute:
+            return tensor
+        box_str = cache_attribute["box"]
+        flat = np.fromstring(box_str.replace("[", " ").replace("]", " "), sep=" ", dtype=np.int64)
+        box = flat.reshape(-1, 2)
+        for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:])):
+            box[i][1] = s - b
+        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
+            origin = torch.tensor(cache_attribute.get_np_array("Origin"))
+            matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
+            origin = torch.matmul(origin, matrix)
+            for dim in range(box.shape[0]):
+                origin[-dim - 1] += box[dim][0] * cache_attribute.get_np_array("Spacing")[-dim - 1]
+            cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
+
+        image = data_to_image(tensor.numpy(), cache_attribute)
+        result = crop_with_mask(image, box)
+        data, _ = image_to_data(result)
+        return torch.from_numpy(data)
+
+    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "box" not in cache_attribute:
+            return tensor
+        box_str = cache_attribute.pop("box")
+        flat = np.fromstring(box_str.replace("[", " ").replace("]", " "), sep=" ", dtype=np.int64)
+        box = flat.reshape(-1, 2)
+        cache_attribute.pop_np_array("Origin")
+        padding = []
+        for b in reversed(box):
+            padding.extend([b[0], b[1]])
+        result = F.pad(tensor.unsqueeze(0), tuple(padding), "replicate").squeeze(0)
+        return result

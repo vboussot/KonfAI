@@ -31,7 +31,7 @@ def main():
     )
     parser.add_argument(
         "model",
-        choices=list(get_available_apps_on_hf_repo(IMPACT_SYNTH_KONFAI_REPO)),
+        choices=list(get_available_apps_on_hf_repo(IMPACT_SYNTH_KONFAI_REPO, False)),
         help="Select which model to use. This determines what is predicted.",
     )
     parser.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble")
@@ -40,5 +40,7 @@ def main():
 
     kwargs = add_common_konfai_apps(parser)
 
-    konfai_app = KonfAIApp(f"{IMPACT_SYNTH_KONFAI_REPO}:{kwargs.pop("model")}")
+    konfai_app = KonfAIApp(
+        f"{IMPACT_SYNTH_KONFAI_REPO}:{kwargs.pop("model")}", kwargs.pop("download"), kwargs.pop("force_update")
+    )
     konfai_app.pipeline(**kwargs)

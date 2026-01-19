@@ -320,7 +320,7 @@ def get_apps():
 def get_app_info(app_id: str):
 
     try:
-        app = get_app_repository_info(app_id)
+        app = get_app_repository_info(app_id, False)
     except AppRepositoryError:
         return {
             "app": app_id,
@@ -348,7 +348,7 @@ def download_app_repository_configs(app_id: str, background_tasks: BackgroundTas
     Download the configuration files of an app as a ZIP archive.
     """
     try:
-        app = get_app_repository_info(app_id)
+        app = get_app_repository_info(app_id, False)
     except AppRepositoryError:
         raise HTTPException(404, f"Unknown app '{app_id}'")
 

@@ -132,6 +132,13 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     )
 
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
+    parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront")
+
+    parser.add_argument(
+        "--force_update",
+        action="store_true",
+        help="Ensure required files are updated to the latest version during execution",
+    )
 
     kwargs = vars(parser.parse_args())
     if kwargs["cpu"] is not None:
@@ -251,6 +258,14 @@ def main_apps():
 
         parser.add_argument(
             "-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution"
+        )
+
+        parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront")
+
+        parser.add_argument(
+            "--force_update",
+            action="store_true",
+            help="Ensure required files are updated to the latest version during execution",
         )
 
     # -----------------
@@ -411,7 +426,7 @@ def main_apps():
     if host is not None:
         konfai_app = KonfAIAppClient(kwargs.pop("app"), RemoteServer(host, port, token))
     else:
-        konfai_app = KonfAIApp(kwargs.pop("app"))
+        konfai_app = KonfAIApp(kwargs.pop("app"), kwargs.pop("download"), kwargs.pop("force_update"))
     command = kwargs.pop("command")
     if command == "infer":
         konfai_app.infer(**kwargs)
@@ -506,7 +521,7 @@ def main_apps_server():
         errors = []
         for app_id in data["apps"]:
             try:
-                apps.append(get_app_repository_info(str(app_id)))
+                apps.append(get_app_repository_info(str(app_id), True))
                 print(f"[KonfAI-Apps] OK: {app_id}", flush=True)
             except Exception as e:
                 errors.append((app_id, str(e)))
@@ -518,13 +533,13 @@ def main_apps_server():
         print("[KonfAI-Apps] All apps validated successfully.")
 
     if args.download:
-        from konfai.utils.utils import LocalAppRepository, get_app_repository_info
+        from konfai.utils.utils import LocalAppRepository
 
         for app in apps:
             try:
                 if isinstance(app, LocalAppRepository):
                     # force download of configs/checkpoints so cache is warm
-                    _ = app.download_train()
+                    _ = app.download_app()
                     print(f"[KonfAI-Apps] Cached: {app_id}", flush=True)
             except Exception as e:
                 print(f"[KonfAI-Apps] Failed to cache '{app_id}': {e}", flush=True)

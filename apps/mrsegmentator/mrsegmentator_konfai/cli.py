@@ -33,5 +33,7 @@ def main():
     )
     kwargs = add_common_konfai_apps(parser)
     kwargs["ensemble"] = kwargs.pop("folds")
-    konfai_app = KonfAIApp(f"{MR_SEGMENTATOR_KONFAI_REPO}:MRSegmentator")
+    konfai_app = KonfAIApp(
+        f"{MR_SEGMENTATOR_KONFAI_REPO}:MRSegmentator", kwargs.pop("download"), kwargs.pop("force_update")
+    )
     konfai_app.pipeline(**kwargs)

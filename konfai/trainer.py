@@ -35,7 +35,7 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import DataTrain
-from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.network.network import Model, ModelLoader, NetState, Network, get_input
 from konfai.utils.config import apply_config, config
 from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, description, run_distributed_app
 
@@ -217,21 +217,6 @@ class _Trainer:
                     break
                 self.dataloader_training.dataset.reset_augmentation("Train")
 
-    def get_input(
-        self,
-        data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
-    ) -> dict[tuple[str, bool], torch.Tensor]:
-        """
-        Extracts input tensors from the data dict for model input.
-
-        Args:
-            data_dict (dict): Dictionary with data items structured as tuples.
-
-        Returns:
-            dict: Mapping from (group, bool_flag) to input tensors.
-        """
-        return {(k, v[5][0].item()): v[0] for k, v in data_dict.items()}
-
     def train(self) -> None:
         """
         Performs a full training epoch with support for:
@@ -256,7 +241,7 @@ class _Trainer:
         ) as batch_iter:
             for _, data_dict in batch_iter:
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    input_data_dict = self.get_input(data_dict)
+                    input_data_dict = get_input(data_dict)
                     self.model(input_data_dict)
                     self.model.module.backward(self.model.module)
                     if self.model_ema is not None:
@@ -301,7 +286,7 @@ class _Trainer:
             ncols=0,
         ) as batch_iter:
             for _, data_dict in batch_iter:
-                input_data_dict = self.get_input(data_dict)
+                input_data_dict = get_input(data_dict)
                 self.model(input_data_dict)
                 if self.model_ema is not None:
                     self.model_ema.module(input_data_dict)
@@ -453,7 +438,7 @@ class _Trainer:
 
                     if len(images_log):
                         for name, layer, _ in model.get_layers(
-                            [v.to(0) for k, v in self.get_input(data_dict).items() if k[1]],
+                            [v.to(0) for k, v in get_input(data_dict).items() if k[1]],
                             images_log,
                         ):
                             self.data_log[name][0](

@@ -31,11 +31,13 @@ def main():
     )
     parser.add_argument(
         "task",
-        choices=list(get_available_apps_on_hf_repo(TOTAL_SEGMENTATOR_KONFAI_REPO)),
+        choices=list(get_available_apps_on_hf_repo(TOTAL_SEGMENTATOR_KONFAI_REPO, False)),
         help="Select which model to use. This determines what is predicted.",
     )
     parser.add_argument("--models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use.")
     kwargs = add_common_konfai_apps(parser, False)
-    konfai_app = KonfAIApp(f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{kwargs.pop("task")}")
+    konfai_app = KonfAIApp(
+        f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{kwargs.pop("task")}", kwargs.pop("download"), kwargs.pop("force_update")
+    )
     kwargs["ensemble_models"] = kwargs.pop("models")
     konfai_app.pipeline(**kwargs)

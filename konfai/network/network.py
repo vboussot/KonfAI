@@ -1358,3 +1358,18 @@ class Model:
         output_layers: list[str] = [],
     ) -> list[tuple[str, torch.Tensor]]:
         return self.module(data_dict, output_layers)
+
+
+def get_input(
+    data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
+) -> dict[tuple[str, bool], torch.Tensor]:
+    """
+    Extracts input tensors from the data dict for model input.
+
+    Args:
+        data_dict (dict): Dictionary with data items structured as tuples.
+
+    Returns:
+        dict: Mapping from (group, bool_flag) to input tensors.
+    """
+    return {(k, v[5][0].item()): v[0] for k, v in data_dict.items()}

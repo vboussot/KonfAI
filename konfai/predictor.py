@@ -35,7 +35,7 @@ from konfai import config_file, cuda_visible_devices, konfai_root, predictions_d
 from konfai.data.data_manager import DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
 from konfai.data.transform import Transform, TransformInverse, TransformLoader
-from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.network.network import Model, ModelLoader, NetState, Network, get_input
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import (
@@ -445,12 +445,6 @@ class _Predictor:
         if self.tb:
             self.tb.close()
 
-    def get_input(
-        self,
-        data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
-    ) -> dict[tuple[str, bool], torch.Tensor]:
-        return {(k, v[5][0]): v[0] for k, v in data_dict.items()}
-
     @torch.no_grad()
     def run(self):
         """
@@ -475,7 +469,7 @@ class _Predictor:
             with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=self.autocast):
                     for _, data_dict in batch_iter:
-                        input_tensor = self.get_input(data_dict)
+                        input_tensor = get_input(data_dict)
                         for name, number_of_channels_per_model, output in self.model_composite(
                             input_tensor, list(self.outputs_dataset.keys())
                         ):
@@ -570,7 +564,7 @@ class _Predictor:
                     )
                 if len(data_log):
                     for name, layer, _ in self.model_composite.module.get_layers(
-                        [v.to(0) for k, v in self.get_input(data_dict).items() if k[1]], data_log
+                        [v.to(0) for k, v in get_input(data_dict).items() if k[1]], data_log
                     ):
                         self.data_log[name][0](
                             self.tb,
