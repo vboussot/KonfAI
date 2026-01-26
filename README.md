@@ -72,7 +72,7 @@ pip install -e .
 
 ```bash
 konfai TRAIN --gpu 0
-konfai PREDICTION --gpu 0
+konfai PREDICTION --models checkpoint.pt --gpu 0
 konfai EVALUATION
 ```
 
