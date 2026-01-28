@@ -15,7 +15,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-import scipy
 import SimpleITK as sitk  # noqa: N813
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -244,18 +243,15 @@ def parametermap_to_transform(
         for i in range(nb):
             result = sitk.AffineTransform(dimension)
             sub_parameters = np.asarray(parameters[i * sub : (i + 1) * sub])
-
             result.SetFixedParameters(fixed_parameters)
-            result.SetParameters(
-                np.concatenate(
-                    [
-                        scipy.linalg.expm(
-                            sub_parameters[: dimension * dimension].reshape((dimension, dimension))
-                        ).flatten(),
-                        sub_parameters[-dimension:],
-                    ]
-                )
+
+            matrix = torch.from_numpy(sub_parameters[: dimension * dimension].reshape(dimension, dimension)).to(
+                torch.float64
             )
+            matrix_exp = torch.matrix_exp(matrix).cpu().numpy().reshape(-1)
+
+            params = np.concatenate([matrix_exp, sub_parameters[-dimension:]])
+            result.SetParameters(params)
             results.append(result)
         return results
     elif transform["Transform"][0] == "BSplineTransform":

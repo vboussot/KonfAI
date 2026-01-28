@@ -1045,7 +1045,7 @@ class KonfAIApp(AbstractKonfAIApp):
         - Runs inside an isolated workspace (run_distributed_app).
         - GPU defaults to `cuda_visible_devices()`.
         """
-        models_path = self.app_repository.install_fine_tune(config_file, name, epochs, it_validation)
+        models_path = self.app_repository.install_fine_tune(config_file, Path("./"), name, epochs, it_validation)
         KonfAIApp.symlink(dataset, Path("./Dataset").absolute())
         from konfai.trainer import train
 

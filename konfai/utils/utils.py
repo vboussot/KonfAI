@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.util
+import importlib
 import inspect
 import itertools
 import json
@@ -28,6 +28,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import closing
+from dataclasses import dataclass
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -925,69 +926,88 @@ def is_app_repo(filenames: list[str]) -> tuple[bool, str, list[str]]:
     return True, "", checkpoints_name
 
 
+class VolumeType(Enum):
+    SEGMENTATION = "SEGMENTATION"
+    VOLUME = "VOLUME"
+    FIDUCIALS = "FIDUCIALS"
+    TRANSFORM = "TRANSFORM"
+
+
+@dataclass
+class VRAMPlanEntry:
+    patch_size: list[int]
+    batch_size: int
+
+
+@dataclass
+class TerminologyEntry:
+    name: str
+    color: str
+
+
+@dataclass
+class DataEntry:
+    display_name: str
+    volume_type: VolumeType
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationKey:
+    display_name: str
+    evaluation_file: str
+
+
 class AppRepositoryInfo(ABC):
     def __init__(
         self,
         app_name: str,
-        checkpoints_name: list[str],
         display_name: str,
-        maximum_tta: int = 1,
-        mc_dropout: int = 0,
-        terminology: dict[int, str] | None = None,
-        number_of_models: int | None = None,
-        description: str = "",
-        short_description: str = "",
-        vram_plan: dict[int, tuple[list[int], int]] | None = None,
+        description: str,
+        short_description: str,
+        checkpoints_name: list[str],
+        maximum_tta: int,
+        mc_dropout: int,
+        inputs: dict[str, DataEntry],
+        outputs: dict[str, DataEntry],
+        inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]],
+        terminology: dict[int, TerminologyEntry] | None = None,
+        vram_plan: dict[int, VRAMPlanEntry] | None = None,
     ) -> None:
         super().__init__()
-
         self._app_name = app_name
-        self._checkpoints_name = checkpoints_name
         self._display_name = display_name
-        self._maximum_tta = maximum_tta
-        self._mc_dropout = mc_dropout
-        self._terminology = terminology
-        self._number_of_models = number_of_models if number_of_models is not None else len(checkpoints_name)
         self._description = description
         self._short_description = short_description
+        self._checkpoints_name = checkpoints_name
+        self._maximum_tta = maximum_tta
+        self._mc_dropout = mc_dropout
+        self._inputs = inputs
+        self._outputs = outputs
+        self._inputs_evaluations = inputs_evaluations
+        self._terminology = terminology
         self._vram_plan = vram_plan
 
     def __str__(self) -> str:
         return (
             f"{self.__class__.__name__}(\n"
             f"  app_name={self._app_name!r},\n"
-            f"  checkpoints_name={self._checkpoints_name!r},\n"
             f"  display_name={self._display_name!r},\n"
-            f"  maximum_tta={self._maximum_tta!r},\n"
-            f"  mc_dropout={self._mc_dropout!r},\n"
-            f"  terminology={self._terminology!r},\n"
-            f"  number_of_models={self._number_of_models!r},\n"
             f"  description={self._description!r},\n"
             f"  short_description={self._short_description!r}\n"
+            f"  checkpoints_name={self._checkpoints_name!r},\n"
+            f"  maximum_tta={self._maximum_tta!r},\n"
+            f"  mc_dropout={self._mc_dropout!r},\n"
+            f"  inputs={self._inputs!r},\n"
+            f"  outputs={self._outputs!r},\n"
+            f"  inputs_evaluations={self._inputs_evaluations!r},\n"
+            f"  terminology={self._terminology!r},\n"
             f"  vram_plan={self._vram_plan!r}\n"
             f")"
         )
 
-    def get_vram_plan(self) -> dict[int, tuple[list[int], int]] | None:
-        return self._vram_plan
-
-    def get_checkpoints_name(self) -> list[str]:
-        return self._checkpoints_name
-
     def get_display_name(self) -> str:
         return self._display_name
-
-    def get_maximum_tta(self) -> int:
-        return self._maximum_tta
-
-    def get_mc_dropout(self) -> int:
-        return self._mc_dropout
-
-    def get_terminology(self) -> dict[int, str] | None:
-        return self._terminology
-
-    def get_number_of_models(self) -> int:
-        return self._number_of_models
 
     def get_description(self) -> str:
         return self._description
@@ -995,9 +1015,30 @@ class AppRepositoryInfo(ABC):
     def get_short_description(self) -> str:
         return self._short_description
 
+    def get_checkpoints_name(self) -> list[str]:
+        return self._checkpoints_name
+
+    def get_maximum_tta(self) -> int:
+        return self._maximum_tta
+
+    def get_mc_dropout(self) -> int:
+        return self._mc_dropout
+
+    def get_inputs(self) -> dict[str, DataEntry]:
+        return self._inputs
+
+    def get_outputs(self) -> dict[str, DataEntry]:
+        return self._outputs
+
+    def get_evaluations_inputs(self) -> dict[EvaluationKey, dict[str, DataEntry]]:
+        return self._inputs_evaluations
+
+    def get_terminology(self) -> dict[int, TerminologyEntry] | None:
+        return self._terminology
+
     @abstractmethod
     def has_capabilities(self) -> tuple[bool, bool, bool]:
-        pass
+        raise NotImplementedError()
 
     @abstractmethod
     def get_name(self) -> str:
@@ -1028,9 +1069,43 @@ class LocalAppRepository(AppRepositoryInfo):
         missing = [k for k in required_keys if k not in app_repository_metadata]
         if missing:
             raise AppMetadataError(f"Missing keys in app.json: {', '.join(missing)}")
+        inputs: dict[str, DataEntry] = {}
 
-        description = str(app_repository_metadata["description"])
-        short_description = str(app_repository_metadata["short_description"])
+        if "inputs" in app_repository_metadata:
+            inputs = {
+                k: DataEntry(
+                    display_name=v["display_name"],
+                    volume_type=VolumeType(v["volume_type"]),
+                    required=bool(v["required"]),
+                )
+                for k, v in app_repository_metadata["inputs"].items()
+            }
+
+        outputs: dict[str, DataEntry] = {}
+        if "outputs" in app_repository_metadata:
+            outputs = {
+                k: DataEntry(
+                    display_name=v["display_name"],
+                    volume_type=VolumeType(v["volume_type"]),
+                    required=bool(v["required"]),
+                )
+                for k, v in app_repository_metadata["outputs"].items()
+            }
+
+        inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]] = {}
+
+        if "inputs_evaluations" in app_repository_metadata:
+            for display_name, by_file in app_repository_metadata["inputs_evaluations"].items():
+                for evaluation_file, entries in by_file.items():
+                    key = EvaluationKey(display_name=display_name, evaluation_file=evaluation_file)
+                    inputs_evaluations[key] = {
+                        k: DataEntry(
+                            display_name=v["display_name"],
+                            volume_type=VolumeType(v["volume_type"]),
+                            required=bool(v["required"]),
+                        )
+                        for k, v in entries.items()
+                    }
 
         try:
             maximum_tta = int(app_repository_metadata["tta"])
@@ -1042,29 +1117,37 @@ class LocalAppRepository(AppRepositoryInfo):
         except Exception:
             raise AppMetadataError("The field 'mc_dropout' must be an integer.")
 
-        display_name = str(app_repository_metadata["display_name"])
-
-        terminology: dict[int, str] | None = None
+        terminology: dict[int, TerminologyEntry] | None = None
         if "terminology" in app_repository_metadata:
-            terminology = {int(k): v for k, v in app_repository_metadata["terminology"].items()}
-
-        vram_plan: dict[int, tuple[list[int], int]] | None = None
-        if "vram_plan" in app_repository_metadata:
-            vram_plan = {
-                int(k): (list(map(int, v["patch_size"])), int(v["batch_size"]))
-                for k, v in app_repository_metadata["vram_plan"].items()
+            terminology = {
+                int(k): TerminologyEntry(
+                    name=v["name"],
+                    color=v["color"],
+                )
+                for k, v in app_repository_metadata["terminology"].items()
             }
 
+        vram_plan: dict[int, VRAMPlanEntry] | None = None
+        if "vram_plan" in app_repository_metadata:
+            vram_plan = {
+                int(k): VRAMPlanEntry(
+                    patch_size=list(map(int, v["patch_size"])),
+                    batch_size=int(v["batch_size"]),
+                )
+                for k, v in app_repository_metadata["vram_plan"].items()
+            }
         super().__init__(
             app_name=app_name,
+            display_name=str(app_repository_metadata["display_name"]),
+            description=str(app_repository_metadata["description"]),
+            short_description=str(app_repository_metadata["short_description"]),
             checkpoints_name=checkpoints_name,
-            display_name=display_name,
             maximum_tta=maximum_tta,
             mc_dropout=mc_dropout,
+            inputs=inputs,
+            outputs=outputs,
+            inputs_evaluations=inputs_evaluations,
             terminology=terminology,
-            number_of_models=len(checkpoints_name),
-            description=description,
-            short_description=short_description,
             vram_plan=vram_plan,
         )
 
@@ -1111,17 +1194,13 @@ class LocalAppRepository(AppRepositoryInfo):
 
     def has_capabilities(self) -> tuple[bool, bool, bool]:
         filenames = self._get_filenames()
-        inference_support = False
-        evaluation_support = False
+        inference_support = len(self.get_inputs()) > 0
+        evaluation_support = len(self.get_evaluations_inputs()) > 0
         uncertainty_support = False
 
         for filename in filenames:
-            if filename.endswith("Evaluation.yml"):
-                evaluation_support = True
-            elif filename.endswith("Uncertainty.yml"):
+            if filename.endswith("Uncertainty.yml"):
                 uncertainty_support = True
-            elif filename.endswith("Config.yml"):
-                inference_support = True
         return inference_support, evaluation_support, uncertainty_support
 
     def download_config_file(self) -> list[Path]:
@@ -1232,7 +1311,7 @@ class LocalAppRepository(AppRepositoryInfo):
         available_vram: float | None,
     ) -> list[Path]:
         if len(name_of_models) == 0 and number_of_model == 0:
-            number_of_model = self._number_of_models
+            number_of_model = len(self._checkpoints_name)
 
         models_path, inference_file_path, codes_path = self.download_inference(
             number_of_model, name_of_models, prediction_file
@@ -1241,9 +1320,6 @@ class LocalAppRepository(AppRepositoryInfo):
         self.set_number_of_augmentation(prediction_file, number_of_augmentation)
 
         if self._vram_plan is not None and available_vram is not None:
-            patch_size = None
-            batch_size = None
-
             thresholds = sorted(self._vram_plan.keys())
             selected_t = thresholds[0]
             for t in thresholds:
@@ -1251,8 +1327,8 @@ class LocalAppRepository(AppRepositoryInfo):
                     selected_t = t
                 else:
                     break
-            patch_size, batch_size = self._vram_plan[selected_t]
-            self.set_patch_size_and_batch_size(prediction_file, patch_size, batch_size)
+            vram_plan = self._vram_plan[selected_t]
+            self.set_patch_size_and_batch_size(prediction_file, vram_plan.patch_size, vram_plan.batch_size)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
@@ -1274,10 +1350,9 @@ class LocalAppRepository(AppRepositoryInfo):
                 shutil.copy2(code_path, code_path.name)
 
     def install_fine_tune(
-        self, config_file: str, display_name: str, epochs: int, it_validation: int | None
+        self, config_file: str, path: Path, display_name: str, epochs: int, it_validation: int | None
     ) -> list[Path]:
         src_paths = self.download_app()
-        path = Path.cwd()
         models_path = []
 
         overwrite_all = None
@@ -1489,16 +1564,57 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         if not data.get("available", False):
             raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
         self._has_capabilities = data["has_capabilities"]
+
+        inputs = {
+            k: DataEntry(
+                display_name=str(v["display_name"]),
+                volume_type=VolumeType(v["volume_type"]),
+                required=bool(v["required"]),
+            )
+            for k, v in data["inputs"].items()
+        }
+
+        outputs = {
+            k: DataEntry(
+                display_name=str(v["display_name"]),
+                volume_type=VolumeType(v["volume_type"]),
+                required=bool(v["required"]),
+            )
+            for k, v in data["outputs"].items()
+        }
+
+        inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]] = {}
+        for display_name, by_file in data["inputs_evaluations"].items():
+            for evaluation_file, entries in by_file.items():
+                key = EvaluationKey(display_name=str(display_name), evaluation_file=str(evaluation_file))
+                inputs_evaluations[key] = {
+                    k: DataEntry(
+                        display_name=str(v["display_name"]),
+                        volume_type=VolumeType(v["volume_type"]),
+                        required=bool(v["required"]),
+                    )
+                    for k, v in entries.items()
+                }
+
+        terminology: dict[int, TerminologyEntry] | None = None
+        if "terminology" in data:
+            terminology = {
+                int(k): TerminologyEntry(name=str(v["name"]), color=str(v["color"]))
+                for k, v in data["terminology"].items()
+            }
+
         super().__init__(
             app_name=data["app"],
-            checkpoints_name=list(data["checkpoints"]),
             display_name=str(data["display_name"]),
-            maximum_tta=int(data["maximum_tta"]),
-            mc_dropout=int(data["mc_dropout"]),
-            terminology=data["terminology"],
-            number_of_models=int(data["number_of_models"]),
             description=str(data["description"]),
             short_description=str(data["short_description"]),
+            checkpoints_name=list(data["checkpoints_name"]),
+            maximum_tta=int(data["maximum_tta"]),
+            mc_dropout=int(data["mc_dropout"]),
+            inputs=inputs,
+            outputs=outputs,
+            inputs_evaluations=inputs_evaluations,
+            terminology=terminology,
         )
 
     def has_capabilities(self) -> tuple[bool, bool, bool]:
@@ -1555,7 +1671,7 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     - "host:port:app_name"      -> AppRepositoryInfoFromRemoteServer
     """
     # Remote: host:port:app_name  (port must be int)
-    if app_id.count(":") > 2:
+    if app_id.count(":") >= 2:
         host, port_str, name_and_token = app_id.split(":", 2)
         name_and_token_split = name_and_token.split("|")
         name = name_and_token
@@ -1567,10 +1683,20 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
             return AppRepositoryInfoFromRemoteServer(remote, name)
 
     # HF: repo_id:app_name (single ':')
-    if ":" in app_id:
+    if app_id.count(":") == 1:
         repo_id, name = app_id.split(":", 1)
         return LocalAppRepositoryFromHF(repo_id, name, force_update)
 
     # Local directory
     path = Path(app_id)
-    return LocalAppRepositoryFromDirectory(path.parent, path.name)
+    if path.exists():
+        return LocalAppRepositoryFromDirectory(path.parent, path.name)
+    else:
+        raise AppRepositoryError(
+            "Invalid app_id format. Expected one of:\n"
+            "  - repo_id:app_name\n"
+            "  - /path/to/app_repository\n"
+            "  - host:port:app_name\n"
+            "  - host:port:app_name|token\n"
+            f"Got: {app_id!r}"
+        )

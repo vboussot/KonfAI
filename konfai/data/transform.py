@@ -897,10 +897,19 @@ class Variance(Transform):
         return tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
 
 
-class Crop(Transform):
+class StandardDeviation(Transform):
 
     def __init__(self) -> None:
         super().__init__()
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensors.float().std(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
+
+
+class Crop(TransformInverse):
+
+    def __init__(self, inverse: bool = True) -> None:
+        super().__init__(inverse)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         data = None

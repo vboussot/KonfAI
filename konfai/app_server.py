@@ -24,7 +24,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
 from typing import Annotated
@@ -327,19 +327,30 @@ def get_app_info(app_id: str):
             "available": False,
         }
 
-    return {
+    result = {
         "app": app_id,
         "available": True,
         "display_name": app.get_display_name(),
         "description": app.get_description(),
         "short_description": app.get_short_description(),
-        "terminology": app.get_terminology(),
-        "number_of_models": app.get_number_of_models(),
+        "checkpoints_name": app.get_checkpoints_name(),
         "maximum_tta": app.get_maximum_tta(),
         "mc_dropout": app.get_mc_dropout(),
-        "checkpoints": app.get_checkpoints_name(),
         "has_capabilities": app.has_capabilities(),
     }
+    terminology = app.get_terminology()
+    if terminology is not None:
+        result["terminology"] = {str(k): asdict(v) for k, v in terminology.items()}
+
+    result["inputs"] = {k: asdict(v) for k, v in app.get_inputs().items()}
+    result["outputs"] = {k: asdict(v) for k, v in app.get_outputs().items()}
+
+    result_tmp: dict[str, dict[str, dict]] = {}
+    for key, entries in app.get_evaluations_inputs().items():
+        by_file = result_tmp.setdefault(key.display_name, {})
+        by_file[key.evaluation_file] = {name: asdict(entry) for name, entry in entries.items()}
+    result["inputs_evaluations"] = result_tmp
+    return result
 
 
 @protected.get("/repo_apps_config/{app_id:path}")

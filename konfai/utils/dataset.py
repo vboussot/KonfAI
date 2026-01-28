@@ -690,7 +690,7 @@ class Dataset:
             groups_set = set()
             for root, _, files in os.walk(self.filename):
                 for file in files:
-                    path = os.path.relpath(os.path.join(root, file.split(".")[0]), self.filename)
+                    path = Path(root, file.split(".")[0]).relative_to(self.filename).as_posix()
                     parts = path.split("/")
                     if len(parts) >= 2:
                         del parts[-2]

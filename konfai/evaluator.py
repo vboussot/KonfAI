@@ -331,6 +331,7 @@ class Evaluator(DistributedObject):
                                                 loss[2].squeeze(0).numpy(),
                                                 cache_attribute,
                                             )
+                                            break
                     else:
                         true_loss = loss.item()
 
