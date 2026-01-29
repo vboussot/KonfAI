@@ -556,9 +556,8 @@ class Trainer(DistributedObject):
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
         self.config_namefile_src = config_file().name.replace(".yml", "")
-        self.config_namefile = (
-            statistics_directory() / self.name / f"{self.config_namefile_src.split("/")[-1]}_{self.it}.yml"
-        )
+        src = Path(self.config_namefile_src)
+        self.config_namefile = statistics_directory() / self.name / f"{src.name}_{self.it}.yml"
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
     def set_model(self, path_to_model: Path) -> None:
@@ -600,9 +599,10 @@ class Trainer(DistributedObject):
 
     def _save(self) -> None:
         if self.config_namefile.exists():
+            new_name = f"{self.config_namefile.stem}_{self.it}.yml"
             os.rename(
                 self.config_namefile,
-                self.config_namefile.parent / f"{self.config_namefile.name.replace(".yml", "")}_{self.it}.yml",
+                self.config_namefile.parent / new_name,
             )
 
     def _avg_fn(self, averaged_model_parameter: float, model_parameter, num_averaged):
@@ -635,8 +635,12 @@ class Trainer(DistributedObject):
                 statistics_directory(),
                 checkpoints_directory(),
             ]:
-                if (directory_path / self.name).exists():
-                    (directory_path / self.name).unlink()
+                path = directory_path / self.name
+                if path.exists():
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
 
         state_dict = {}
         if state != State.TRAIN:
