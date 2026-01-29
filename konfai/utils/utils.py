@@ -872,9 +872,8 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
             tree = api.list_repo_tree(repo_id=repo_id)
             for entry in tree:
                 app_name = Path(entry.path).name
-                if (
-                    isinstance(entry, RepoFolder)
-                    and is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, True))[0]
+                if isinstance(entry, RepoFolder) and is_app_repo(
+                    LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, True)
                 ):
                     app_names.append(app_name)
             return app_names
@@ -898,7 +897,7 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
             for p in root.iterdir():
                 if p.is_dir():
                     app_name = p.name
-                    if is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, False))[0]:
+                    if is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, False)):
                         app_names.append(app_name)
 
             return app_names
@@ -906,24 +905,13 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
             return get_available_apps_on_hf_repo(repo_id, True)
 
 
-def is_app_repo(filenames: list[str]) -> tuple[bool, str, list[str]]:
+def is_app_repo(filenames: list[str]) -> bool:
     """
     Check whether the Hugging Face repository structure is valid for KonfAI.
     Required files:
     - a app file
     """
-    checkpoints_name = []
-    found_metadata_file = False
-
-    for filename in filenames:
-        if filename.endswith(".pt"):
-            checkpoints_name.append(filename)
-        elif filename.endswith("app.json"):
-            found_metadata_file = True
-
-    if not found_metadata_file:
-        return False, "Missing 'app.json' in apps.", []
-    return True, "", checkpoints_name
+    return any(filename.endswith("app.json") for filename in filenames)
 
 
 class VolumeType(Enum):
@@ -966,6 +954,7 @@ class AppRepositoryInfo(ABC):
         description: str,
         short_description: str,
         checkpoints_name: list[str],
+        checkpoints_name_available: list[str],
         maximum_tta: int,
         mc_dropout: int,
         inputs: dict[str, DataEntry],
@@ -980,6 +969,7 @@ class AppRepositoryInfo(ABC):
         self._description = description
         self._short_description = short_description
         self._checkpoints_name = checkpoints_name
+        self._checkpoints_name_available = checkpoints_name_available
         self._maximum_tta = maximum_tta
         self._mc_dropout = mc_dropout
         self._inputs = inputs
@@ -1018,6 +1008,9 @@ class AppRepositoryInfo(ABC):
     def get_checkpoints_name(self) -> list[str]:
         return self._checkpoints_name
 
+    def get_checkpoints_name_available(self) -> list[str]:
+        return self._checkpoints_name_available
+
     def get_maximum_tta(self) -> int:
         return self._maximum_tta
 
@@ -1054,9 +1047,8 @@ class LocalAppRepository(AppRepositoryInfo):
     def __init__(self, app_name: str) -> None:
         self._app_name = app_name
         filenames = self._get_filenames()
-        _, err_message, checkpoints_name = is_app_repo(filenames)
-        if err_message:
-            raise AppRepositoryError(err_message)
+        if not is_app_repo(filenames):
+            raise AppRepositoryError("Missing 'app.json' in apps.")
 
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
         for filename in filenames:
@@ -1136,12 +1128,22 @@ class LocalAppRepository(AppRepositoryInfo):
                 )
                 for k, v in app_repository_metadata["vram_plan"].items()
             }
+        checkpoints_name: list[str] = []
+        if "models" in app_repository_metadata:
+            checkpoints_name = app_repository_metadata["models"]
+
+        checkpoints_name_available: list[str] = []
+        for checkpoint_name in checkpoints_name:
+            if checkpoint_name in filenames:
+                checkpoints_name_available.append(checkpoint_name)
+
         super().__init__(
             app_name=app_name,
             display_name=str(app_repository_metadata["display_name"]),
             description=str(app_repository_metadata["description"]),
             short_description=str(app_repository_metadata["short_description"]),
             checkpoints_name=checkpoints_name,
+            checkpoints_name_available=checkpoints_name_available,
             maximum_tta=maximum_tta,
             mc_dropout=mc_dropout,
             inputs=inputs,
@@ -1196,23 +1198,14 @@ class LocalAppRepository(AppRepositoryInfo):
         filenames = self._get_filenames()
         inference_support = len(self.get_inputs()) > 0
         evaluation_support = len(self.get_evaluations_inputs()) > 0
-        uncertainty_support = False
-
-        for filename in filenames:
-            if filename.endswith("Uncertainty.yml"):
-                uncertainty_support = True
+        uncertainty_support = any(filename == "Uncertainty.yml" for filename in filenames)
         return inference_support, evaluation_support, uncertainty_support
 
     def download_config_file(self) -> list[Path]:
         filenames = self._get_filenames()
-        files_path = []
+        files_path: list[Path] = []
         for filename in filenames:
-            if (
-                filename.endswith(".py")
-                or filename.endswith(".yml")
-                or filename == "app.json"
-                or filename == "requirements.txt"
-            ):
+            if not filename.endswith(".pt"):
                 files_path.append(self._download(filename))
         return files_path
 
@@ -1609,6 +1602,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
             description=str(data["description"]),
             short_description=str(data["short_description"]),
             checkpoints_name=list(data["checkpoints_name"]),
+            checkpoints_name_available=list(data["checkpoints_name_available"]),
             maximum_tta=int(data["maximum_tta"]),
             mc_dropout=int(data["mc_dropout"]),
             inputs=inputs,
