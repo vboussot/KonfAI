@@ -12,15 +12,67 @@
 
 ## 🧩 Overview
 
-**TotalSegmentator-KonfAI** is a lightweight **command-line interface (CLI)** for running  
-**[TotalSegmentator](https://github.com/wasserth/TotalSegmentator)** models for **multi-organ medical image segmentation**,  
-through the [KonfAI](https://github.com/vboussot/KonfAI) deep learning framework.
+**TotalSegmentator-KonfAI** is a lightweight **command-line interface (CLI)** for running **[TotalSegmentator](https://github.com/wasserth/TotalSegmentator)** models for **multi-organ medical image segmentation**, through the [KonfAI](https://github.com/vboussot/KonfAI) deep learning framework.
 
-It provides **fast and efficient inference** for segmentation tasks, including on low-resource hardware.  
-Pretrained models are automatically downloaded from  
-[Hugging Face Hub](https://huggingface.co/VBoussot/TotalSegmentator-KonfAI).
+It provides **fast and efficient inference** for segmentation tasks, including on low-resource hardware. Pretrained models are automatically downloaded from [Hugging Face Hub](https://huggingface.co/VBoussot/TotalSegmentator-KonfAI).
 
 ---
+
+## ⭐ Key Advantages
+
+### 📦 Lightweight model distribution
+
+- **~125 MB per model** 1.5 mm model
+- 🔁 Compared to **~234 MB** per model for the original TotalSegmentator  
+- **~66.2 MB** 3 mm models
+- 🔁 Compared to **~135 MB** (original)
+
+➡️ **Faster setup, smaller disk footprint**
+
+---
+
+## ⚡ Efficient inference
+
+### 🔬 Performance comparison (single CT volume)
+
+**Experimental setup**
+- **Input volume size:** `512 × 512 × 366`
+- **GPU:** NVIDIA RTX 6000
+- **CPU:** Intel® Xeon® w5-3425
+
+---
+
+### Original TotalSegmentator
+
+| Configuration | Time | Peak RAM | Peak VRAM |
+|---------------|------|----------|------------|
+| **Total – 5 models** | 82.37 s | 33.1 GB | ~4.7 GB |
+| **Total 3 mm – 1 model** | 30.07 s | 30.6 GB | ~3.4 GB |
+
+---
+
+### TotalSegmentator-KonfAI
+
+| Configuration | Time | Peak RAM | Peak VRAM |
+|---------------|------|----------|------------|
+| **Total – 5 models** | 61.55 s | 32.5 GB | ~4.3 GB |
+| **Total 3 mm – 1 model** | 22.85 s | 10.5 GB | ~3.4 GB |
+
+---
+
+### 📈 Key observations
+
+- **Faster inference times** compared to the original TotalSegmentator  
+- **Significantly lower RAM usage for 3 mm models** (≈ 10.5 GB vs ≈ 30.6 GB)
+
+---
+
+## 🧠 Features
+
+- ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
+- 🤗 **Automatic model download** from Hugging Face
+- 🧠 **Supports evaluation workflows with reference data**
+- 🧾 **Multi-format compatibility:** supports all major medical image formats handled by ITK
 
 ## 🚀 Installation
 
@@ -64,15 +116,6 @@ totalsegmentator-konfai total -i path/to/image.nii.gz -o ./Output/
 totalsegmentator-konfai total -i path/to/input.nii.gz -o ./Output/ --gt path/to/reference.nii.gz --mask path/to/mask.nii.gz --gpu 0 -uncertainty
 
 ```
-
----
-
-## 🧠 Features
-
-- ⚡ **Fast inference** powered by [KonfAI](https://github.com/vboussot/KonfAI)
-- 🤗 **Automatic model download** from Hugging Face
-- 🧠 **Supports evaluation workflows with reference data**
-- 🧾 **Multi-format compatibility:** supports all major medical image formats handled by ITK
 
 ---
 
