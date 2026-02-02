@@ -626,6 +626,7 @@ async def infer(
     ensemble_models: Annotated[str, Form()] = "",  # CSV
     tta: Annotated[int, Form()] = 0,
     mc: Annotated[int, Form()] = 0,
+    uncertainty: Annotated[bool, Form()] = False,
     prediction_file: Annotated[str, Form()] = "Prediction.yml",
     gpu: Annotated[str | None, Form()] = None,  # CSV "0,1"
     cpu: Annotated[int, Form()] = 1,
@@ -684,6 +685,8 @@ async def infer(
         "--prediction_file",
         prediction_file,
     ]
+    if uncertainty:
+        cmd += ["-uncertainty"]
     if len(ensemble_models_list) > 0:
         cmd += ["--ensemble_models"] + ensemble_models_list
     else:

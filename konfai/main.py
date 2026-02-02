@@ -285,6 +285,7 @@ def main_apps():
 
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
     infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
+    infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
     infer_p.add_argument(
         "--prediction-file",
         "--prediction_file",

@@ -1153,7 +1153,7 @@ class LocalAppRepository(AppRepositoryInfo):
             vram_plan=vram_plan,
         )
 
-    def set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
+    def _set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
         yaml = YAML()
         with open(inference_file_path) as f:
@@ -1169,7 +1169,34 @@ class LocalAppRepository(AppRepositoryInfo):
         with open(inference_file_path, "w") as f:
             yaml.dump(data, f)
 
-    def set_patch_size_and_batch_size(
+    def _disable_uncertainty(self, inference_file_path: str):
+        yaml = YAML()
+        with open(inference_file_path) as f:
+            data = yaml.load(f)
+
+        predictor = data["Predictor"]
+        outputs = predictor["outputs_dataset"]
+
+        has_inference_stack = False
+        for v in outputs.values():
+            after = v["OutputDataset"]["after_reduction_transforms"]
+            if "InferenceStack" in after:
+                has_inference_stack = True
+                break
+        if not has_inference_stack:
+            return
+
+        predictor["combine"] = "Mean"
+        for v in outputs.values():
+            v["OutputDataset"]["reduction"] = "Mean"
+
+            if "InferenceStack" in v["OutputDataset"]["after_reduction_transforms"].keys():
+                del v["OutputDataset"]["after_reduction_transforms"]["InferenceStack"]
+
+        with open(inference_file_path, "w") as f:
+            yaml.dump(data, f)
+
+    def _set_patch_size_and_batch_size(
         self,
         inference_file_path: str,
         patch_size: list[int],
@@ -1300,6 +1327,7 @@ class LocalAppRepository(AppRepositoryInfo):
         number_of_model: int,
         name_of_models: list[str],
         number_of_mc_dropout: int,
+        uncertainty: bool,
         prediction_file: str,
         available_vram: float | None,
     ) -> list[Path]:
@@ -1310,8 +1338,9 @@ class LocalAppRepository(AppRepositoryInfo):
             number_of_model, name_of_models, prediction_file
         )
         shutil.copy2(inference_file_path, prediction_file)
-        self.set_number_of_augmentation(prediction_file, number_of_augmentation)
-
+        self._set_number_of_augmentation(prediction_file, number_of_augmentation)
+        if not uncertainty:
+            self._disable_uncertainty(prediction_file)
         if self._vram_plan is not None and available_vram is not None:
             thresholds = sorted(self._vram_plan.keys())
             selected_t = thresholds[0]
@@ -1321,7 +1350,7 @@ class LocalAppRepository(AppRepositoryInfo):
                 else:
                     break
             vram_plan = self._vram_plan[selected_t]
-            self.set_patch_size_and_batch_size(prediction_file, vram_plan.patch_size, vram_plan.batch_size)
+            self._set_patch_size_and_batch_size(prediction_file, vram_plan.patch_size, vram_plan.batch_size)
         for code_path in codes_path:
             if code_path.suffix == ".py":
                 shutil.copy2(code_path, code_path.name)
@@ -1421,12 +1450,6 @@ class LocalAppRepository(AppRepositoryInfo):
                 "Ensure the metadata file exists and the provided path is correct.",
             )
 
-        if not Path(config_file_path).exists():
-            raise ConfigError(
-                f"Configuration file not found: '{config_file_path}'.",
-                "Ensure the configuration file exists and the provided path is correct.",
-            )
-
         # Load existing metadata
         with open(metadata_file, encoding="utf-8") as f:
             app_repository_metadata = json.load(f)
@@ -1437,6 +1460,12 @@ class LocalAppRepository(AppRepositoryInfo):
         # Save back to disk (UTF-8, pretty JSON)
         with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(app_repository_metadata, f, indent=2, ensure_ascii=False)
+
+        if not Path(config_file_path).exists():
+            raise ConfigError(
+                f"Configuration file not found: '{config_file_path}'.",
+                "Ensure the configuration file exists and the provided path is correct.",
+            )
 
         yaml = YAML()
         with open(config_file_path) as f:

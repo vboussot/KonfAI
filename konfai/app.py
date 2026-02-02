@@ -525,6 +525,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         ensemble_models: list[str] = [],
         tta: int = 0,
         mc: int = 0,
+        uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
         gpu: list[int] = [],
         cpu: int | None = None,
@@ -850,6 +851,7 @@ class KonfAIApp(AbstractKonfAIApp):
         ensemble_models: list[str] = [],
         tta: int = 0,
         mc: int = 0,
+        uncertainty: bool = False,
         prediction_file: str = "Prediction.yml",
         gpu: list[int] = cuda_visible_devices(),
         cpu: int | None = None,
@@ -880,7 +882,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
             available_vram = min(available_vram_per_device)
         models_path = self.app_repository.install_inference(
-            tta, ensemble, ensemble_models, mc, prediction_file, available_vram
+            tta, ensemble, ensemble_models, mc, uncertainty, prediction_file, available_vram
         )
         from konfai.predictor import predict
 
@@ -999,6 +1001,7 @@ class KonfAIApp(AbstractKonfAIApp):
             ensemble_models,
             tta,
             mc,
+            uncertainty,
             prediction_file,
             gpu,
             cpu,
@@ -1050,3 +1053,6 @@ class KonfAIApp(AbstractKonfAIApp):
         from konfai.trainer import train
 
         train(State.RESUME, True, models_path[0], gpu, cpu, quiet, False, config_file)
+
+    def __str__(self) -> str:
+        return str(self.app_repository)

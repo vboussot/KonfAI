@@ -826,6 +826,7 @@ class KonfAIInference(Transform):
             self.checkpoints_name,
             self.number_of_tta,
             mc=0,
+            uncertainty=False,
             gpu=gpu,
         )
 

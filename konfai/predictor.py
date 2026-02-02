@@ -57,7 +57,7 @@ class Reduction(ABC):
         pass
 
     @abstractmethod
-    def __call__(self, tensor: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         raise NotImplementedError()
 
 
@@ -66,8 +66,12 @@ class Mean(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
-        return torch.mean(torch.cat(tensor, dim=0).float(), dim=0).to(tensor[0].dtype).unsqueeze(0)
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        acc = tensors[0].float().clone()
+        for t in tensors[1:]:
+            acc.add_(t.float())
+        acc.div_(len(tensors))
+        return acc.to(dtype=tensors[0].dtype)
 
 
 class Median(Reduction):
@@ -75,8 +79,8 @@ class Median(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
-        return torch.median(torch.cat(tensor, dim=0).float(), dim=0).values.to(tensor[0].dtype).unsqueeze(0)
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        return torch.median(torch.stack(tensors, dim=0).float(), dim=0).values.to(tensors[0].dtype)
 
 
 class Concat(Reduction):
@@ -84,8 +88,8 @@ class Concat(Reduction):
     def __init__(self):
         pass
 
-    def __call__(self, tensor: list[torch.Tensor]) -> torch.Tensor:
-        return torch.cat(tensor, dim=1)
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        return torch.cat(tensors, dim=1)
 
 
 class OutputDataset(Dataset, NeedDevice, ABC):
@@ -296,9 +300,9 @@ class OutSameAsGroupDataset(OutputDataset):
     def _get_output(
         self, index: int, index_augmentation: int, number_of_channels_per_model: list[int], dataset: DatasetIter
     ) -> torch.Tensor:
-        layer = self.output_layer_accumulator[index][index_augmentation].assemble()
-        if index_augmentation > 0:
+        layer = self.output_layer_accumulator[index][index_augmentation].assemble()  # Si concat alors [N*C] sinon [C]
 
+        if index_augmentation > 0:
             i = 0
             index_augmentation_tmp = index_augmentation - 1
             for data_augmentations in dataset.data_augmentations_list:
@@ -307,9 +311,14 @@ class OutSameAsGroupDataset(OutputDataset):
                         layer = data_augmentation.inverse(index, index_augmentation_tmp - i, layer)
                     break
                 i += data_augmentations.nb
-        chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
+
         base_attr = self.attributes[index][index_augmentation][0]
-        base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+        if layer.shape[0] == sum(number_of_channels_per_model):
+            base_attr["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
+            chunks = list(torch.split(layer, number_of_channels_per_model, dim=0))
+        else:
+            chunks = [layer]
+
         results = []
         for i, layer in enumerate(chunks):
             attr = base_attr if (i == len(chunks) - 1) else Attribute(base_attr)
@@ -317,6 +326,7 @@ class OutSameAsGroupDataset(OutputDataset):
                 layer = transform(self.names[index], layer, Attribute(attr))
             results.append(layer)
 
+        # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]
         return torch.stack(results, dim=0)
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
@@ -324,9 +334,48 @@ class OutSameAsGroupDataset(OutputDataset):
             self._get_output(index, index_augmentation, number_of_channels_per_model, dataset).unsqueeze(0)
             for index_augmentation in self.output_layer_accumulator[index].keys()
         ]
-
         self.output_layer_accumulator.pop(index)
         result = self.reduction(results).squeeze(0)
+        if isinstance(self.reduction, Mean) or isinstance(self.reduction, Median):
+            result = result.squeeze(0)
+        # Reduction strategy overview:
+        #
+        # Terminology:
+        #   - combine : aggregation across models (model ensembling)
+        #   - reduce  : aggregation across TTA (test-time augmentation)
+        #
+        # Let:
+        #   M = number of models
+        #   T = number of TTA samples
+        #   C = number of output channels
+        #
+        # Case 1 – combine = Mean / Median, reduce = Mean / Median:
+        #   Models are aggregated first:
+        #     [M, C, ...] → combine → [C, ...]
+        #   TTA samples are then reduced:
+        #     [T, C, ...] → reduce → [C, ...]
+        #
+        # Case 2 – combine = Mean / Median, reduce = Concat:
+        #   Models are aggregated first:
+        #     [M, C, ...] → combine → [C, ...]
+        #   TTA samples are concatenated:
+        #     [T, C, ...] → concat → [T, C, ...]
+        #
+        # Case 3 – combine = Concat, reduce = Mean / Median:
+        #   Model outputs are concatenated:
+        #     [M, C, ...] → concat → [M, C, ...]
+        #   TTA samples are then reduced:
+        #     [T, M, C, ...] → reduce → [M, C, ...]
+        #
+        # Case 4 – combine = Concat, reduce = Concat:
+        #   No reduction is applied at either level:
+        #     [M, C, ...] × T → concat → [M * T, C, ...]
+        #
+        # Important:
+        #   If combine = Concat or reduce = Concat,
+        #   the first transform in `after_reduction_transforms`
+        #   must be either `InferenceStack` or `Sum`,
+        #   to ensure a [C, ....] after
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
@@ -393,7 +442,6 @@ class _Predictor:
         self.dataloader_prediction = dataloader_prediction
         self.outputs_dataset = outputs_dataset
         self.autocast = autocast
-
         self.it = 0
 
         self.dataset: DatasetIter = self.dataloader_prediction.dataset
@@ -445,7 +493,6 @@ class _Predictor:
         if self.tb:
             self.tb.close()
 
-    @torch.no_grad()
     def run(self):
         """
         Run the full prediction loop.
@@ -623,6 +670,7 @@ class ModelComposite(Network):
             self[f"Model_{i}"].load(state_dict, init=False)
             self[f"Model_{i}"].set_name(f"{self[f'Model_{i}'].get_name()}_{i}")
 
+    @torch.inference_mode()
     def forward(  # type: ignore[override]
         self,
         data_dict: dict[tuple[str, bool], torch.Tensor],
@@ -638,20 +686,34 @@ class ModelComposite(Network):
         Returns:
             list[tuple[str, torch.Tensor]]: Aggregated output for each layer, after applying the reduction.
         """
-        result = {}
-        for name, module in self.items():
-            result[name] = module(data_dict, output_layers)
-
-        aggregated = defaultdict(list)
-        for module_outputs in result.values():
-            for key, tensor in module_outputs:
-                if tensor.dtype == torch.float32:
-                    tensor = tensor.to(torch.float16)
-                aggregated[key].append(tensor)
-
         final_outputs = []
-        for key, tensors in aggregated.items():
-            final_outputs.append((key, [t.shape[1] for t in tensors], self.combine(tensors)))
+        if isinstance(self.combine, Mean):
+            sum_acc: dict[str, torch.Tensor] = {}
+            count: dict[str, int] = defaultdict(int)
+            channels: dict[str, list[int]] = defaultdict(list)
+            for module in self.values():
+                for key, tensor in module(data_dict, output_layers):
+                    if tensor.dtype == torch.float32:
+                        tensor = tensor.to(torch.float16)
+                    channels[key].append(tensor.shape[1])
+                    if key not in sum_acc:
+                        sum_acc[key] = tensor
+                    else:
+                        sum_acc[key].add_(tensor)
+                    count[key] += 1
+            for key, acc in sum_acc.items():
+                final_outputs.append((key, channels[key], (acc / count[key])))
+        else:
+            aggregated = defaultdict(list)
+            for module in self.values():
+                for key, tensor in module(data_dict, output_layers):
+                    if tensor.dtype == torch.float32:
+                        tensor = tensor.to(torch.float16)
+                    aggregated[key].append(tensor)
+
+            for key, tensors in aggregated.items():
+                # Mean, Median -> [N, C, ...] | Concat -> [N, C*M, ...]
+                final_outputs.append((key, [t.shape[1] for t in tensors], self.combine(tensors)))
 
         return final_outputs
 
