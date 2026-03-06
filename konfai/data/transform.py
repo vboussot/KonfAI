@@ -561,7 +561,8 @@ class Mask(Transform):
                     break
             if mask is None:
                 raise NameError(f"Mask : {self.path}/{name} not found")
-        return torch.where(torch.tensor(mask) > 0, tensor, self.value_outside)
+        tensor[torch.tensor(mask) == 0] = self.value_outside
+        return tensor
 
 
 class Sum(Transform):
@@ -905,6 +906,19 @@ class StandardDeviation(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensors.float().std(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
+
+
+class Statistics(Transform):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        cache_attribute["ImageMin"] = tensors.float().min()
+        cache_attribute["ImageMax"] = tensors.float().max()
+        cache_attribute["ImageMean"] = tensors.float().mean()
+        cache_attribute["ImageStd"] = tensors.float().std()
+        return tensors
 
 
 class Crop(TransformInverse):

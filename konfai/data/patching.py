@@ -195,6 +195,11 @@ class Patch(ABC):
         pad_value: float = 0,
         extend_slice: int = 0,
     ) -> None:
+        if extend_slice != 0 and patch_size[0] != 1:
+            raise ValueError(
+                "`extend_slice` can only be used when patch_size[0] == 1 "
+                f"(got patch_size[0]={patch_size[0]}, extend_slice={extend_slice})"
+            )
         self.patch_size = patch_size
         self.overlap = overlap
         if isinstance(self.overlap, int):

@@ -2,7 +2,8 @@
 *.egg-info/
 __pycache__/
 dist
-examples
+examples/Synthesis/Dataset
+examples/Synthesis/Task_1
 .coverage
 .pytest_cache
 docs

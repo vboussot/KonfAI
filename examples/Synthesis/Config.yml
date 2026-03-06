@@ -1,0 +1,174 @@
+Trainer:
+  Model:
+    classpath: UNetpp:UNetpp5  # Model definition: UNetpp.py module, UNetpp5 class implementing UNet++ with 5-channel 2.5D input
+    UNetpp5:
+      outputs_criterions:
+        Head:Tanh: # Model output layer used for loss computation
+          targets_criterions:
+            CT: # Target group used to compute the loss (prediction compared with CT ground truth)
+              criterions_loader:
+                MAE: # MAE metric between prediction and CT
+                  is_loss: true
+                  schedulers: # The loss weight remains constant during the entire training
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+                  reduction: mean
+                IMPACTSynth:  # IMPACT-Synth perceptual loss based on SAM features
+                  is_loss: true
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                      value: 1                
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+                  model_name: SAM2.1/SAM2.1_Small.pt # Pretrained model from HuggingFace repo VBoussot/impact-torchscript-models used to extract perceptual features
+                  shape: # Optional resize for the perceptual model (0,0 = keep original size)
+                  - 0
+                  - 0
+                  in_channels: 3 # Output is duplicated to 3 channels to match the perceptual model input
+                  losses: # Internal losses used inside IMPACTSynth
+                    torch:nn:L1Loss:  # L1 loss computed on perceptual feature layers
+                      weights: # One weight per feature layer (this model supports up to 4 layers)
+                      - 1
+                      - 1
+                      - 1
+                      size_average: None
+                      reduce: None
+                      reduction: mean
+            CT;MASK: # Masked MAE metric (evaluation only, not optimized)
+              criterions_loader:
+                MAE: # Masked MAE metric between prediction and CT (used for monitoring, not optimized)
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  is_loss: false # Metric only, not used for backpropagation
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+                  reduction: mean
+      optimizer:  # Optimizer used to update model weights during training
+        name: AdamW
+        lr: 0.001
+        betas:
+        - 0.9
+        - 0.999
+        eps: 1e-08
+        weight_decay: 0.001
+        amsgrad: false
+        maximize: false
+        foreach: None
+        capturable: false
+        differentiable: false
+        fused: None
+      schedulers: # Learning rate scheduler: multiply LR by gamma every `step_size` epochs
+        StepLR:
+          step_size: 10
+          gamma: 0.75
+          last_epoch: -1
+          verbose: deprecated
+          nb_step: 0
+  Dataset:
+    groups_src: # Mapping between dataset modalities and how they are used by the model
+      MASK:
+        groups_dest:
+          MASK:
+            transforms: None
+            patch_transforms: None
+            is_input: false # Mask is not given to the model, only used for metrics or masked evaluations
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Clip:  # Clip CT Hounsfield Units to a valid range
+                min_value: -1024
+                max_value: 3071
+                save_clip_min: true
+                save_clip_max: true
+                mask: None
+              Statistics: {} # Compute dataset statistics (min, max, mean, std) for IMPACT-Synth loss
+              Normalize:
+                lazy: false
+                channels: None
+                min_value: -1
+                max_value: 1
+                inverse: false
+            patch_transforms: None
+            is_input: false # Target modality (used to compute the loss)
+      MR:  # MR images used as input to the model
+        groups_dest:
+          MR:
+            transforms:
+              Clip: # Robust clipping of MR intensities
+                min_value: min
+                max_value: percentile:99.5
+                save_clip_min: false
+                save_clip_max: false
+                mask: MASK
+              Statistics: {} # Compute dataset statistics (min, max, mean, std) for IMPACT-Synth loss
+              Standardize: # Standardization using dataset mean and std
+                lazy: false
+                mean: None
+                std: None
+                mask: None
+                inverse: false
+            patch_transforms: None
+            is_input: true
+    augmentations: # Data augmentations applied during training
+      DataAugmentation_0:
+        data_augmentations:
+          Flip: # Random flip along spatial axes
+            f_prob: # Probability of flipping for each axis (slice, height, width)
+            - 0 # No flip along slice axis
+            - 0.5 # 50% chance to flip vertically
+            - 0.5 # 50% chance to flip horizontally
+            prob: 1 # Apply this augmentation pipeline with probability 1
+        nb: 1 # Number of augmentations generated per sample
+    Patch: # Patch extraction parameters used during training
+      patch_size: # Size of extracted patches [slice, height, width]
+      - 1
+      - 320
+      - 320
+      overlap: None # Overlap between patches (None = no overlap)
+      mask: None
+      pad_value: -1 # Value used when padding outside image boundaries
+      extend_slice: 4 # Number of neighboring slices used as context (2 above and 2 below for 2.5D input)
+    subset: None  # Use the full dataset (or give a file path listing cases; prefix with ~ to exclude cases)
+    shuffle: true # Shuffle samples at each epoch
+    filter: None # Optional dataset filtering rule
+    dataset_filenames:  # Dataset sources (format: folder_path:mode:image_format; mode = a = add cases, i = keep only common cases across datasets)
+    - ./Dataset/:a:mha
+    inline_augmentations: true # Apply new augmentations at each epoch
+    use_cache: true # Cache processed data in memory for faster training
+    batch_size: 5 # Number of samples per training batch
+    validation: None  # Path to a file defining validation cases (each line = patient name)
+  train_name: TRAIN_01  # Training name used to create the output folder structure
+  manual_seed: 32 # Fixed seed for reproducibility
+  epochs: 100
+  it_validation: 2500  # Number of iterations between validation and TensorBoard updates (None = once per epoch)
+
+  # Memory optimization settings to reduce GPU VRAM usage
+  autocast: false
+  gradient_checkpoints: None
+  gpu_checkpoints: None
+
+  ema_decay: 0 # EMA smoothing of model weights during training (0 disables EMA)
+  data_log: # TensorBoard images: MR input, CT target, and predicted sCT
+  - CT/IMAGES/5
+  - MR/IMAGES/5
+  - Head:Tanh/IMAGES/5
+  save_checkpoint_mode: ALL  # Save all checkpoints at each validation (other modes: BEST = keep best + last)
+  EarlyStopping: # Metrics to monitor for early stopping ([] = sum of all metrics, or specify a metric name)
+    monitor: []
+    patience: 30  #Training stops if no improvement after 30 validations
+    min_delta: 0.0
+    mode: min
+

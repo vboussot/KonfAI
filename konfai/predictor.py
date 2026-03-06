@@ -32,10 +32,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
-from konfai.data.data_manager import DataPrediction, DatasetIter
+from konfai.data.data_manager import BatchSample, DataPrediction, DatasetIter
 from konfai.data.patching import Accumulator, PathCombine
 from konfai.data.transform import Transform, TransformInverse, TransformLoader
-from konfai.network.network import Model, ModelLoader, NetState, Network, get_input
+from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import (
@@ -515,20 +515,20 @@ class _Predictor:
         ) as batch_iter:
             with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    for _, data_dict in batch_iter:
-                        input_tensor = get_input(data_dict)
+                    for _, batch_sample in batch_iter:
                         for name, number_of_channels_per_model, output in self.model_composite(
-                            input_tensor, list(self.outputs_dataset.keys())
+                            batch_sample, list(self.outputs_dataset.keys())
                         ):
-                            self._predict_log(data_dict)
+                            self._predict_log(batch_sample)
                             output_dataset = self.outputs_dataset[name]
+                            group = getattr(output_dataset, "group_dest", next(iter(batch_sample)))
                             for i, (index, patch_augmentation, patch_index) in enumerate(
                                 [
                                     (int(index), int(patch_augmentation), int(patch_index))
                                     for index, patch_augmentation, patch_index in zip(
-                                        list(data_dict.values())[0][1],
-                                        list(data_dict.values())[0][2],
-                                        list(data_dict.values())[0][3],
+                                        batch_sample[group].x,
+                                        batch_sample[group].a,
+                                        batch_sample[group].p,
                                     )
                                 ]
                             ):
@@ -542,9 +542,7 @@ class _Predictor:
                                 if output_dataset.is_done(index):
                                     output_dataset.write_prediction(
                                         index,
-                                        self.dataset.get_dataset_from_index(
-                                            list(data_dict.keys())[0], index
-                                        ).name.split("/")[-1],
+                                        batch_sample[group].name[i],
                                         output_dataset.get_output(index, number_of_channels_per_model, self.dataset),
                                     )
 
@@ -553,7 +551,7 @@ class _Predictor:
 
     def _predict_log(
         self,
-        data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
+        batch_sample: BatchSample,
     ):
         """
         Log prediction results to TensorBoard, including images and metrics.
@@ -584,18 +582,18 @@ class _Predictor:
         )
 
         if self.global_rank == 0 and self.tb is not None:
-            data_log = []
+            images_log = []
             if len(self.data_log):
                 for name, data_type in self.data_log.items():
-                    if name in data_dict:
+                    if name in batch_sample:
                         data_type[0](
                             self.tb,
                             f"Prediction/{name}",
-                            data_dict[name][0][: self.data_log[name][1]].detach().cpu().numpy(),
+                            batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
                             self.it,
                         )
                     else:
-                        data_log.append(name.replace(":", "."))
+                        images_log.append(name.replace(":", "."))
 
             for name, network in self.model_composite.module.get_networks().items():
                 if network.measure is not None:
@@ -609,9 +607,10 @@ class _Predictor:
                         {k: v[1] for k, v in measures[name][1].items()},
                         self.it,
                     )
-                if len(data_log):
+                if len(images_log):
                     for name, layer, _ in self.model_composite.module.get_layers(
-                        [v.to(0) for k, v in get_input(data_dict).items() if k[1]], data_log
+                        [v.tensor.to(0) for v in batch_sample.values() if v.is_input],
+                        images_log,
                     ):
                         self.data_log[name][0](
                             self.tb,

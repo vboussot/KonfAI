@@ -27,7 +27,7 @@ import tqdm
 from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
-from konfai.data.data_manager import DataMetric
+from konfai.data.data_manager import BatchSample, DataMetric
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Dataset
 from konfai.utils.utils import (
@@ -283,13 +283,12 @@ class Evaluator(DistributedObject):
         self.statistics_train = Statistics(self.metric_path / "Metric_TRAIN.json")
         self.statistics_validation = Statistics(self.metric_path / "Metric_VALIDATION.json")
 
-    def update(self, data_dict: dict[str, tuple[torch.Tensor, str]], statistics: Statistics) -> dict[str, float]:
+    def update(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
         """
         Compute metrics for a batch and update running statistics.
 
         Args:
-            data_dict (dict): Dictionary where keys are output/target group names and values are
-                            tuples of (tensor, sample name).
+            batch_sample (BatchSample): The batch sample object containing tensors and their metadata.
             statistics (Statistics): The statistics object to update (train or validation).
 
         Returns:
@@ -300,14 +299,18 @@ class Evaluator(DistributedObject):
         for output_group in self.metrics:
             for target_group in self.metrics[output_group]:
                 targets = [
-                    (data_dict[group][0].to(0) if torch.cuda.is_available() else data_dict[group][0])
+                    (batch_sample[group].tensor.to(0) if torch.cuda.is_available() else batch_sample[group].tensor)
                     for group in target_group.split(";")
-                    if group in data_dict
+                    if group in batch_sample
                 ]
-                name = data_dict[output_group][1][0]
+                name = batch_sample[output_group].name[0]
                 for metric in self.metrics[output_group][target_group]:
                     loss = metric(
-                        (data_dict[output_group][0].to(0) if torch.cuda.is_available() else data_dict[output_group][0]),
+                        (
+                            batch_sample[output_group].tensor.to(0)
+                            if torch.cuda.is_available()
+                            else batch_sample[output_group].tensor
+                        ),
                         *targets,
                     )
                     if isinstance(loss, tuple):
@@ -442,11 +445,11 @@ class Evaluator(DistributedObject):
             total=len(dataloaders[0]),
             ncols=0,
         ) as batch_iter:
-            for _, data_dict in batch_iter:
+            for _, batch_sample in batch_iter:
                 batch_iter.set_description(
                     description(
                         self.update(
-                            {k: (v[0], v[4]) for k, v in data_dict.items()},
+                            batch_sample,
                             self.statistics_train,
                         )
                     )
@@ -470,11 +473,11 @@ class Evaluator(DistributedObject):
                 total=len(dataloaders[1]),
                 ncols=0,
             ) as batch_iter:
-                for _, data_dict in batch_iter:
+                for _, batch_sample in batch_iter:
                     batch_iter.set_description(
                         description(
                             self.update(
-                                {k: (v[0], v[4]) for k, v in data_dict.items()},
+                                batch_sample,
                                 self.statistics_validation,
                             )
                         )

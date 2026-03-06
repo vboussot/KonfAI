@@ -99,6 +99,64 @@ All commands support:
 
 ------------------------------------------------------------------------
 
+## 📦 Available KonfAI Apps
+
+Several ready-to-use KonfAI Apps are already available and can be used to test the framework.
+
+These apps can be downloaded directly from **Hugging Face** and executed with `konfai-apps`.  
+In the CLI examples above, you can simply replace `my_app` with one of the following App identifiers.
+
+### Synthetic CT generation (IMPACT-Synth)
+
+- **MR → CT synthesis**
+
+```
+VBoussot/ImpactSynth:MR
+```
+
+- **CBCT → CT synthesis**
+
+```
+VBoussot/ImpactSynth:CBCT
+```
+
+These models generate **synthetic CT images** from MR or CBCT scans.  
+They were trained on **carefully aligned image pairs using IMPACT-Reg**, which helps reduce **registration bias** between modalities.
+
+---
+
+### Segmentation Apps
+
+**TotalSegmentator**
+
+```
+VBoussot/TotalSegmentator-KonfAI:total
+VBoussot/TotalSegmentator-KonfAI:total_mr
+VBoussot/TotalSegmentator-KonfAI:total_mr-3mm
+VBoussot/TotalSegmentator-KonfAI:total-3mm
+```
+
+These apps perform **whole-body anatomical segmentation**.
+
+Different variants are provided depending on the modality and resolution:
+
+- `total` → standard CT model  
+- `total-3mm` → CT model optimized for **3 mm resolution**  
+- `total_mr` → model trained for **MR images**  
+- `total_mr-3mm` → MR model optimized for **3 mm resolution**
+
+---
+
+- **MRSegmentator**
+
+```
+VBoussot/MRSegmentator-KonfAI:MRSegmentator
+```
+
+Performs **organ segmentation from MR images**.
+
+---
+
 ## 🌐 Remote Execution (Client / Server Mode)
 
 KonfAI Apps can be executed on a **remote server** without modifying your

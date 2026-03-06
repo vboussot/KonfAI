@@ -589,7 +589,6 @@ def run_distributed_app(
         if bound.arguments.get("tensorboard"):
             os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
 
-        torch.autograd.set_detect_anomaly(True)
         os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
         os.environ["KONFAI_VERBOSE"] = str(not bound.arguments.get("quiet"))
         is_cluster = "resubmit" in kwargs
@@ -621,10 +620,10 @@ def run_distributed_app(
                             world_size = cpu
                         distributed_object.setup(world_size)
                         with TensorBoard(distributed_object.name):
-                            if world_size > 1:
-                                mp.spawn(distributed_object, nprocs=world_size)
-                            else:
-                                distributed_object(0)
+                            # if world_size > 1:
+                            mp.spawn(distributed_object, nprocs=world_size)
+                            # else:
+                            #    distributed_object(0)
 
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")

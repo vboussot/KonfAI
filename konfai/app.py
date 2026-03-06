@@ -221,7 +221,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                 "Please verify the host and port, or select another remote server."
             )
 
-    def stream_logs(self, job_id: str, connect_timeout: int = 3, read_timeout: int = 300):
+    def stream_logs(self, job_id: str, connect_timeout: int = 60, read_timeout: int = 600):
         """
         Stream server-side job logs using Server-Sent Events (SSE).
 
@@ -281,7 +281,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         except requests.RequestException as e:
             raise RuntimeError(f"Failed to stream logs from {url}: {e}") from e
 
-    def kill_job(self, job_id: str, timeout_s: float = 5.0) -> None:
+    def kill_job(self, job_id: str, timeout_s: float = 60) -> None:
         """
         Request termination of a remote job.
 
@@ -327,7 +327,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
             raise RuntimeError(f"Failed to kill job {job_id}: {e}") from e
 
     def download_result(
-        self, job_id: str, out_dir: Path, connect_timeout: int = 3, read_timeout: int = 300, max_wait_s: int = 600
+        self, job_id: str, out_dir: Path, connect_timeout: int = 60, read_timeout: int = 600, max_wait_s: int = 600
     ):
         """
         Download and unpack the result archive for a remote job.
@@ -481,8 +481,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             data["ensemble_models"] = ",".join(data["ensemble_models"])
                         else:
                             del data["ensemble_models"]
-                    connect_timeout = 3
-                    read_timeout: int = 300
+                    connect_timeout = 60
+                    read_timeout: int = 600
 
                     with requests.post(
                         f"{self.remote_server.get_url()}/apps/{self.app}/{func.__name__}",

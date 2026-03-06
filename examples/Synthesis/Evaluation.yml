@@ -1,0 +1,45 @@
+Evaluator:
+  metrics:  # Metrics computed to evaluate the predicted sCT against ground truth CT
+    sCT: # Predicted modality to evaluate
+      targets_criterions:
+        CT;MASK: # Evaluation performed only inside the MASK region
+          criterions_loader:
+            MAE: # Mean Absolute Error between sCT and CT
+              reduction: mean
+            PSNR: # Peak Signal-to-Noise Ratio metric
+              dynamic_range: None
+            SSIM: # Structural Similarity Index
+              dynamic_range: None
+  Dataset: # Mapping between dataset modalities and evaluation inputs
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              TensorCast: # Ensure CT tensors are in float32 for metric computation
+                dtype: float32
+                inverse: true
+            isInput: true
+      sCT:
+        groups_dest:
+          sCT:
+            transforms:
+              TensorCast: # Convert predicted sCT to float32 before computing metrics
+                dtype: float32
+                inverse: true
+            isInput: true
+      MASK:
+        groups_dest:
+          MASK:
+            transforms:
+              TensorCast: # Mask used to restrict metric computation
+                dtype: uint8
+                inverse: true
+            isInput: true
+    subset: None # Use the full dataset
+    validation: None # Optional file listing validation cases (one patient per line); evaluated separately from training and produces a separate metrics JSON (useful for test cases)
+    filter: None # Optional dataset filtering rule
+    dataset_filenames: # Dataset sources (ground truth CT + predicted sCT)
+    - ./Dataset:a:mha
+    - ./Predictions/TRAIN_01/Dataset:i:mha
+  train_name: TRAIN_01

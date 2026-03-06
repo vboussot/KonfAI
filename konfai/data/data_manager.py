@@ -18,11 +18,13 @@ import math
 import os
 import random
 import threading
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from functools import partial
-from typing import cast
+from typing import TypeAlias, cast
 
 import numpy as np
 import torch
@@ -141,6 +143,48 @@ class CustomSampler(Sampler[int]):
         return self.size
 
 
+@dataclass(frozen=True)
+class DataItem:
+    name: str
+    tensor: torch.Tensor
+    attribute: Attribute
+    x: int
+    a: int
+    p: int
+    is_input: bool
+
+
+@dataclass(frozen=True)
+class BatchDataItem:
+    name: list[str]
+    tensor: torch.Tensor  # [B, ...]
+    attribute: list[Attribute]
+    x: list[int]
+    a: list[int]
+    p: list[int]
+    is_input: bool
+
+
+Sample: TypeAlias = dict[str, DataItem]
+BatchSample: TypeAlias = dict[str, BatchDataItem]
+
+
+def collate_konfai(batch: list[Sample]) -> BatchSample:
+    batch_sample: BatchSample = {}
+    for k in batch[0].keys():
+        items = [b[k] for b in batch]
+        batch_sample[k] = BatchDataItem(
+            tensor=torch.stack([it.tensor for it in items], dim=0),
+            x=[it.x for it in items],
+            a=[it.a for it in items],
+            p=[it.p for it in items],
+            attribute=[it.attribute for it in items],
+            name=[it.name for it in items],
+            is_input=items[0].is_input,
+        )
+    return batch_sample
+
+
 class DatasetIter(data.Dataset):
 
     def __init__(
@@ -209,22 +253,47 @@ class DatasetIter(data.Dataset):
                     )
 
                 pbar = tqdm.tqdm(total=len(indexs), desc=desc(), leave=False)
+                stop_event = threading.Event()
 
                 def process(index):
+                    if stop_event.is_set():
+                        return
                     self._load_data(index)
                     with memory_lock:
                         pbar.set_description(desc(pbar.n + 1))
                         pbar.update(1)
 
                 cpu_count = os.cpu_count() or 1
-                with ThreadPoolExecutor(
-                    max_workers=cpu_count // (device_count() if device_count() > 0 else 1)
-                ) as executor:
-                    futures = [executor.submit(process, index) for index in indexs]
-                    for _ in as_completed(futures):
-                        pass
+                try:
+                    with ThreadPoolExecutor(
+                        max_workers=cpu_count // (device_count() if device_count() > 0 else 1)
+                    ) as executor:
+                        future_to_index = {executor.submit(process, index): index for index in indexs}
+                        for fut in as_completed(future_to_index):
+                            index = future_to_index[fut]
+                            try:
+                                fut.result()
+                            except Exception as e:
+                                stop_event.set()
+                                for f in future_to_index:
+                                    f.cancel()
+                                tb = traceback.format_exc()
+                                raise RuntimeError(
+                                    f"Error while caching {label} (index={index})\n"
+                                    f"{type(e).__name__}: {e}\n\n"
+                                    f"Traceback (worker):\n{tb}"
+                                ) from e
 
-                pbar.close()
+                except KeyboardInterrupt:
+                    stop_event.set()
+                    try:
+                        for f in future_to_index:
+                            f.cancel()
+                    except Exception:  # nosec B110
+                        pass
+                    raise
+                finally:
+                    pbar.close()
 
     def _load_data(self, index):
         if index not in self._index_cache:
@@ -234,10 +303,19 @@ class DatasetIter(data.Dataset):
                 self.load_data(group_src, group_dest, index)
 
     def load_data(self, group_src: str, group_dest: str, index: int) -> None:
-        self.data[group_dest][index].load(
-            self.groups_src[group_src][group_dest].transforms,
-            self.data_augmentations_list,
-        )
+        item = self.data[group_dest][index]
+        try:
+            item.load(
+                self.groups_src[group_src][group_dest].transforms,
+                self.data_augmentations_list,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Error while loading data "
+                f"(group_src={group_src}, group_dest={group_dest}, "
+                f"index={index}, name={item.name}) : "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
     def _unload_data(self, index: int) -> None:
         if index in self._index_cache:
@@ -252,8 +330,8 @@ class DatasetIter(data.Dataset):
     def __len__(self) -> int:
         return len(self.mapping)
 
-    def __getitem__(self, index: int) -> dict[str, tuple[torch.Tensor, int, int, int, str, bool]]:
-        data = {}
+    def __getitem__(self, index: int) -> Sample:
+        sample: Sample = {}
         x, a, p = self.mapping[index]
         if x not in self._index_cache:
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
@@ -263,20 +341,21 @@ class DatasetIter(data.Dataset):
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 dataset = self.data[group_dest][x]
-                data[f"{group_dest}"] = (
+                sample[f"{group_dest}"] = DataItem(
+                    dataset.name,
                     dataset.get_data(
                         p,
                         a,
                         self.groups_src[group_src][group_dest].patch_transforms,
                         self.groups_src[group_src][group_dest].is_input,
                     ),
+                    dataset.cache_attributes[a],
                     x,
                     a,
                     p,
-                    dataset.name,
                     self.groups_src[group_src][group_dest].is_input,
                 )
-        return data
+        return sample
 
 
 class Subset:
@@ -396,10 +475,7 @@ class Data(ABC):
             buffer_size=batch_size + 1,
             use_cache=use_cache,
         )
-        self.dataLoader_args = {
-            "num_workers": 0,
-            "pin_memory": False,
-        }
+        self.dataLoader_args = {"num_workers": 0, "pin_memory": False, "collate_fn": collate_konfai}
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self.datasets: dict[str, Dataset] = {}

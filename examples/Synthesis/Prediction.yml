@@ -1,0 +1,95 @@
+Predictor:
+  Model:
+    classpath: UNetpp:UNetpp5 # Model definition: UNetpp.py module, UNetpp5 class implementing UNet++ with 5-channel 2.5D input
+    UNetpp5:
+      outputs_criterions: None # No metric during inference (can be enabled to log metrics in TensorBoard and verify consistency with training)
+  Dataset:
+    groups_src:  # Mapping between dataset modalities and model inputs
+      MR:
+        groups_dest:
+          MR:
+            transforms:
+              Clip: # Robust clipping of MR intensities
+                min_value: min
+                max_value: percentile:99.5
+                save_clip_min: false
+                save_clip_max: false
+                mask: MASK
+              Standardize: # Standardization using mean/std computed inside the mask
+                lazy: false
+                mean: None
+                std: None
+                mask: MASK # Mean and std are computed only within this mask
+                inverse: false
+              Mask:
+                path: MASK
+                value_outside: -2
+            patch_transforms: None
+            is_input: true  # MR images are the model input
+      MASK: # Mask the input outside the body region
+        groups_dest:
+          MASK:
+            transforms: None
+            patch_transforms: None
+            is_input: false # Mask is only used for preprocessing/postprocessing
+    augmentations: # Test-time augmentations (TTA)
+      DataAugmentation_0:
+        data_augmentations:
+          Flip: # Horizontal flip
+            f_prob:
+            - 0
+            - 0
+            - 1
+            prob: 1
+        nb: 1
+      DataAugmentation_1:
+        data_augmentations:
+          Flip:  # Vertical flip
+            f_prob:
+            - 0
+            - 1
+            - 0
+            prob: 1
+        nb: 1
+    Patch: # Patch extraction used during inference
+      patch_size:  # Size of patches processed by the network
+      - 1
+      - 512
+      - 512
+      overlap: None
+      mask: None
+      pad_value: -1
+      extend_slice: 4 # 2 slices above + 2 below for 2.5D context
+    subset: None # Use the full dataset
+    filter: None # Optional dataset filtering
+    dataset_filenames: # Dataset sources (format: folder_path:mode:image_format)
+    - ./Dataset:a:mha
+    use_cache: false # Disable caching to reduce RAM usage during prediction
+    batch_size: 1 # Number of patches processed per batch during inference
+  outputs_dataset:
+    Head:Tanh:  # Model output used to generate the predicted dataset
+      OutputDataset: # Output dataset built using the same spatial structure as the input group
+        name_class: OutSameAsGroupDataset
+        before_reduction_transforms: None
+        after_reduction_transforms: None
+        final_transforms:  # Final transforms applied before saving the prediction
+          UnNormalize:UnNormalize: {} # Restore original CT intensity scale
+          Mask: # Apply body mask to the output
+            path: MASK
+            value_outside: -1024
+          TensorCast: # Convert tensor type before saving
+            dtype: int16
+            inverse: false
+        dataset_filename: Dataset:mha # Output dataset format
+        group: sCT # Name of the predicted modality
+        same_as_group: MR:MR # Use MR geometry (spacing/origin/orientation)
+        patch_combine: None  # No patch combination needed because 512*512 patches cover the full image slice
+        inverse_transform: false # If true, apply the inverse of transforms marked with inverse=true from the reference group
+        reduction: Mean # Combine predictions from TTA using the Mean or Median
+        Mean: {}
+  train_name: TRAIN_01  # Name of the prediction run (output folder)
+  manual_seed: 32
+  gpu_checkpoints: None  # VRAM optimization option
+  autocast: false # VRAM optimization option
+  combine: Mean  # Combine predictions from using the Mean or Median
+  data_log: None # No TensorBoard logging during prediction

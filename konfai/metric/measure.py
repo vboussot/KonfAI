@@ -30,6 +30,7 @@ from konfai.data.patching import ModelPatch
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.config import apply_config
+from konfai.utils.dataset import Attribute
 from konfai.utils.utils import get_module
 
 models_register = {}
@@ -40,15 +41,37 @@ class Criterion(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
 
-    def init(self, model: torch.nn.Module, output_group: str, target_group: str) -> str:
-        return output_group
-
     def get_name(self):
         return self.__class__.__name__
 
     @abstractmethod
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError()
+
+
+class CriterionWithInit(Criterion):
+    accepts_init = True
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    @abstractmethod
+    def init(self, model: torch.nn.Module, output_group: str, target_group: str) -> str:
+        raise NotImplementedError()
+
+
+class CriterionWithAttribute(Criterion):
+
+    accepts_attributes = True
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    @abstractmethod
+    def forward(  # type: ignore[override]
+        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    ) -> torch.Tensor:
+        raise NotImplementedError()
 
 
 class MaskedLoss(Criterion):
@@ -78,20 +101,19 @@ class MaskedLoss(Criterion):
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is not None:
             for batch in range(output.shape[0]):
-                if self.mode_image_masked:
-                    loss_b = self.loss(
-                        output[batch, ...].float() * torch.where(mask == 1, 1, 0),
-                        targets[0][batch, ...].float() * torch.where(mask == 1, 1, 0),
-                    )
-                else:
-                    index = mask[batch, ...] == 1
-                    loss_b = self.loss(
-                        torch.masked_select(output[batch, ...], index).float(),
-                        torch.masked_select(targets[0][batch, ...], index).float(),
-                    )
-
-                loss += loss_b
                 if torch.any(mask[batch] == 1):
+                    if self.mode_image_masked:
+                        loss_b = self.loss(
+                            output[batch, ...].float() * torch.where(mask == 1, 1, 0),
+                            targets[0][batch, ...].float() * torch.where(mask == 1, 1, 0),
+                        )
+                    else:
+                        index = mask[batch, ...] == 1
+                        loss_b = self.loss(
+                            torch.masked_select(output[batch, ...], index).float(),
+                            torch.masked_select(targets[0][batch, ...], index).float(),
+                        )
+                    loss += loss_b
                     true_loss += loss_b.item()
                     true_nb += 1
         else:
@@ -507,7 +529,7 @@ class PerceptualLoss(Criterion):
         return loss.to(output)
 
 
-class KLDivergence(Criterion):
+class KLDivergence(CriterionWithInit):
 
     def __init__(self, shape: list[int], dim: int = 100, mu: float = 0, std: float = 1) -> None:
         super().__init__()
@@ -519,7 +541,6 @@ class KLDivergence(Criterion):
         self.loss = torch.nn.KLDivLoss()
 
     def init(self, model: Network, output_group: str, target_group: str) -> str:
-        super().init(model, output_group, target_group)
         model._compute_channels_trace(model, model.in_channels, None, None)
 
         last_module = model
@@ -719,7 +740,7 @@ class MutualInformationLoss(torch.nn.Module):
         return torch.mean(mi).neg()  # average over the batch and channel ndims
 
 
-class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthesis
+class IMPACTSynth(CriterionWithAttribute):
 
     class Weights:
 
@@ -737,6 +758,10 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         if model_name is None:
             return
         self.in_channels = in_channels
+        lengths = {len(w.weights) for w in losses.values()}
+        if len(lengths) != 1:
+            raise ValueError(f"Inconsistent number of weights across losses: {lengths}")
+        self.nb_layer = lengths.pop()
         self.weighted_losses = {}
         for loss, weights in losses.items():
             module, name = get_module(loss, "konfai.metric.measure")
@@ -753,10 +778,11 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
         self.dim = len(shape)
         self.shape = shape if all(s > 0 for s in shape) else None
         self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
+        self.mode = "bilinear" if len(shape) == 2 else "trilinear"
 
         dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
         try:
-            out = self.model.to(0)(dummy_input)
+            out = self.model.to(0)(dummy_input, torch.tensor([self.nb_layer]))
             if not isinstance(out, (list, tuple)):
                 raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
             for name, weights in losses.items():
@@ -775,7 +801,7 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
             raise RuntimeError(msg) from e
         self.model = None
 
-    def preprocessing(self, tensor: torch.Tensor) -> torch.Tensor:
+    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> torch.Tensor:
         if self.shape is not None and not all(
             tensor.shape[-i - 1] == size for i, size in enumerate(reversed(self.shape[2:]))
         ):
@@ -784,30 +810,60 @@ class IMPACTSynth(Criterion):  # Feature-Oriented Comparison for Unpaired Synthe
             ).type(torch.float32)
         if tensor.shape[1] != self.in_channels:
             tensor = tensor.repeat(tuple([1, 3] + [1 for _ in range(self.dim)]))
-        return tensor
 
-    def _compute(self, output: torch.Tensor, targets: list[torch.Tensor]) -> torch.Tensor:
+        def mean_attr(key):
+            return sum(float(attr[key]) for attr in attribute) / len(attribute)
+
+        if "Mean" in attribute[0] and "Std" in attribute[0]:
+            mean_value = torch.tensor([float(a.get_tensor("Mean")) for a in attribute], device=tensor.device).view(
+                -1, *([1] * (tensor.dim() - 1))
+            )
+            std_value = torch.tensor([float(a.get_tensor("Std")) for a in attribute], device=tensor.device).view(
+                -1, *([1] * (tensor.dim() - 1))
+            )
+            tensor = tensor * std_value + mean_value
+        elif "Min" in attribute[0] and "Max" in attribute[0]:
+            min_value = torch.tensor([float(a.get_tensor("Min")) for a in attribute], device=tensor.device).view(
+                -1, *([1] * (tensor.dim() - 1))
+            )
+            max_value = torch.tensor([float(a.get_tensor("Max")) for a in attribute], device=tensor.device).view(
+                -1, *([1] * (tensor.dim() - 1))
+            )
+            tensor = (tensor + 1) / 2 * (max_value - min_value) + min_value
+        return [
+            tensor,
+            torch.tensor([self.nb_layer]),
+            torch.tensor([mean_attr("ImageMin"), mean_attr("ImageMax"), mean_attr("ImageMean"), mean_attr("ImageStd")]),
+        ]
+
+    def _compute(
+        self, output: torch.Tensor, targets: list[torch.Tensor], attributes: list[list[Attribute]]
+    ) -> torch.Tensor:
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
-        output = self.preprocessing(output)
-        targets = [self.preprocessing(target) for target in targets]
         self.model.to(output.device)
-        for i, zipped_output in enumerate(zip(self.model(output), *[self.model(target) for target in targets])):
+        self.model.eval()
+        output = self.preprocessing(output, attributes[-1])
+        targets = [self.preprocessing(target, attribute) for target, attribute in zip(targets, attributes)]
+        for i, zipped_output in enumerate(zip(self.model(*output), *[self.model(*target) for target in targets])):
             output_feature = zipped_output[0]
+
             targets_features = zipped_output[1:]
             for target_feature, (sub_loss, weights) in zip(targets_features, self.weighted_losses.items()):
                 loss += weights[i] * sub_loss(output_feature, target_feature)
         return loss
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+    def forward(  # type: ignore[override]
+        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    ) -> torch.Tensor:
         if self.model is None:
             self.model = torch.jit.load(self.model_path)  # nosec B614
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and self.dim == 2:
             for i in range(output.shape[2]):
-                loss += self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets])
+                loss += self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets], attributes)
             loss /= output.shape[2]
         else:
-            loss = self._compute(output, list(targets))
+            loss = self._compute(output, list(targets), attributes)
         return loss.to(output)
 
 

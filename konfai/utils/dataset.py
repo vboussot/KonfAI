@@ -164,7 +164,7 @@ def read_landmarks(filename: Path) -> np.ndarray | None:
 def write_landmarks(data: np.ndarray, filename: Path) -> None:
     with open(filename, "w") as f:
         f.write(
-            "# Markups fiducial file version = 4.6\n# CoordinateSystem = 0\n#"
+            "# Markups fiducial file version = 4.6\n# CoordinateSystem = LPS\n#"
             " columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n",
         )
         for i in range(data.shape[0]):

@@ -34,8 +34,8 @@ from konfai import (
     konfai_state,
     statistics_directory,
 )
-from konfai.data.data_manager import DataTrain
-from konfai.network.network import Model, ModelLoader, NetState, Network, get_input
+from konfai.data.data_manager import BatchSample, DataTrain
+from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
 from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, description, run_distributed_app
 
@@ -239,17 +239,16 @@ class _Trainer:
             leave=False,
             ncols=0,
         ) as batch_iter:
-            for _, data_dict in batch_iter:
+            for _, batch_sample in batch_iter:
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    input_data_dict = get_input(data_dict)
-                    self.model(input_data_dict)
+                    self.model(batch_sample)
                     self.model.module.backward(self.model.module)
                     if self.model_ema is not None:
                         self.model_ema.update_parameters(self.model)
-                        self.model_ema.module(input_data_dict)
+                        self.model_ema.module(batch_sample)
                     self.it += 1
                     if (self.it) % self.it_validation == 0:
-                        loss = self._train_log(data_dict)
+                        loss = self._train_log(batch_sample)
 
                         if self.dataloader_validation is not None:
                             loss = self._validate()
@@ -277,7 +276,7 @@ class _Trainer:
         if self.model_ema is not None:
             self.model_ema.module.set_state(NetState.PREDICTION)
 
-        data_dict = None
+        batch_sample: BatchSample = {}
         with tqdm.tqdm(
             iterable=enumerate(self.dataloader_validation),
             desc=f"Validation : {description(self.model, self.model_ema)}",
@@ -285,11 +284,10 @@ class _Trainer:
             leave=False,
             ncols=0,
         ) as batch_iter:
-            for _, data_dict in batch_iter:
-                input_data_dict = get_input(data_dict)
-                self.model(input_data_dict)
+            for _, batch_sample in batch_iter:
+                self.model(batch_sample)
                 if self.model_ema is not None:
-                    self.model_ema.module(input_data_dict)
+                    self.model_ema.module(batch_sample)
 
                 batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}")
         self.dataloader_validation.dataset.reset_augmentation("Validation")
@@ -298,7 +296,7 @@ class _Trainer:
         self.model.module.set_state(NetState.TRAIN)
         if self.model_ema is not None:
             self.model_ema.module.set_state(NetState.TRAIN)
-        return self._validation_log(data_dict)
+        return self._validation_log(batch_sample)
 
     def checkpoint_save(self, loss: float | None) -> None:
         """
@@ -369,14 +367,14 @@ class _Trainer:
     def _log(
         self,
         type_log: str,
-        data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
+        batch_sample: BatchSample,
     ) -> dict[str, float] | None:
         """
         Logs losses, metrics and optionally images to TensorBoard.
 
         Args:
             type_log (str): "Training" or "Validation".
-            data_dict (dict): Dictionary of data from current batch.
+            batch_item (dict): Dictionary of BatchItem from current batch.
 
         Returns:
             dict[str, float] | None: Dictionary of aggregated losses and metrics if rank == 0.
@@ -401,11 +399,11 @@ class _Trainer:
             images_log = []
             if len(self.data_log):
                 for name, data_type in self.data_log.items():
-                    if name in data_dict:
+                    if name in batch_sample:
                         data_type[0](
                             self.tb,
                             f"{type_log}/{name}",
-                            data_dict[name][0][: self.data_log[name][1]].detach().cpu().numpy(),
+                            batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
                             self.it,
                         )
                     else:
@@ -438,7 +436,7 @@ class _Trainer:
 
                     if len(images_log):
                         for name, layer, _ in model.get_layers(
-                            [v.to(0) for k, v in get_input(data_dict).items() if k[1]],
+                            [v.tensor.to(0) for v in batch_sample.values() if v.is_input],
                             images_log,
                         ):
                             self.data_log[name][0](
@@ -467,14 +465,14 @@ class _Trainer:
         return None
 
     @torch.no_grad()
-    def _train_log(self, data_dict: dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[str, float]:
+    def _train_log(self, batch_sample: BatchSample) -> dict[str, float]:
         """Wrapper for _log during training."""
-        return self._log("Training", data_dict)
+        return self._log("Training", batch_sample)
 
     @torch.no_grad()
-    def _validation_log(self, data_dict: dict[str, tuple[torch.Tensor, int, int, int]]) -> dict[str, float]:
+    def _validation_log(self, batch_sample: BatchSample) -> dict[str, float]:
         """Wrapper for _log during validation."""
-        return self._log("Validation", data_dict)
+        return self._log("Validation", batch_sample)
 
 
 @config("Trainer")
@@ -540,24 +538,12 @@ class Trainer(DistributedObject):
         modules = []
         for i, _ in self.model.named_modules():
             modules.append(i)
-        if self.data_log is not None:
-            for k in self.data_log:
-                tmp = k.split("/")[0].replace(":", ".")
-                if tmp not in self.dataset.get_groups_dest() and tmp not in modules:
-                    raise TrainerError(
-                        f"Invalid key '{tmp}' in `data_log`.",
-                        f"This key is neither a destination group from the dataset ({self.dataset.get_groups_dest()})",
-                        f"nor a valid module name in the model ({modules}).",
-                        "Please check your `data_log` configuration,"
-                        " it should reference either a model output or a dataset group.",
-                    )
-
         self.gradient_checkpoints = gradient_checkpoints
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
-        self.config_namefile_src = config_file().name.replace(".yml", "")
-        src = Path(self.config_namefile_src)
-        self.config_namefile = statistics_directory() / self.name / f"{src.name}_{self.it}.yml"
+        self.config_path_src = config_file()
+        config_namefile = self.config_path_src.name.replace(".yml", "")
+        self.config_namefile = statistics_directory() / self.name / f"{config_namefile}_{self.it}.yml"
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
     def set_model(self, path_to_model: Path) -> None:
@@ -661,7 +647,7 @@ class Trainer(DistributedObject):
                 self.model_ema.module.load(state_dict, init=False, ema=True)
 
         (statistics_directory() / self.name).mkdir(exist_ok=True)
-        shutil.copyfile(self.config_namefile_src + ".yml", self.config_namefile)
+        shutil.copyfile(self.config_path_src, self.config_namefile)
 
         self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
         with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
@@ -690,9 +676,8 @@ class Trainer(DistributedObject):
         """
         model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
         model = DDP(model, static_graph=True) if dist.is_initialized() else Model(model)
-
         if self.model_ema is not None:
-            self.model_ema.module = Network.to(self.model_ema.module, local_rank)
+            self.model_ema.module = Network.to(self.model_ema.module, local_rank * self.size)
         with _Trainer(
             world_size,
             global_rank,

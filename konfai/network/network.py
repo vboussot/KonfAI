@@ -24,6 +24,8 @@ from enum import Enum
 from functools import partial
 from typing import Any
 
+from konfai.utils.dataset import Attribute
+
 try:
     from typing import Self  # Python ≥ 3.11
 except ImportError:
@@ -35,6 +37,7 @@ from torch._jit_internal import _copy_to_script_wrapper
 from torch.utils.checkpoint import checkpoint
 
 from konfai import konfai_root
+from konfai.data.data_manager import BatchSample
 from konfai.data.patching import Accumulator, ModelPatch
 from konfai.metric.schedulers import Scheduler
 from konfai.utils.config import apply_config, config
@@ -56,6 +59,7 @@ class PatchIndexed:
         return len(self.patch.get_patch_slices(0)) == self.index
 
 
+@config("optimizer")
 class OptimizerLoader:
 
     def __init__(self, name: str = "AdamW") -> None:
@@ -269,7 +273,7 @@ class Measure:
                             "and correctly loaded from the dataset.",
                         )
                 for criterion in self.outputs_criterions[output_group][target_group]:
-                    if not self.outputs_criterions[output_group][target_group][criterion].isTorchCriterion:
+                    if getattr(self.outputs_criterions[output_group][target_group][criterion], "accepts_init", False):
                         outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
 
         outputs_criterions_bak = self.outputs_criterions.copy()
@@ -296,24 +300,33 @@ class Measure:
         self,
         output_group: str,
         output: torch.Tensor,
-        data_dict: dict[str, torch.Tensor],
+        batch_data_with_attribute: dict[str, tuple[torch.Tensor, list[Attribute]]],
         it: int,
         nb_patch: int,
         training: bool,
     ) -> None:
         for target_group in self.outputs_criterions[output_group]:
-            target = [
-                data_dict[group].to(output[0].device).detach()
+            target_data = [
+                batch_data_with_attribute[group][0].to(output[0].device).detach()
                 for group in target_group.split(";")
-                if group in data_dict
+                if group in batch_data_with_attribute
+            ]
+            target_attribute = [
+                batch_data_with_attribute[group][1]
+                for group in target_group.split(";")
+                if group in batch_data_with_attribute
             ]
 
             for criterion, criterions_attr in self.outputs_criterions[output_group][target_group].items():
                 if it >= criterions_attr.start and (criterions_attr.stop is None or it <= criterions_attr.stop):
                     scheduler = self.update_scheduler(criterions_attr.schedulers, it)
+                    if getattr(criterion, "accepts_attributes", False):
+                        loss = criterion(output, *target_data, attributes=target_attribute)
+                    else:
+                        loss = criterion(output, *target_data)
                     self._loss[criterions_attr.group][
                         f"{output_group}:{target_group}:{criterion.__class__.__name__}"
-                    ].add(scheduler.get_value(), criterion(output, *target))
+                    ].add(scheduler.get_value(), loss)
                     if (
                         training
                         and len(
@@ -1159,7 +1172,7 @@ class Network(ModuleArgsDict, ABC):
 
     def forward(
         self,
-        data_dict: dict[tuple[str, bool], torch.Tensor],
+        batch_sample: BatchSample,
         output_layers: list[str] = [],
     ) -> list[tuple[str, torch.Tensor]]:
         if not len(self.outputsGroup) and not len(output_layers):
@@ -1171,33 +1184,44 @@ class Network(ModuleArgsDict, ABC):
         for _outputs_group in self.outputsGroup:
             for name in _outputs_group:
                 measure_output_layers.add(name)
+
         for name, layer, patch_indexed in self.get_layers(
-            [v for k, v in data_dict.items() if k[1]],
+            [batch_data_item.tensor for batch_data_item in batch_sample.values() if batch_data_item.is_input],
             list(set(list(measure_output_layers) + output_layers)),
         ):
-
             outputs_group = [outputs_group for outputs_group in self.outputsGroup if name in outputs_group]
+
             if len(outputs_group) > 0:
                 if patch_indexed is None:
-                    targets = {k[0]: v for k, v in data_dict.items()}
+                    batch_data_with_attribute = {
+                        k: (batch_data_item.tensor, batch_data_item.attribute)
+                        for k, batch_data_item in batch_sample.items()
+                    }
                     nb = 1
                 else:
-                    targets = {
-                        k[0]: patch_indexed.patch.get_data(v, patch_indexed.index, 0, False)
-                        for k, v in data_dict.items()
+                    batch_data_with_attribute = {
+                        k: (
+                            patch_indexed.patch.get_data(batch_data_item.tensor, patch_indexed.index, 0, False),
+                            batch_data_item.attribute,
+                        )
+                        for k, batch_data_item in batch_sample.items()
                     }
                     nb = patch_indexed.patch.get_size(0)
 
                 for output_group in outputs_group:
                     output_group.add_layer(name, layer)
                     if output_group.is_done():
-                        targets.update(
-                            {k.replace(".", ":"): v for k, v in output_group.layers.items() if k != output_group[0]}
+                        batch_data_with_attribute.update(
+                            {
+                                k.replace(".", ":"): (batch_data_item, [Attribute()])
+                                for k, batch_data_item in output_group.layers.items()
+                                if k != output_group[0]
+                            }
                         )
                         output_group.measure.update(
                             output_group[0],
                             output_group.layers[output_group[0]],
-                            targets,
+                            batch_data_with_attribute,
                             self._it,
                             nb,
                             self.training,
@@ -1354,22 +1378,7 @@ class Model:
 
     def __call__(
         self,
-        data_dict: dict[tuple[str, bool], torch.Tensor],
+        batch_sample: BatchSample,
         output_layers: list[str] = [],
     ) -> list[tuple[str, torch.Tensor]]:
-        return self.module(data_dict, output_layers)
-
-
-def get_input(
-    data_dict: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[str], torch.Tensor]],
-) -> dict[tuple[str, bool], torch.Tensor]:
-    """
-    Extracts input tensors from the data dict for model input.
-
-    Args:
-        data_dict (dict): Dictionary with data items structured as tuples.
-
-    Returns:
-        dict: Mapping from (group, bool_flag) to input tensors.
-    """
-    return {(k, v[5][0].item()): v[0] for k, v in data_dict.items()}
+        return self.module(batch_sample, output_layers)

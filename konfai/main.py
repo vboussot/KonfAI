@@ -708,19 +708,25 @@ def _run(parser: argparse.ArgumentParser) -> None:
     )
 
     args = vars(parser.parse_args())
-    if args["config"] is None:
-        del args["config"]
+
     if args["command"] == "PREDICTION":
         from konfai.predictor import predict
 
+        if args["config"] is not None:
+            args["prediction_file"] = args.pop("config")
         predict(**args)
     elif args["command"] == "EVALUATION":
         from konfai.evaluator import evaluate
+
+        if args["config"] is not None:
+            args["evaluations_file"] = args.pop("config")
 
         evaluate(**args)
     else:
         from konfai.trainer import train
 
+        if args["config"] is None:
+            del args["config"]
         train(**args)
 
 
