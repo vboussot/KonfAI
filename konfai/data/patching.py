@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Patch extraction, accumulation, and patch-combination helpers for KonfAI."""
+
 import copy
 import itertools
 from abc import ABC, abstractmethod
@@ -33,6 +35,7 @@ from konfai.utils.utils import get_module, get_patch_slices_from_shape
 
 
 class PathCombine(ABC):
+    """Base class for overlap-aware weighting schemes applied during patch assembly."""
 
     def __init__(self) -> None:
         self.data: torch.Tensor
@@ -103,6 +106,7 @@ class PathCombine(ABC):
 
 
 class Mean(PathCombine):
+    """Uniform patch-combination strategy for overlapping predictions."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -112,6 +116,7 @@ class Mean(PathCombine):
 
 
 class Cosinus(PathCombine):
+    """Cosine-based weighting strategy for smoother overlap blending."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -127,6 +132,7 @@ class Cosinus(PathCombine):
 
 
 class Accumulator:
+    """Accumulate patch predictions and reassemble them into a full tensor."""
 
     def __init__(
         self,
@@ -186,6 +192,7 @@ class Accumulator:
 
 
 class Patch(ABC):
+    """Abstract base class for dataset-level and model-level patch definitions."""
 
     @abstractmethod
     def __init__(
@@ -290,6 +297,7 @@ class Patch(ABC):
 
 @config("Patch")
 class DatasetPatch(Patch):
+    """Patch definition applied when sampling data from datasets."""
 
     def __init__(
         self,
@@ -306,6 +314,7 @@ class DatasetPatch(Patch):
 
 @config("Patch")
 class ModelPatch(Patch):
+    """Patch definition applied inside model graphs during prediction or training."""
 
     def __init__(
         self,
@@ -335,6 +344,7 @@ class ModelPatch(Patch):
 
 
 class DatasetManager:
+    """Cache-backed manager for one dataset case and one source/destination group."""
 
     def __init__(
         self,

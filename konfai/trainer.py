@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Training workflow entrypoints and orchestration for KonfAI."""
+
 import os
 import shutil
 from pathlib import Path
@@ -41,6 +43,7 @@ from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, 
 
 
 class EarlyStoppingBase:
+    """Minimal protocol for early stopping strategies used by :class:`Trainer`."""
 
     def __init__(self):
         pass
@@ -712,6 +715,40 @@ def train(
     checkpoints_dir: Path | str = Path("./Checkpoints/"),
     statistics_dir: Path | str = Path("./Statistics/"),
 ) -> DistributedObject:
+    """
+    Build and return the configured training workflow.
+
+    The decorator surrounding this function initializes the distributed runtime
+    and prompts for overwrite handling before the returned object is executed.
+
+    Parameters
+    ----------
+    command : State, optional
+        Training command variant, typically ``State.TRAIN`` or ``State.RESUME``.
+    overwrite : bool, optional
+        Whether existing outputs may be overwritten without prompting.
+    model : Path | str | None, optional
+        Checkpoint path used when resuming training.
+    gpu : list[int] | None, optional
+        GPU ids to expose to the workflow.
+    cpu : int | None, optional
+        Number of CPU workers when running without GPUs.
+    quiet : bool, optional
+        Whether to reduce console output.
+    tensorboard : bool, optional
+        Whether to start TensorBoard through the runtime wrapper.
+    config : Path | str, optional
+        Training configuration file.
+    checkpoints_dir : Path | str, optional
+        Output directory for checkpoints.
+    statistics_dir : Path | str, optional
+        Output directory for statistics and logs.
+
+    Returns
+    -------
+    DistributedObject
+        Configured trainer object ready to be executed by the runtime wrapper.
+    """
     os.environ["KONFAI_config_file"] = str(Path(config).resolve())
     os.environ["KONFAI_ROOT"] = "Trainer"
     os.environ["KONFAI_STATE"] = str(command)

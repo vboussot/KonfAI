@@ -1,0 +1,111 @@
+Trainer:
+  Model:
+    classpath: segmentation.UNet.UNet
+    UNet:
+      dim: 2
+      Patch:
+        patch_size:
+        - 256
+        - 256
+        overlap: None
+        patch_combine: None
+        pad_value: 0
+        extend_slice: 0
+      channels:
+      - 1
+      - 32
+      - 64
+      - 128
+      - 256
+      nb_class: 41
+      outputs_criterions:
+        UNetBlock_0:Head:Conv:
+          targets_criterions:
+            SEG:
+              criterions_loader:
+                torch:nn:CrossEntropyLoss:
+                  is_loss: true
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+      optimizer:
+        name: AdamW
+        lr: 0.001
+        weight_decay: 0.0001
+      schedulers:
+        StepLR:
+          step_size: 20
+          gamma: 0.5
+          last_epoch: -1
+          verbose: deprecated
+          nb_step: 0
+  Dataset:
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Standardize:
+                lazy: false
+                mean: None
+                std: None
+                mask: None
+                inverse: false
+            patch_transforms: None
+            is_input: true
+      SEG:
+        groups_dest:
+          SEG:
+            transforms:
+              TensorCast:
+                dtype: int64
+                inverse: false
+              Squeeze:
+                dim: 0
+                inverse: false
+            patch_transforms: None
+            is_input: false
+    augmentations:
+      DataAugmentation_0:
+        data_augmentations:
+          Flip:
+            f_prob:
+            - 0
+            - 0.5
+            - 0.5
+            prob: 1
+        nb: 1
+    Patch:
+      patch_size:
+      - 1
+      - 256
+      - 256
+      overlap: None
+      mask: None
+      pad_value: 0
+      extend_slice: 0
+    subset: None
+    shuffle: true
+    filter: None
+    dataset_filenames:
+    - ./Dataset:a:mha
+    inline_augmentations: true
+    use_cache: true
+    batch_size: 8
+    validation: 0.2
+  train_name: SEG_BASELINE
+  manual_seed: 32
+  epochs: 100
+  it_validation: 500
+  autocast: false
+  gradient_checkpoints: None
+  gpu_checkpoints: None
+  ema_decay: 0
+  data_log: None
+  save_checkpoint_mode: BEST
+  EarlyStopping: None

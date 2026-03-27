@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Configuration helpers that map YAML trees to KonfAI Python objects."""
+
 import collections
 import inspect
 import os
@@ -32,6 +34,15 @@ yaml = ruamel.yaml.YAML()
 
 
 class Config:
+    """
+    Context manager for reading and updating a subtree of the active YAML config.
+
+    Parameters
+    ----------
+    key : str
+        Dot-separated path pointing to the configuration subtree to inspect or
+        materialize.
+    """
 
     def __init__(self, key: str) -> None:
         self.filename = Path(os.environ["KONFAI_config_file"])
@@ -91,6 +102,8 @@ class Config:
             if data is None:
                 data = {}
         with open(self.filename, "w") as yml:
+            # Only the currently visited subtree is rewritten; the recursive
+            # merge preserves the rest of the YAML file untouched.
             yaml.dump(
                 self.merge(
                     data,
@@ -114,6 +127,8 @@ class Config:
 
     @staticmethod
     def _get_input_default(name: str, default: str | None, is_list: bool = False) -> list[str | None] | str | None:
+        # ``default|value`` is KonfAI's marker for "materialize this default if
+        # the user/config did not provide a concrete value".
         if isinstance(default, str) and (
             default == "default" or (len(default.split("|")) > 1 and default.split("|")[0] == "default")
         ):
@@ -184,6 +199,8 @@ class Config:
                     dict_value[key] = value_tmp
                 value = dict_value
         if isinstance(self.config, str):
+            # Scalar config branches are tracked through the environment so
+            # nested ``apply_config`` calls can detect variable-only contexts.
             os.environ["KONFAI_CONFIG_VARIABLE"] = "True"
             return None
 
@@ -194,6 +211,20 @@ class Config:
 
 
 def config(key: str | None = None):
+    """
+    Attach a KonfAI configuration key to a class or callable.
+
+    Parameters
+    ----------
+    key : str | None, optional
+        Configuration branch handled by the decorated object.
+
+    Returns
+    -------
+    Callable
+        Decorator storing the key on the decorated object.
+    """
+
     def decorator(function):
         function._key = key
         return function
@@ -202,6 +233,20 @@ def config(key: str | None = None):
 
 
 def apply_config(konfai_args: str | None = None):
+    """
+    Recursively instantiate callables from the active KonfAI configuration.
+
+    Parameters
+    ----------
+    konfai_args : str | None, optional
+        Root configuration path used to resolve nested constructor arguments.
+
+    Returns
+    -------
+    Callable
+        Decorator that injects configuration-backed arguments at call time.
+    """
+
     def decorator(function):
         def new_function(*args, **kwargs):
             key = getattr(function, "_key", None)

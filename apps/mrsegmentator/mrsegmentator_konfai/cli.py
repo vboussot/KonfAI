@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Command-line wrapper for running MRSegmentator through KonfAI Apps."""
+
 import argparse
 
 from konfai.app import KonfAIApp
@@ -23,6 +25,7 @@ MR_SEGMENTATOR_KONFAI_REPO = "VBoussot/MRSegmentator-KonfAI"
 
 
 def main():
+    """Parse CLI arguments and run the MRSegmentator app pipeline."""
     parser = argparse.ArgumentParser(
         prog="mrsegmentator-konfai",
         description="MRSegmentator (KonfAI app wrapper)",

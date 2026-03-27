@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Data augmentation primitives applied by KonfAI datasets."""
+
 import os
 from abc import ABC, abstractmethod
 

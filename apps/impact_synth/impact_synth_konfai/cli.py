@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Command-line wrapper for running IMPACT-Synth through KonfAI Apps."""
+
 import argparse
 
 from konfai.app import KonfAIApp
@@ -24,6 +26,7 @@ IMPACT_SYNTH_KONFAI_REPO = "VBoussot/ImpactSynth"
 
 
 def main():
+    """Parse CLI arguments and run the selected IMPACT-Synth app pipeline."""
     parser = argparse.ArgumentParser(
         prog="impact-synth-konfai",
         description="ImpactSynth (KonfAI app wrapper)",

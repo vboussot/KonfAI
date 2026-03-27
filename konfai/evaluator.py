@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Evaluation workflow classes and helpers for KonfAI."""
+
 import builtins
 import json
 import os
@@ -513,6 +515,31 @@ def evaluate(
     evaluations_file: Path | str = Path("./Evaluation.yml").resolve(),
     evaluations_dir: Path | str = Path("./Evaluations").resolve(),
 ) -> DistributedObject:
+    """
+    Build and return the configured evaluation workflow.
+
+    Parameters
+    ----------
+    overwrite : bool, optional
+        Whether existing evaluation outputs may be overwritten.
+    gpu : list[int] | None, optional
+        GPU ids to expose to the evaluation process.
+    cpu : int | None, optional
+        Number of CPU workers when running without GPUs.
+    quiet : bool, optional
+        Whether to reduce console output.
+    tensorboard : bool, optional
+        Whether to start TensorBoard through the runtime wrapper.
+    evaluations_file : Path | str, optional
+        Evaluation configuration file.
+    evaluations_dir : Path | str, optional
+        Directory where metrics and JSON reports are written.
+
+    Returns
+    -------
+    DistributedObject
+        Configured evaluator object ready to be executed by the runtime wrapper.
+    """
     os.environ["KONFAI_config_file"] = str(Path(evaluations_file).resolve())
     os.environ["KONFAI_ROOT"] = "Evaluator"
     os.environ["KONFAI_STATE"] = str(State.EVALUATION)

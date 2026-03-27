@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Dataset assembly, subset selection, and dataloader orchestration for KonfAI."""
+
 import math
 import os
 import random
@@ -51,6 +53,7 @@ from konfai.utils.utils import (
 
 
 class GroupTransform:
+    """Collection of transforms attached to one source-to-destination group path."""
 
     def __init__(
         self,
@@ -102,6 +105,7 @@ class GroupTransform:
 
 
 class GroupTransformMetric(GroupTransform):
+    """Metric-specific group transform that omits patch-time transforms."""
 
     def __init__(
         self,
@@ -113,6 +117,7 @@ class GroupTransformMetric(GroupTransform):
 
 
 class Group(dict[str, GroupTransform]):
+    """Mapping of destination group names to transform pipelines."""
 
     def __init__(
         self,
@@ -122,6 +127,7 @@ class Group(dict[str, GroupTransform]):
 
 
 class GroupMetric(dict[str, GroupTransformMetric]):
+    """Metric-oriented variant of :class:`Group` used during evaluation."""
 
     def __init__(
         self,
@@ -131,6 +137,7 @@ class GroupMetric(dict[str, GroupTransformMetric]):
 
 
 class CustomSampler(Sampler[int]):
+    """Simple sampler that optionally shuffles indices without distributed logic."""
 
     def __init__(self, size: int, shuffle: bool = False) -> None:
         self.size = size
@@ -145,6 +152,8 @@ class CustomSampler(Sampler[int]):
 
 @dataclass(frozen=True)
 class DataItem:
+    """Single tensor sample together with dataset metadata and patch indices."""
+
     name: str
     tensor: torch.Tensor
     attribute: Attribute
@@ -156,6 +165,8 @@ class DataItem:
 
 @dataclass(frozen=True)
 class BatchDataItem:
+    """Batch-level representation of multiple :class:`DataItem` objects."""
+
     name: list[str]
     tensor: torch.Tensor  # [B, ...]
     attribute: list[Attribute]
@@ -170,6 +181,7 @@ BatchSample: TypeAlias = dict[str, BatchDataItem]
 
 
 def collate_konfai(batch: list[Sample]) -> BatchSample:
+    """Collate KonfAI samples into the batch structure expected by the workflows."""
     batch_sample: BatchSample = {}
     for k in batch[0].keys():
         items = [b[k] for b in batch]
@@ -186,6 +198,7 @@ def collate_konfai(batch: list[Sample]) -> BatchSample:
 
 
 class DatasetIter(data.Dataset):
+    """Torch dataset view over KonfAI dataset managers and patch mappings."""
 
     def __init__(
         self,
@@ -441,6 +454,7 @@ class PredictionSubset(Subset):
 
 
 class Data(ABC):
+    """Abstract base class shared by training, prediction, and evaluation datasets."""
 
     @abstractmethod
     def __init__(
@@ -815,6 +829,7 @@ class Data(ABC):
 
 @config("Dataset")
 class DataTrain(Data):
+    """Dataset configuration used by the training workflow."""
 
     def __init__(
         self,
@@ -843,6 +858,7 @@ class DataTrain(Data):
 
 @config("Dataset")
 class DataPrediction(Data):
+    """Dataset configuration used by the prediction workflow."""
 
     def __init__(
         self,
@@ -869,6 +885,7 @@ class DataPrediction(Data):
 
 @config("Dataset")
 class DataMetric(Data):
+    """Dataset configuration used by the evaluation workflow."""
 
     def __init__(
         self,

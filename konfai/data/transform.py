@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tensor and image transforms used in KonfAI preprocessing and postprocessing."""
+
 import tempfile
 from abc import ABC, abstractmethod
 from multiprocessing import get_context
@@ -33,6 +35,7 @@ from konfai.utils.utils import NeedDevice, TransformError, _affine_matrix, _resa
 
 
 class Transform(NeedDevice, ABC):
+    """Base class for transforms operating on tensors and cached attributes."""
 
     def __init__(self) -> None:
         NeedDevice.__init__(self)
@@ -50,6 +53,7 @@ class Transform(NeedDevice, ABC):
 
 
 class TransformInverse(Transform, ABC):
+    """Base class for transforms that can also invert their effect."""
 
     def __init__(self, inverse: bool) -> None:
         super().__init__()
@@ -61,6 +65,7 @@ class TransformInverse(Transform, ABC):
 
 
 class TransformLoader:
+    """Resolve and instantiate transform classes from KonfAI configuration."""
 
     def __init__(self) -> None:
         pass
@@ -71,6 +76,7 @@ class TransformLoader:
 
 
 class Clip(Transform):
+    """Clip tensor intensities to a fixed or data-dependent value range."""
 
     def __init__(
         self,
@@ -152,6 +158,7 @@ class Clip(Transform):
 
 
 class Normalize(TransformInverse):
+    """Map intensities to a target min/max interval and optionally invert it."""
 
     def __init__(
         self,
@@ -226,6 +233,7 @@ class UnNormalize(Transform):
 
 
 class Standardize(TransformInverse):
+    """Standardize tensors using cached or computed mean and standard deviation."""
 
     def __init__(
         self,

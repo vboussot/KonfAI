@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Model graph composition, routing, and optimization helpers for KonfAI."""
+
 import importlib
 import inspect
 import os
@@ -45,11 +47,14 @@ from konfai.utils.utils import MeasureError, State, TrainerError, get_device, ge
 
 
 class NetState(Enum):
+    """Execution state of a network inside KonfAI workflows."""
+
     TRAIN = (0,)
     PREDICTION = 1
 
 
 class PatchIndexed:
+    """Track progress while consuming the patches produced by a :class:`ModelPatch`."""
 
     def __init__(self, patch: ModelPatch, index: int) -> None:
         self.patch = patch
@@ -61,6 +66,7 @@ class PatchIndexed:
 
 @config("optimizer")
 class OptimizerLoader:
+    """Configuration-aware factory for PyTorch optimizers."""
 
     def __init__(self, name: str = "AdamW") -> None:
         self.name = name
@@ -72,6 +78,7 @@ class OptimizerLoader:
 
 
 class LRSchedulersLoader:
+    """Configuration-aware factory for learning-rate schedulers."""
 
     def __init__(self, nb_step: int = 0) -> None:
         self.nb_step = nb_step
@@ -93,6 +100,7 @@ class LRSchedulersLoader:
 
 
 class LossSchedulersLoader:
+    """Factory for scalar schedulers attached to losses and metrics."""
 
     def __init__(self, nb_step: int = 0) -> None:
         self.nb_step = nb_step
@@ -104,6 +112,7 @@ class LossSchedulersLoader:
 
 
 class CriterionsAttr:
+    """Metadata describing how a criterion is applied within the model graph."""
 
     def __init__(
         self,
@@ -125,6 +134,7 @@ class CriterionsAttr:
 
 
 class CriterionsLoader:
+    """Instantiate the criteria attached to one output/target pair."""
 
     def __init__(
         self,
@@ -162,6 +172,7 @@ class CriterionsLoader:
 
 
 class TargetCriterionsLoader:
+    """Resolve criteria for all targets associated with one model output."""
 
     def __init__(
         self,
@@ -181,6 +192,7 @@ class TargetCriterionsLoader:
 
 
 class Measure:
+    """Collect, validate, and aggregate losses or metrics across model outputs."""
 
     class Loss:
 
@@ -421,6 +433,7 @@ class Measure:
 
 
 class ModuleArgsDict(torch.nn.Module, ABC):
+    """Named module graph container supporting KonfAI branch routing metadata."""
 
     class ModuleArgs:
 
@@ -704,6 +717,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
 
 class OutputsGroup(list):
+    """Container describing one model output and its source modules."""
 
     def __init__(self, measure: Measure) -> None:
         self.layers: dict[str, torch.Tensor] = {}
@@ -720,6 +734,7 @@ class OutputsGroup(list):
 
 
 class Network(ModuleArgsDict, ABC):
+    """Base class for KonfAI networks participating in a routed model graph."""
 
     def _apply_network(
         self,
@@ -881,6 +896,13 @@ class Network(ModuleArgsDict, ABC):
             )
 
     def apply(self, fn: Callable[[torch.nn.Module], None]) -> None:
+        """
+        Apply ``fn`` to each non-KonfAI child module and finally to ``self``.
+
+        This overrides ``torch.nn.Module.apply`` so the recursive traversal can
+        skip nested ``Network`` instances and keep KonfAI's graph semantics
+        intact.
+        """
         for module in self.children():
             if not isinstance(module, Network):
                 module.apply(fn)
@@ -1305,6 +1327,7 @@ class Network(ModuleArgsDict, ABC):
 
 
 class MinimalModel(Network):
+    """Small wrapper exposing a single network as a full KonfAI model graph."""
 
     def __init__(
         self,
@@ -1334,6 +1357,7 @@ class MinimalModel(Network):
 
 @config("Model")
 class ModelLoader:
+    """Instantiate the root model graph declared in the active configuration."""
 
     def __init__(self, classpath: str = "default|segmentation.UNet.UNet") -> None:
         self.classpath = classpath
@@ -1366,6 +1390,7 @@ class ModelLoader:
 
 
 class Model:
+    """High-level model wrapper combining networks, criteria, and execution state."""
 
     def __init__(self, model: Network) -> None:
         self.module = model

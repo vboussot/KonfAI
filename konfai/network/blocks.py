@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Reusable network blocks and tensor graph helpers for KonfAI models."""
+
 import ast
 import importlib
 from collections.abc import Callable
@@ -27,6 +29,8 @@ from konfai.utils.config import config
 
 
 class NormMode(Enum):
+    """Enumeration of normalization layers supported by KonfAI blocks."""
+
     NONE = (0,)
     BATCH = 1
     INSTANCE = 2
@@ -37,6 +41,7 @@ class NormMode(Enum):
 
 
 def get_norm(norm_mode: Enum, channels: int, dim: int) -> torch.nn.Module | None:
+    """Instantiate the normalization layer matching the requested mode."""
     if norm_mode == NormMode.BATCH:
         return get_torch_module("BatchNorm", dim=dim)(channels, affine=True, track_running_stats=True)
     if norm_mode == NormMode.INSTANCE:
@@ -64,6 +69,7 @@ class DownsampleMode(Enum):
 
 
 def get_torch_module(name_fonction: str, dim: int | None = None) -> torch.nn.Module:
+    """Return a dimensional PyTorch module class such as ``Conv2d`` or ``Conv3d``."""
     return getattr(
         importlib.import_module("torch.nn"),
         f"{name_fonction}" + (f"{dim}d" if dim is not None else ""),
@@ -72,6 +78,7 @@ def get_torch_module(name_fonction: str, dim: int | None = None) -> torch.nn.Mod
 
 @config("BlockConfig")
 class BlockConfig:
+    """Configuration object describing one convolutional block stage."""
 
     def __init__(
         self,
@@ -124,6 +131,7 @@ class BlockConfig:
 
 
 class ConvBlock(network.ModuleArgsDict):
+    """Sequential convolution, normalization, and activation block."""
 
     def __init__(
         self,
@@ -150,6 +158,7 @@ class ConvBlock(network.ModuleArgsDict):
 
 
 class ResBlock(network.ModuleArgsDict):
+    """Residual block with optional projection on the skip path."""
 
     def __init__(
         self,
@@ -201,6 +210,7 @@ class ResBlock(network.ModuleArgsDict):
 
 
 def downsample(in_channels: int, out_channels: int, downsample_mode: DownsampleMode, dim: int) -> torch.nn.Module:
+    """Return the downsampling module matching the requested strategy."""
     if downsample_mode == DownsampleMode.MAXPOOL:
         return get_torch_module("MaxPool", dim=dim)(2)
     if downsample_mode == DownsampleMode.AVGPOOL:
@@ -217,6 +227,7 @@ def upsample(
     kernel_size: int | list[int] = 2,
     stride: int | list[int] = 2,
 ):
+    """Return the upsampling module matching the requested strategy."""
     if upsample_mode == UpsampleMode.CONV_TRANSPOSE:
         return get_torch_module("ConvTranspose", dim=dim)(
             in_channels=in_channels,

@@ -6,7 +6,7 @@ examples/Synthesis/Dataset
 examples/Synthesis/Task_1
 .coverage
 .pytest_cache
-docs
 .vscode
 .mypy_cache
 apps/impact_reg
+docs/build/

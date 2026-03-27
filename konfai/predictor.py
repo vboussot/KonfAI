@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Prediction workflow classes, reductions, and export helpers for KonfAI."""
+
 import builtins
 import copy
 import importlib
@@ -51,6 +53,7 @@ from konfai.utils.utils import (
 
 
 class Reduction(ABC):
+    """Abstract reduction applied across model ensemble or augmentation outputs."""
 
     @abstractmethod
     def __init__(self):
@@ -62,6 +65,7 @@ class Reduction(ABC):
 
 
 class Mean(Reduction):
+    """Average ensemble or augmentation predictions element-wise."""
 
     def __init__(self):
         pass
@@ -75,6 +79,7 @@ class Mean(Reduction):
 
 
 class Median(Reduction):
+    """Compute the element-wise median across prediction tensors."""
 
     def __init__(self):
         pass
@@ -84,6 +89,7 @@ class Median(Reduction):
 
 
 class Concat(Reduction):
+    """Concatenate prediction tensors along the channel dimension."""
 
     def __init__(self):
         pass
@@ -93,6 +99,13 @@ class Concat(Reduction):
 
 
 class OutputDataset(Dataset, NeedDevice, ABC):
+    """
+    Abstract prediction sink that accumulates model outputs and writes them to disk.
+
+    Concrete subclasses define how layers are accumulated across patches,
+    augmentations, and multiple models before the final prediction volume is
+    materialized.
+    """
 
     def __init__(
         self,
@@ -225,6 +238,11 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 
 @config("OutputDataset")
 class OutSameAsGroupDataset(OutputDataset):
+    """
+    Output dataset that mirrors the geometry and transform chain of an input group.
+
+    This is the default output writer used by KonfAI prediction workflows.
+    """
 
     def __init__(
         self,
@@ -391,6 +409,7 @@ class OutSameAsGroupDataset(OutputDataset):
 
 @config("OutputDataset")
 class OutputDatasetLoader:
+    """Factory that instantiates output dataset classes from predictor config."""
 
     def __init__(self, name_class: str = "OutSameAsGroupDataset") -> None:
         self.name_class = name_class
@@ -976,6 +995,33 @@ def predict(
     prediction_file: Path | str = Path("./Prediction.yml").resolve(),
     predictions_dir: Path | str = Path("./Predictions").resolve(),
 ) -> DistributedObject:
+    """
+    Build and return the configured prediction workflow.
+
+    Parameters
+    ----------
+    models : list[Path]
+        One or more checkpoint files to load for prediction.
+    overwrite : bool, optional
+        Whether existing prediction outputs may be overwritten.
+    gpu : list[int] | None, optional
+        GPU ids to expose to the prediction process.
+    cpu : int, optional
+        Number of CPU workers when running without GPUs.
+    quiet : bool, optional
+        Whether to reduce console output.
+    tb : bool, optional
+        Whether to start TensorBoard through the runtime wrapper.
+    prediction_file : Path | str, optional
+        Prediction configuration file.
+    predictions_dir : Path | str, optional
+        Directory where prediction outputs are written.
+
+    Returns
+    -------
+    DistributedObject
+        Configured predictor object ready to be executed by the runtime wrapper.
+    """
     os.environ["KONFAI_config_file"] = str(Path(prediction_file).resolve())
     os.environ["KONFAI_ROOT"] = "Predictor"
     os.environ["KONFAI_STATE"] = str(State.PREDICTION)

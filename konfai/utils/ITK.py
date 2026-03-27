@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""SimpleITK-based helpers for geometric transforms, resampling, and masking."""
+
 import numpy as np
 import SimpleITK as sitk  # noqa: N813
 import torch

@@ -16,6 +16,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Command-line entrypoints for KonfAI workflows, apps, and services."""
+
 import argparse
 import importlib
 import json
@@ -35,25 +37,27 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     Add shared CLI arguments for KonfAI "apps-style" commands and parse them.
 
     This helper is used for commands that operate on medical volumes/datasets and
-    share the same input/output/device semantics. It adds:
-    - inputs (required, multi-group via `action="append"`)
-    - optional ground-truth and mask (same grouping behavior)
-    - output directory
-    - optional `-uncertainty` flag (when enabled by `with_uncertainty`)
-    - mutually exclusive device selection:
-        * `--gpu <ids...>` (default: [])
-        * `--cpu <n>`     (default: None, must be > 0)
-    - quiet flag
+    share the same input/output/device semantics.
+
+    It adds the following arguments:
+
+    - required inputs, grouped with ``action="append"``
+    - optional ground truth and mask, using the same grouping behavior
+    - an output directory
+    - the optional ``-uncertainty`` flag when ``with_uncertainty`` is enabled
+    - mutually exclusive device selection through ``--gpu`` or ``--cpu``
+    - quiet and download/update flags
 
     Grouping semantics
     ------------------
-    `action="append"` + `nargs="+"` means the user can provide multiple groups.
+    ``action="append"`` with ``nargs="+"`` means the user can provide multiple
+    groups.
+
     Each occurrence of `--inputs ...` creates one group. Example:
 
-        --inputs volA.mha volB.mha --inputs volC.mha
+    ``--inputs volA.mha volB.mha --inputs volC.mha``
 
-    yields:
-        inputs = [[volA, volB], [volC]]
+    yields ``inputs = [[volA, volB], [volC]]``.
 
     Post-processing
     ---------------
@@ -153,6 +157,7 @@ def main_apps():
     Entry point for the `konfai-apps` command-line interface.
 
     This CLI provides two execution modes:
+
     - Local mode (default): runs apps locally via `KonfAIApp`.
     - Remote mode: when `--host` is provided, submits jobs to an app server via
       `KonfAIAppClient(RemoteServer(...))`.
@@ -172,15 +177,16 @@ def main_apps():
 
     Execution details
     -----------------
+
     - For remote mode: the client calls `/apps/{app}/{command}` on the server and
       streams logs / downloads results.
     - For local mode: the app is executed in-process.
 
     Notes
     -----
-    For the `fine-tune` command, this CLI sets:
-        kwargs["tmp_dir"] = kwargs["output"]
-    so that the app uses the output directory as its working directory.
+    For the ``fine-tune`` command, this CLI sets
+    ``kwargs["tmp_dir"] = kwargs["output"]`` so that the app uses the output
+    directory as its working directory.
     """
     parser = argparse.ArgumentParser(
         prog="konfai-apps", description="KonfAI Apps – Apps for Medical AI Models", allow_abbrev=False
@@ -732,7 +738,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
 
 def main():
     """
-    Entry point for the `konfAI` command-line interface.
+    Entry point for the ``konfai`` command-line interface.
 
     This function builds the top-level CLI parser and delegates the full argument
     parsing and command dispatching to `_run(parser)`.
@@ -764,7 +770,8 @@ def cluster():
 
     Notes
     -----
-    - This function only defines extra CLI arguments.
+    - This function only defines extra CLI arguments before delegating to
+      ``_run``.
     """
     parser = argparse.ArgumentParser(
         prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models", allow_abbrev=False

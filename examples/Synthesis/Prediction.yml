@@ -1,8 +1,31 @@
 Predictor:
   Model:
-    classpath: UNetpp:UNetpp5 # Model definition: UNetpp.py module, UNetpp5 class implementing UNet++ with 5-channel 2.5D input
+    classpath: Model:UNetpp5 # Shared predictor for both the baseline checkpoint and the generator extracted from a GAN checkpoint
     UNetpp5:
-      outputs_criterions: None # No metric during inference (can be enabled to log metrics in TensorBoard and verify consistency with training)
+      outputs_criterions:    # Keep prediction lightweight; metrics are computed afterward in Evaluation.yml
+        default:
+          targets_criterions:
+            Labels:
+              criterions_loader:
+                torch:nn:CrossEntropyLoss:
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                  is_loss: true
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+      Patch:
+        patch_size:
+        - 128
+        - 128
+        - 128
+        overlap: None
+        patch_combine: None
+        pad_value: 0
+        extend_slice: 0
+      dim: 2
   Dataset:
     groups_src:  # Mapping between dataset modalities and model inputs
       MR:
@@ -87,7 +110,7 @@ Predictor:
         inverse_transform: false # If true, apply the inverse of transforms marked with inverse=true from the reference group
         reduction: Mean # Combine predictions from TTA using the Mean or Median
         Mean: {}
-  train_name: TRAIN_01  # Name of the prediction run (output folder)
+  train_name: TRAIN_01  # Name of the experiment to predict; set this to the training folder you want to reuse (for example TRAIN_01 or TRAIN_GAN_01)
   manual_seed: 32
   gpu_checkpoints: None  # VRAM optimization option
   autocast: false # VRAM optimization option

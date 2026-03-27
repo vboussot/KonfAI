@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Local and remote execution helpers for packaged KonfAI Apps."""
+
 import inspect
 import os
 import shutil
@@ -65,20 +67,25 @@ def ensure_finally_on_signals():
     Context manager that guarantees `finally` blocks run on SIGINT/SIGTERM.
 
     Inside this context:
+
     - SIGINT and SIGTERM handlers are temporarily replaced.
     - Receiving one of these signals raises `CancelProcess`, which unwinds the
       stack normally and therefore triggers `finally` clauses.
 
     On exit:
+
     - original signal handlers are restored.
 
     Typical usage
     -------------
-    with ensure_finally_on_signals():
-        try:
-            ...
-        finally:
-            cleanup()
+
+    .. code-block:: python
+
+       with ensure_finally_on_signals():
+           try:
+               ...
+           finally:
+               cleanup()
 
     Caveats
     -------
@@ -170,12 +177,14 @@ def run_distributed_app(
 
 
 class AbstractKonfAIApp:
+    """Common base class for local and remote KonfAI App runners."""
 
     def __init__(self) -> None:
         super().__init__()
 
 
 class Cancelprocess(Exception):
+    """Backward-compatible cancellation exception kept for app integrations."""
 
     def __init__(self, *args: object) -> None:
         super().__init__(*args)
@@ -417,29 +426,32 @@ class KonfAIAppClient(AbstractKonfAIApp):
         Decorator for KonfAIAppClient methods that submit work to the remote server.
 
         The wrapped method is treated as an "action" endpoint. For example, wrapping
-        `infer()` will call:
-            POST /apps/{self.app}/infer
+        ``infer()`` will call ``POST /apps/{self.app}/infer``.
 
         Behavior:
+
         1. Introspects the wrapped function signature to filter kwargs.
-        2. Builds a multipart request:
-        - file fields for inputs/gt/mask (nested list[list[Path]])
-        - scalar fields for other parameters
-        3. Submits the job and retrieves a `job_id`.
+        2. Builds a multipart request containing file fields for inputs, ground
+           truth, and masks, plus scalar fields for other parameters.
+        3. Submits the job and retrieves a ``job_id``.
         4. Streams logs until completion markers are received.
         5. Downloads and extracts results into the requested output directory.
-        6. On SIGINT/SIGTERM, triggers cleanup and (if unfinished) kills the remote job.
+        6. On SIGINT or SIGTERM, triggers cleanup and kills the remote job if it
+           is still running.
         7. Always closes local file handles.
 
-        Signal handling:
-        - Uses `ensure_finally_on_signals()` so that SIGINT/SIGTERM raises `CancelProcess`,
-        ensuring that the `finally` clause runs and remote kill is executed.
+        Signal handling
+        ---------------
+        Uses ``ensure_finally_on_signals()`` so that SIGINT or SIGTERM raises
+        ``CancelProcess``. This ensures the ``finally`` block runs and the remote
+        kill request is attempted when needed.
 
         Notes
         -----
         - The decorated methods are "declarative": they do not implement logic
-        themselves and typically contain only `pass`.
-        - Output directory is taken from the wrapped method's `output` argument.
+          themselves and typically contain only ``pass``.
+        - Output directory is taken from the wrapped method's ``output``
+          argument.
 
         Returns
         -------
@@ -985,14 +997,16 @@ class KonfAIApp(AbstractKonfAIApp):
 
         This is a convenience method that orchestrates multiple stages and organizes
         outputs into subfolders:
-            <output>/Predictions
-            <output>/Evaluations
-            <output>/Uncertainties
+
+        - ``<output>/Predictions``
+        - ``<output>/Evaluations``
+        - ``<output>/Uncertainties``
 
         Behavior:
+
         - always runs inference
-        - runs evaluation only if `gt` is provided
-        - runs uncertainty only if `uncertainty=True`
+        - runs evaluation only if ``gt`` is provided
+        - runs uncertainty only if ``uncertainty=True``
         """
         self.infer(
             inputs,

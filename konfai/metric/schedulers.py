@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Schedulers used to modulate metric and loss weights during training."""
+
 from abc import abstractmethod
 from functools import partial
 
@@ -22,6 +24,7 @@ import torch
 
 
 class Scheduler:
+    """Base class for scalar schedulers used by KonfAI criteria."""
 
     def __init__(self, start_value: float) -> None:
         self.baseValue = float(start_value)
@@ -36,6 +39,7 @@ class Scheduler:
 
 
 class Constant(Scheduler):
+    """Scheduler returning a constant value for all iterations."""
 
     def __init__(self, value: float = 1):
         super().__init__(value)
@@ -45,6 +49,7 @@ class Constant(Scheduler):
 
 
 class CosineAnnealing(Scheduler):
+    """Cosine annealing scheduler for criterion weights."""
 
     def __init__(self, start_value: float = 1, eta_min: float = 0.00001, t_max: int = 100):
         super().__init__(start_value)
@@ -56,6 +61,7 @@ class CosineAnnealing(Scheduler):
 
 
 class Warmup(torch.optim.lr_scheduler.LambdaLR):
+    """Learning-rate warmup wrapper compatible with PyTorch optimizers."""
 
     @staticmethod
     def warmup(warmup_steps: int, step: int) -> float:

@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Command-line wrapper for running TotalSegmentator through KonfAI Apps."""
+
 import argparse
 
 from konfai.app import KonfAIApp
@@ -24,6 +26,7 @@ TOTAL_SEGMENTATOR_KONFAI_REPO = "VBoussot/TotalSegmentator-KonfAI"
 
 
 def main():
+    """Parse CLI arguments and run the selected TotalSegmentator app pipeline."""
     parser = argparse.ArgumentParser(
         prog="totalsegmentator-konfai",
         description="TotalSegmentator (KonfAI app wrapper)",

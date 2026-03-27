@@ -1,0 +1,73 @@
+Predictor:
+  Model:
+    classpath: segmentation.UNet.UNet
+    UNet:
+      dim: 2
+      Patch:
+        patch_size:
+        - 256
+        - 256
+        overlap: None
+        patch_combine: None
+        pad_value: 0
+        extend_slice: 0
+      channels:
+      - 1
+      - 32
+      - 64
+      - 128
+      - 256
+      nb_class: 41
+      outputs_criterions: None
+  Dataset:
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Standardize:
+                lazy: false
+                mean: None
+                std: None
+                mask: None
+                inverse: false
+            patch_transforms: None
+            is_input: true
+    augmentations: None
+    Patch:
+      patch_size:
+      - 1
+      - 256
+      - 256
+      overlap: None
+      mask: None
+      pad_value: 0
+      extend_slice: 0
+    subset: None
+    filter: None
+    dataset_filenames:
+    - ./Dataset:a:mha
+    use_cache: false
+    batch_size: 8
+  outputs_dataset:
+    UNetBlock_0:Head:Argmax:
+      OutputDataset:
+        name_class: OutSameAsGroupDataset
+        before_reduction_transforms: None
+        after_reduction_transforms: None
+        final_transforms:
+          TensorCast:
+            dtype: uint8
+            inverse: false
+        dataset_filename: Dataset:mha
+        group: PRED
+        same_as_group: CT:CT
+        patch_combine: None
+        reduction: Mean
+        Mean: {}
+  train_name: SEG_BASELINE
+  manual_seed: 32
+  gpu_checkpoints: None
+  autocast: false
+  combine: Mean
+  data_log: None

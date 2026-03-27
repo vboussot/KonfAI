@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Dataset file abstractions and image conversion utilities for KonfAI."""
+
 import ast
 import copy
 import csv
@@ -34,6 +36,7 @@ from konfai.utils.utils import SUPPORTED_EXTENSIONS
 
 
 class Attribute(dict[str, Any]):
+    """Metadata container storing repeated values with a stack-like naming scheme."""
 
     def __init__(self, attributes: dict[str, Any] | None = None) -> None:
         super().__init__()
@@ -96,10 +99,12 @@ class Attribute(dict[str, Any]):
 
 
 def is_an_image(attributes: Attribute):
+    """Return whether the given attribute set contains image geometry metadata."""
     return "Origin" in attributes and "Spacing" in attributes and "Direction" in attributes
 
 
 def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
+    """Convert a NumPy array and KonfAI attributes into a SimpleITK image."""
     if not is_an_image(attributes):
         raise NameError("Data is not an image")
     if data.shape[0] == 1:
@@ -117,6 +122,7 @@ def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
 
 
 def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
+    """Convert a SimpleITK image into a channel-first NumPy array and attributes."""
     attributes = Attribute()
     attributes["Origin"] = np.asarray(image.GetOrigin())
     attributes["Spacing"] = np.asarray(image.GetSpacing())
@@ -133,6 +139,7 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
 
 
 def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
+    """Read shape and metadata from an image file without loading its full pixel data."""
     attributes = Attribute()
     file_reader = sitk.ImageFileReader()
     file_reader.SetFileName(str(filename))
@@ -150,6 +157,7 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
 
 
 def read_landmarks(filename: Path) -> np.ndarray | None:
+    """Read Slicer-style fiducial landmarks from disk."""
     data = None
     with open(filename, newline="") as csvfile:
         reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
@@ -162,6 +170,7 @@ def read_landmarks(filename: Path) -> np.ndarray | None:
 
 
 def write_landmarks(data: np.ndarray, filename: Path) -> None:
+    """Write landmarks to the Slicer Markups fiducial CSV-like format."""
     with open(filename, "w") as f:
         f.write(
             "# Markups fiducial file version = 4.6\n# CoordinateSystem = LPS\n#"
@@ -185,6 +194,7 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
 
 
 class Dataset:
+    """Filesystem or HDF5-backed dataset abstraction used across KonfAI."""
 
     class AbstractFile(ABC):
 

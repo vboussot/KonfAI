@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Runtime helpers, logging utilities, repository adapters, and error types for KonfAI."""
+
 import importlib
 import inspect
 import itertools

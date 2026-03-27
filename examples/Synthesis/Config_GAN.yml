@@ -1,0 +1,281 @@
+Trainer:
+  Model:
+    classpath: Model:Gan # Local GAN example defined in Model.py
+    Gan:
+      UNetpp5:
+        optimizer:
+          name: AdamW
+          lr: 0.001
+          betas:
+          - 0.9
+          - 0.999
+          eps: 1e-08
+          weight_decay: 0.001
+          amsgrad: false
+          maximize: false
+          foreach: None
+          capturable: false
+          differentiable: false
+          fused: None
+        schedulers:
+          StepLR:
+            step_size: 10
+            gamma: 0.75
+            last_epoch: -1
+            verbose: deprecated
+            nb_step: 0
+          default:ReduceLROnPlateau:
+            nb_step: 0
+        Patch: # Internal generator patching: 2D slice prediction with 2.5D context
+          patch_size:
+          - 128
+          - 128
+          - 128
+          overlap: None
+          patch_combine: None
+          pad_value: 0
+          extend_slice: 0
+        outputs_criterions:
+          Discriminator_pB:Head:Conv: # Adversarial loss seen by the generator
+            targets_criterions:
+              CT:
+                criterions_loader:
+                  PatchGanLoss:
+                    is_loss: true
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                        value: 1
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+                    target: 1
+          Generator_A_to_B:;accu;Head:Tanh: # Patch-wise generator supervision before 3D re-assembly
+            targets_criterions:
+              CT:
+                criterions_loader:
+                  MAE:
+                    is_loss: true
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                        value: 10
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+                    reduction: mean
+                  IMPACTSynth:
+                    is_loss: true
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                        value: 1
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+                    model_name: SAM2.1/SAM2.1_Small.pt
+                    shape:
+                    - 0
+                    - 0
+                    in_channels: 3
+                    losses:
+                      torch:nn:L1Loss:
+                        weights:
+                        - 1
+                        - 1
+                        - 1
+                        size_average: None
+                        reduce: None
+                        reduction: mean
+              CT;MASK:
+                criterions_loader:
+                  MAE:
+                    is_loss: false
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                        value: 1
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+                    reduction: mean
+          default:
+            targets_criterions:
+              Labels:
+                criterions_loader:
+                  torch:nn:CrossEntropyLoss:
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                    is_loss: true
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+        dim: 2
+      Discriminator:
+        optimizer:
+          name: AdamW
+          lr: 0.001
+          betas:
+          - 0.9
+          - 0.999
+          eps: 1e-08
+          weight_decay: 0.001
+          amsgrad: false
+          maximize: false
+          foreach: None
+          capturable: false
+          differentiable: false
+          fused: None
+        schedulers:
+          StepLR:
+            step_size: 10
+            gamma: 0.75
+            last_epoch: -1
+            verbose: deprecated
+            nb_step: 0
+          default:ReduceLROnPlateau:
+            nb_step: 0
+        outputs_criterions:
+          Discriminator_B:Head:Conv: # Real 3D CT chunk
+            targets_criterions:
+              CT:
+                criterions_loader:
+                  PatchGanLoss:
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                        value: 1
+                    is_loss: true
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+                    target: 1
+          Discriminator_pB_detach:Head:Conv: # Fake 3D chunk from the generator
+            targets_criterions:
+              CT:
+                criterions_loader:
+                  PatchGanLoss:
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                        value: 1
+                    is_loss: true
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+                    target: 0
+          default:
+            targets_criterions:
+              Labels:
+                criterions_loader:
+                  torch:nn:CrossEntropyLoss:
+                    schedulers:
+                      Constant:
+                        nb_step: 0
+                    is_loss: true
+                    group: 0
+                    start: 0
+                    stop: None
+                    accumulation: false
+        nb_batch_per_step: 1
+        dim: 3
+  Dataset:
+    groups_src:
+      MR:
+        groups_dest:
+          MR:
+            transforms:
+              Clip:
+                min_value: min
+                max_value: percentile:99.5
+                save_clip_min: false
+                save_clip_max: false
+                mask: MASK
+              Statistics: {}
+              Standardize:
+                lazy: false
+                mean: None
+                std: None
+                mask: None
+                inverse: false
+            patch_transforms: None
+            is_input: true
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Clip:
+                min_value: -1024
+                max_value: 3071
+                save_clip_min: true
+                save_clip_max: true
+                mask: None
+              Statistics: {}
+              Normalize:
+                lazy: false
+                channels: None
+                min_value: -1
+                max_value: 1
+                inverse: false
+            patch_transforms: None
+            is_input: true # CT is also fed to the 3D discriminator as the real target domain
+      MASK:
+        groups_dest:
+          MASK:
+            transforms: None
+            patch_transforms: None
+            is_input: false
+    augmentations:
+      DataAugmentation_0:
+        data_augmentations:
+          Flip:
+            f_prob:
+            - 0
+            - 0.5
+            - 0.5
+            prob: 1
+        nb: 1
+    Patch: # Global 3D patching seen by the full GAN
+      patch_size:
+      - 16
+      - 320
+      - 320
+      overlap: None
+      mask: None
+      pad_value: -1
+      extend_slice: 0
+    subset: None
+    shuffle: true
+    filter: None
+    dataset_filenames:
+    - ./Dataset/:a:mha
+    inline_augmentations: true
+    use_cache: true
+    batch_size: 1
+    validation: None
+  train_name: TRAIN_GAN_01
+  manual_seed: 32
+  epochs: 100
+  it_validation: 250
+  autocast: false
+  gradient_checkpoints: None
+  gpu_checkpoints: None
+  ema_decay: 0
+  data_log:
+  - CT/IMAGES/5
+  - MR/IMAGES/5
+  - Generator_A_to_B:;accu;Head:Tanh/IMAGES/5
+  save_checkpoint_mode: BEST
+  EarlyStopping:
+    monitor: []
+    patience: 30
+    min_delta: 0.0
+    mode: min

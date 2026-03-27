@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""FastAPI server exposing KonfAI Apps as remote asynchronous jobs."""
+
 import asyncio
 import json
 import os
@@ -50,6 +52,19 @@ security = HTTPBearer(auto_error=False)
 
 
 def require_token(credentials: HTTPAuthorizationCredentials | None = Depends(security)):
+    """
+    Enforce bearer-token authentication when server auth is enabled.
+
+    Parameters
+    ----------
+    credentials : HTTPAuthorizationCredentials | None, optional
+        Parsed authorization header provided by FastAPI.
+
+    Raises
+    ------
+    HTTPException
+        If authentication is required but the request is missing a valid token.
+    """
     expected = os.environ.get("KONFAI_API_TOKEN")
     if not expected:
         return
@@ -68,6 +83,7 @@ GPU_SEM: dict[int, asyncio.Semaphore] = {}
 
 @app.on_event("startup")
 async def init_gpu_semaphores():
+    """Initialize one scheduling semaphore per visible GPU at server startup."""
     devices_index, _ = konfai.get_available_devices()
     for i in devices_index:
         GPU_SEM[int(i)] = asyncio.Semaphore(1)
@@ -80,6 +96,30 @@ MAX_TOTAL_BYTES = 6 * 1024 * 1024 * 1024  # 6GB
 def save_uploads(
     files: list[UploadFile], dst: Path, max_file_bytes: int = MAX_FILE_BYTES, max_total_bytes: int = MAX_TOTAL_BYTES
 ) -> list[Path]:
+    """
+    Persist uploaded files into a job workspace while enforcing size limits.
+
+    Parameters
+    ----------
+    files : list[UploadFile]
+        Uploaded files received by FastAPI.
+    dst : Path
+        Destination directory.
+    max_file_bytes : int, optional
+        Maximum allowed size per file in bytes.
+    max_total_bytes : int, optional
+        Maximum allowed aggregate upload size in bytes.
+
+    Returns
+    -------
+    list[Path]
+        Absolute paths of the saved files.
+
+    Raises
+    ------
+    HTTPException
+        If a file or the full upload exceeds the configured limits.
+    """
     dst.mkdir(parents=True, exist_ok=True)
     out: list[Path] = []
     total = 0
@@ -206,6 +246,7 @@ async def acquire_gpus(job: Job, requested: list[int]) -> list[int]:
 
 
 def release_gpus(gpus: list[int]) -> None:
+    """Release previously acquired GPU semaphores for a finished job."""
     for gid in gpus:
         sem = GPU_SEM.get(gid)
         if sem:
@@ -290,34 +331,54 @@ async def sse_log_stream(job: Job):
 
 @protected.get("/health")
 def health():
+    """Return a lightweight health-check response for the app server."""
     return {"status": "ok"}
 
 
 @protected.get("/available_devices")
 def get_available_devices():
+    """Return the GPU ids and names visible to the server process."""
     devices_index, devices_name = konfai.get_available_devices()
     return {"devices_index": devices_index, "devices_name": devices_name}
 
 
 @protected.get("/ram")
 def get_ram():
+    """Return current server RAM usage in gigabytes."""
     used_gb, total_gb = konfai.get_ram()
     return {"used_gb": used_gb, "total_gb": total_gb}
 
 
 @protected.get("/vram")
 def get_vram(devices: list[int] = Query(...)):
+    """
+    Return current VRAM usage for the requested GPU ids.
+
+    Parameters
+    ----------
+    devices : list[int]
+        GPU ids to inspect.
+    """
     used_gb, total_gb = konfai.get_vram(devices)
     return {"used_gb": used_gb, "total_gb": total_gb}
 
 
 @protected.get("/repo_apps_list")
 def get_apps():
+    """Return the list of app identifiers configured for this server."""
     return {"apps": _APPS}
 
 
 @protected.get("/repo_apps/{app_id:path}")
 def get_app_info(app_id: str):
+    """
+    Return metadata and declared capabilities for a configured app.
+
+    Parameters
+    ----------
+    app_id : str
+        App identifier as exposed by the repository configuration.
+    """
 
     try:
         app = get_app_repository_info(app_id, False)
@@ -387,6 +448,12 @@ def download_app_repository_configs(app_id: str, background_tasks: BackgroundTas
 
 
 def q_put_drop_oldest(q: asyncio.Queue[str], item: str) -> None:
+    """
+    Push a log line into a bounded queue, dropping the oldest entry if needed.
+
+    This keeps SSE log streaming responsive even when producers are temporarily
+    faster than consumers.
+    """
     try:
         q.put_nowait(item)
     except asyncio.QueueFull:
@@ -959,11 +1026,8 @@ def job_status(job_id: str):
     Returns
     -------
     dict
-        {
-            "job_id": <str>,
-            "status": <queued|waiting|running|done|error|killed>,
-            "error": <optional error message>
-        }
+        Dictionary containing the job identifier, status, and optional error
+        message.
 
     Raises
     ------
@@ -1023,12 +1087,10 @@ def job_result(job_id: str):
     Retrieve the result archive of a completed job.
 
     Behavior:
-    - If the job is still running or waiting:
-        returns HTTP 202 (not ready)
-    - If the job failed:
-        returns HTTP 500 with error information
-    - If the job succeeded:
-        returns the result zip archive
+
+    - If the job is still running or waiting, returns HTTP 202.
+    - If the job failed, returns HTTP 500 with error information.
+    - If the job succeeded, returns the result ZIP archive.
 
     Parameters
     ----------
@@ -1038,8 +1100,7 @@ def job_result(job_id: str):
     Returns
     -------
     FileResponse | JSONResponse
-        - ZIP archive when the job is done
-        - JSON status otherwise
+        ZIP archive when the job is done, or a JSON status response otherwise.
 
     Raises
     ------

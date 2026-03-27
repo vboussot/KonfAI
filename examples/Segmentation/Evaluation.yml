@@ -1,0 +1,73 @@
+Evaluator:
+  metrics:
+    PRED:
+      targets_criterions:
+        SEG:
+          criterions_loader:
+            Dice:
+              labels:
+              - 1
+              - 2
+              - 3
+              - 4
+              - 5
+              - 6
+              - 7
+              - 8
+              - 9
+              - 10
+              - 11
+              - 12
+              - 13
+              - 14
+              - 15
+              - 16
+              - 17
+              - 18
+              - 19
+              - 20
+              - 21
+              - 22
+              - 23
+              - 24
+              - 25
+              - 26
+              - 27
+              - 28
+              - 29
+              - 30
+              - 31
+              - 32
+              - 33
+              - 34
+              - 35
+              - 36
+              - 37
+              - 38
+              - 39
+              - 40
+  Dataset:
+    groups_src:
+      PRED:
+        groups_dest:
+          PRED:
+            transforms:
+              TensorCast:
+                dtype: uint8
+                inverse: false
+            is_input: true
+      SEG:
+        groups_dest:
+          SEG:
+            transforms:
+              TensorCast:
+                dtype: uint8
+                inverse: false
+            is_input: true
+    subset: None
+    validation: None
+    filter: None
+    dataset_filenames:
+    - ./Dataset:a:mha
+    - ./Predictions/SEG_BASELINE/Dataset:i:mha
+  train_name: SEG_BASELINE

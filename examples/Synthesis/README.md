@@ -1,1006 +1,289 @@
-# KonfAI Medical Image Synthesis Pipeline
+# Synthesis Example
 
-This tutorial explains how to run a **medical image synthesis pipeline** using **KonfAI**.
+This example shows how to run a complete **medical image synthesis workflow** with KonfAI in its low-level, YAML-driven mode.
 
-The pipeline typically includes:
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/vboussot/KonfAI/blob/main/examples/Synthesis/Synthesis_demo.ipynb)
 
-- **model training**
-- **fine-tuning**
-- **inference (prediction)**
-- **evaluation**
+It is the best starting point if you want to understand how KonfAI combines:
 
-This tutorial focuses on the **low-level KonfAI workflow**, where users directly modify the configuration files to define each step of the pipeline.  
-This approach is mainly intended for **pipeline development and experimentation**, providing fine-grained control over the workflow and its parameters.
+- configuration files
+- local custom Python modules
+- training
+- prediction
+- evaluation
 
-KonfAI also provides **KonfAI Apps**, a higher-level interface that packages models, workflows, and configurations into portable applications.
+The default workflow is built around **MR to CT synthesis**, but the same structure can be adapted to **CBCT to CT** or other paired image-to-image tasks.
 
-In contrast to the low-level workflow described in this tutorial, KonfAI Apps rely on **predefined configurations**, providing a **simpler way** to run **inference, evaluation, uncertainty estimation, or fine-tuning** through a unified interface (CLI, Python API, 3D Slicer, or remote servers). With a **single command**, you can perform these tasks on a new dataset, while the underlying pipeline design and configuration are abstracted and follow a **predefined methodology**.
+## What you will find in this folder
 
-For more information about KonfAI Apps, see:
-
-https://github.com/vboussot/KonfAI/tree/main/apps
-
-Example of a ready-to-use synthesis application:
-
-- KonfAI App (CLI / Python / server):
-
-https://github.com/vboussot/KonfAI/tree/main/apps/impact_synth
-
-- 3D Slicer extension (graphical interface):
-
-https://github.com/vboussot/SlicerImpactSynth
-
-This application provides pretrained models for **MR → CT** and **CBCT → CT** synthesis.
-
-These are the **best models we currently provide** for synthetic CT generation, and they generally perform **better than the models released for the SynthRAD challenge**.  
-They were trained on **carefully aligned MR–CT and CBCT–CT pairs using IMPACT-Reg**, which reduces registration bias and improves anatomical consistency between modalities.
-
----
-
-# Pipeline Overview
-
-This tutorial assumes **KonfAI 1.5.4** is installed.
-
-All commands in this tutorial should be executed from the following directory:
-
-```
-examples/Synthesis
-```
-
-This directory already contains the files required to run the pipeline:
-
-```
+```text
 examples/Synthesis/
 ├── Config.yml
+├── Config_GAN.yml
 ├── Prediction.yml
 ├── Evaluation.yml
-├── UNetpp.py
+├── Model.py
+├── README.md
+├── Synthesis_demo.ipynb
 └── UnNormalize.py
 ```
 
-These files define the model, preprocessing, postprocessing, and workflows used in this tutorial.
+- `Config.yml`: training workflow
+- `Config_GAN.yml`: GAN training workflow with a 2D generator and a 3D discriminator
+- `Prediction.yml`: shared inference workflow for both the baseline checkpoint and the generator extracted from a GAN checkpoint
+- `Evaluation.yml`: shared evaluation workflow for both synthesis variants
+- `Model.py`: local model module defining the baseline `UNetpp5`, the `Discriminator`, and the full `Gan`
+- `UnNormalize.py`: example of a local custom postprocessing transform
 
-Inside this directory, you should place:
+## Recommended way to start
 
-- the **Dataset/** folder
-- optional **pretrained checkpoints**
+If you only want to get KonfAI running once and understand the folder structure:
 
-You can use the **example dataset and example pretrained models** provided below, or replace them with your own data and checkpoints.
+1. download the demo dataset
+2. run training
+3. run prediction on the same dataset
+4. run evaluation
+5. inspect `Checkpoints/`, `Predictions/`, and `Evaluations/`
 
----
+If you prefer a guided walkthrough, open:
 
-# Dataset Structure
+- `Synthesis_demo.ipynb`
 
-The dataset must be organized **by case**.
+The notebook is designed to work from a **fresh environment**, including **Google Colab**. Its first setup cells can:
 
-Each case should contain:
+- clone the KonfAI repository if needed
+- install KonfAI and its Python dependencies
+- download the public demo subset automatically
 
-- an **input image** (e.g. MR)
-- a **target image** (e.g. CT)
-- a **mask** defining the region used for training and evaluation
+## Demo dataset
 
-Example dataset:
+The public demo dataset is hosted on Hugging Face:
 
-```
-Dataset/
-├── 1HNA001/
-│   ├── CT.mha
-│   ├── MASK.mha
-│   └── MR.mha
-└── 1THA001/
-    ├── CT.mha
-    ├── MASK.mha
-    └── MR.mha
-```
+- `https://huggingface.co/datasets/VBoussot/konfai-demo`
 
-| File | Description |
-|-----|-------------|
-| MR.mha | Input MR image |
-| CT.mha | Ground-truth CT |
-| MASK.mha | Mask used for preprocessing, training, and evaluation |
+If you want a notebook-driven first run, use `Synthesis_demo.ipynb`.
 
-Images can be stored in **any format supported by SimpleITK** (e.g. `mha`, `nii`, `nii.gz`, etc.).  
-KonfAI also supports **HDF5 datasets (`.h5`)**.
+If you prefer to fetch the demo subset manually, the most robust approach is:
 
-For this tutorial, a **small example dataset** is available on Hugging Face:
+```python
+from pathlib import Path
+import shutil
+from huggingface_hub import snapshot_download
 
-```
-git clone --filter=blob:none --no-checkout https://huggingface.co/datasets/VBoussot/konfai-demo Dataset                                                                                       ✔  18s  .env Py  13:17:29 
-cd Dataset
-git sparse-checkout init --cone
-git sparse-checkout set Synthesis
-git checkout
-mv Synthesis/* .
-rm -r Synthesis
-```
+dataset_dir = Path("Dataset")
+snapshot_download(
+    repo_id="VBoussot/konfai-demo",
+    repo_type="dataset",
+    local_dir=str(dataset_dir),
+    allow_patterns=["Synthesis/**"],
+)
 
-This will create the `Dataset/` folder with the structure shown above.
-
----
-
-# Pretrained Models
-
-Example pretrained models are available on Hugging Face:
-
-```
-git clone https://huggingface.co/VBoussot/Synthrad2025
+nested = dataset_dir / "Synthesis"
+if nested.exists():
+    for item in nested.iterdir():
+        target = dataset_dir / item.name
+        if target.exists():
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        shutil.move(str(item), str(target))
+    shutil.rmtree(nested)
 ```
 
-These models were developed for the **SynthRAD 2025 challenge** and are provided here as an example of pretrained models that can be used with KonfAI.
+After that, your local layout should look like:
 
-The repository contains models trained using **5-fold cross-validation**, meaning that five checkpoints are available and can be used together for **ensemble prediction**.
-
-Two anatomical configurations are provided:
-
-- **AB-TH** — Abdomen / Thorax
-- **HN** — Head & Neck
-
-Example structure after download:
-
-```
-Task_1/
-├── AB-TH/
-│   ├── CV_0.pt
-│   ├── CV_1.pt
-│   ├── CV_2.pt
-│   ├── CV_3.pt
-│   ├── CV_4.pt
-│   └── Prediction.yml
-└── HN/
-    ├── CV_0.pt
-    ├── CV_1.pt
-    ├── CV_2.pt
-    ├── CV_3.pt
-    ├── CV_4.pt
-    └── Prediction.yml
+```text
+examples/Synthesis/
+├── Dataset/
+│   ├── CASE_001/
+│   │   ├── MR.mha
+│   │   ├── CT.mha
+│   │   └── MASK.mha
+│   └── ...
+├── Config.yml
+├── Config_GAN.yml
+├── Prediction.yml
+├── Evaluation.yml
+├── Model.py
+└── UnNormalize.py
 ```
 
-Each folder contains:
+Dataset groups used by the example:
 
-| File | Description |
-|-----|-------------|
-| CV_*.pt | Trained model checkpoints |
-| Prediction.yml | Example inference configuration provided with the pretrained models (used for the competition; in this tutorial we use the one in `examples/Synthesis`) |
+- `MR`: model input
+- `CT`: ground-truth target
+- `MASK`: mask used for preprocessing and masked evaluation
 
-These checkpoints can also be **replaced by other pretrained models**, such as the **IMPACT-Synth models** available on Hugging Face:
+## Quick start
 
+Run all commands from this directory:
+
+```bash
+cd examples/Synthesis
 ```
-https://huggingface.co/VBoussot/ImpactSynth
-```
 
----
+For the smoothest first run on a fresh machine or in Colab, start with `Synthesis_demo.ipynb`.
 
-# 1. Training
-
-Before training, make sure the dataset is available in the `Dataset/` directory.
-
-Train a model from scratch:
+### 1. Train
 
 ```bash
 konfai TRAIN -y --gpu 0 --config Config.yml
 ```
 
-Explanation:
-
-| Argument | Description |
-|--------|-------------|
-| TRAIN | Runs the training workflow |
-| -y | Automatically confirms prompts |
-| --gpu 0 | GPU device used for training |
-| --config Config.yml | Path to the training configuration file |
-
-If multiple GPUs are available, you can specify them as a space-separated list:
-
-```bash
-konfai TRAIN -y --gpu 0 1 --config Config.yml
-```
-
-If no GPU is available, training can also run on CPU:
+CPU-only alternative:
 
 ```bash
 konfai TRAIN -y --cpu 1 --config Config.yml
 ```
 
-| Argument | Description |
-|--------|-------------|
-| --cpu 1 | Number of CPU cores used for computation |
+This creates:
 
-This command creates two main folders:
+- `Checkpoints/TRAIN_01/`
+- `Statistics/TRAIN_01/`
 
-```
-Checkpoints/TRAIN_01/
-Statistics/TRAIN_01/
-```
+### 2. Predict
 
-Example:
-
-```
-Checkpoints/TRAIN_01/
-└── 2026_03_06_10_45_29.pt
-```
-
-```
-Statistics/TRAIN_01/
-├── tb/
-│   └── events.out.tfevents...
-├── Config_0_0.yml
-├── log_0.txt
-├── Train_0.txt
-└── Validation_0.txt
-```
-
-Explanation:
-
-| File / Folder | Description |
-|---------------|-------------|
-| Checkpoints/TRAIN_01 | Folder containing all checkpoints generated during training |
-| Statistics/TRAIN_01/tb/ | TensorBoard logs |
-| Statistics/TRAIN_01/Config_0_0.yml | Copies of the training configuration saved during training and resume |
-| Statistics/TRAIN_01/log_0.txt | Training log |
-| Statistics/TRAIN_01/Train_0.txt | List of training cases |
-| Statistics/TRAIN_01/Validation_0.txt | List of validation cases |
-
-Training can be monitored with TensorBoard:
+Use one checkpoint from `Checkpoints/TRAIN_01/`:
 
 ```bash
-tensorboard --logdir Statistics/TRAIN_01/tb
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_01/<checkpoint>.pt
 ```
 
----
+This creates:
 
-# 2. Resume / Fine-tuning
+- `Predictions/TRAIN_01/`
 
-Resume training or fine-tune from an existing checkpoint:
-
-```bash
-konfai RESUME -y --gpu 0 --config Config.yml --model ./Task_1/AB-TH/CV_0.pt
-```
-
-Explanation:
-
-| Argument | Description |
-|--------|-------------|
-| RESUME | Resumes training from a checkpoint |
-| -y | Automatically confirms prompts |
-| --gpu 0 | GPU device used for training |
-| --config Config.yml | Path to the training configuration file |
-| --model ./Task_1/AB-TH/CV_0.pt | Path to the checkpoint used to initialize the model |
-
-This command is useful for:
-
-- **continuing a previous training**
-- **fine-tuning a pretrained model on a new dataset** (all model weights remain trainable).  
-  For stricter fine-tuning strategies (e.g. freezing parts of the network), another command is available but is outside the scope of this tutorial.
-
-Like training, it updates the `Checkpoints/` and `Statistics/` folders.
-
----
-
-# 3. Inference (Prediction)
-
-Generate synthetic CT images using one or several trained models.
-
-Example using **5 checkpoints**:
-
-```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml \
---models ./Task_1/AB-TH/CV_0.pt \
-         ./Task_1/AB-TH/CV_1.pt \
-         ./Task_1/AB-TH/CV_2.pt \
-         ./Task_1/AB-TH/CV_3.pt \
-         ./Task_1/AB-TH/CV_4.pt
-```
-
-Explanation:
-
-| Argument | Description |
-|--------|-------------|
-| PREDICTION | Runs the inference workflow |
-| -y | Automatically confirms prompts |
-| --gpu 0 | GPU device used for inference |
-| --config Prediction.yml | Path to the prediction configuration file |
-| --models | List of model checkpoints used for inference |
-
-Providing multiple checkpoints enables **model ensembling**, where predictions from several models are combined to improve robustness.
-
-This command creates a `Predictions/` folder:
-
-```
-Predictions/TRAIN_01/
-├── Dataset/
-│   ├── 1HNA001/
-│   │   └── sCT.mha
-│   └── 1THA001/
-│       └── sCT.mha
-├── log_0.txt
-└── Prediction.yml
-```
-
-Explanation:
-
-| File / Folder | Description |
-|---------------|-------------|
-| Predictions/TRAIN_01/Dataset/ | Folder containing the generated outputs |
-| sCT.mha | Predicted synthetic CT image |
-| log_0.txt | Inference log |
-| Prediction.yml | Copy of the prediction configuration |
-
----
-
-# 4. Evaluation
-
-Evaluate predictions against the ground-truth CT:
+### 3. Evaluate
 
 ```bash
 konfai EVALUATION -y --config Evaluation.yml
 ```
 
-Explanation:
+This creates:
 
-| Argument | Description |
-|--------|-------------|
-| EVALUATION | Runs the evaluation workflow |
-| -y | Automatically confirms prompts |
-| --config Evaluation.yml | Path to the evaluation configuration file |
+- `Evaluations/TRAIN_01/`
 
-This command compares the predicted outputs (e.g. `sCT`) with the reference images (e.g. `CT`) and computes evaluation metrics.
+## GAN variant
 
-Example output:
+This folder also contains a second synthesis variant:
 
-```
-Evaluations/TRAIN_01/
-├── Evaluation.yml
-├── log_0.txt
-└── Metric_TRAIN.json
-```
+- `Config_GAN.yml`
+- `Model.py`
 
-| File | Description |
-|-----|-------------|
-| Evaluation.yml | Copy of the evaluation configuration |
-| log_0.txt | Evaluation log |
-| Metric_TRAIN.json | File containing the computed metrics |
+The GAN example is useful if you want to understand a more advanced KonfAI pattern:
 
----
+- a **2D / 2.5D generator**
+- a **3D discriminator**
+- two different patching levels in the same model graph
+- shared prediction and evaluation workflows with the baseline model
 
-# Metrics
+Both training variants use the same local `UNetpp5` definition from `Model.py`:
 
-Metrics are computed **per case** and **aggregated across all cases**.
+- `Config.yml` trains `Model:UNetpp5` directly
+- `Config_GAN.yml` trains `Model:Gan`, which internally contains the same `UNetpp5` generator plus a 3D discriminator
 
-Typical metrics include:
+Because the generator class name stays `UNetpp5` in both cases, the same `Prediction.yml` can reload either:
 
-- **MAE** — Mean Absolute Error
-- **PSNR** — Peak Signal-to-Noise Ratio
-- **SSIM** — Structural Similarity
+- a baseline checkpoint from `TRAIN_01`
+- or the generator weights saved inside a GAN checkpoint from `TRAIN_GAN_01`
 
-Example JSON structure:
+### Why there are two patch definitions
 
-```json
-{
-  "case": {...},
-  "aggregates": {...}
-}
-```
+In `Config_GAN.yml`, there are two different patching scopes:
 
-In some experiments, an additional file may appear:
+- `Dataset.Patch`: the **global 3D patch** given to the whole GAN
+- `Model.Gan.UNetpp5.Patch`: the **internal generator patch**
 
-```
-Metric_EVALUATION.json
-```
+The idea is:
 
-This contains metrics for **cases that were never used during training**.
+- the full GAN sees a 3D chunk, so the discriminator can judge local 3D realism
+- inside that 3D chunk, the generator still works slice-wise with 2.5D context
 
----
+In practice:
 
-# Configuration Files
+- the dataset patch extracts a chunk like `[16, 320, 320]`
+- the generator patch reprocesses that chunk as `[1, 320, 320]` with `extend_slice: 4`
+- this gives the generator a 2D prediction target with neighboring slices as context
 
-KonfAI uses three configuration files:
+### What `;accu;` means here
 
-- `Config.yml` → **training and fine-tuning**
-- `Prediction.yml` → **inference**
-- `Evaluation.yml` → **evaluation**
+The `;accu;` marker refers to the **patch-wise outputs before re-assembly**.
 
-Only the main ideas are described here.  
-For a complete explanation of all parameters, please refer to the **commented configuration files provided in this repository**.
+That matters in the GAN example:
 
----
+- `Generator_A_to_B:;accu;Head:Tanh` is used for the generator reconstruction loss
+- `Discriminator_pB:Head:Conv` is used after the generator output has been re-assembled as a 3D chunk
 
-## `Config.yml` — Training
+So the flow is:
 
-This file defines the full training pipeline.
+1. the generator predicts slice-wise patches
+2. KonfAI accumulates and re-assembles them into a 3D chunk
+3. the 3D discriminator receives that assembled fake chunk
 
-Main ideas:
+This is the key semantic difference between the baseline and the GAN variant.
 
-- **Model**  
-  The training uses the `UNetpp5` model, a **UNet++ architecture with 2.5D input**.  
-  The model takes the current slice together with neighboring slices as input.
+### GAN commands
 
-- **Losses**  
-  Two losses are used during training:
-  - `MAE` for pixel-wise reconstruction between prediction and CT
-  - `IMPACTSynth`, a perceptual loss based on **SAM features**
+Train the GAN variant:
 
-  In addition, a **masked MAE metric** is computed for monitoring, but it is **not optimized**.
-
-- **Input and target data**  
-  The model uses:
-  - `MR` as **input**
-  - `CT` as **target**
-  - `MASK` for **masked evaluation**
-
-- **Preprocessing**  
-  - `CT` is clipped to a valid Hounsfield Unit range, then normalized to `[-1, 1]`
-  - `MR` is robustly clipped and standardized
-
-- **Data augmentation**  
-  Random flips are applied during training to improve robustness.
-
-- **Patch-based training**  
-  Training is performed on patches:
-  - `patch_size: [1, 320, 320]`
-  - `extend_slice: 4` adds **2 slices above and 2 below** for 2.5D context
-
-- **Optimization**  
-  Training uses:
-  - the `AdamW` optimizer
-  - a `StepLR` learning rate scheduler
-
-- **Dataset definition**  
-  The dataset section defines:
-  - where the dataset is located
-  - which files are used as `MR`, `CT`, and `MASK`
-  - batch size
-  - validation split
-  - optional dataset filtering
-
-- **Training control**  
-  The configuration also defines:
-  - the experiment name (`train_name`)
-  - the number of epochs
-  - validation frequency (`it_validation`)
-  - checkpoint saving
-  - TensorBoard logging
-  - early stopping
-
-- **Outputs**  
-  During training, KonfAI saves:
-  - model checkpoints
-  - TensorBoard logs
-  - training and validation case lists
-  - copies of the config files
-
-In short, `Config.yml` defines:
-
-1. which model is trained
-2. which losses are used
-3. how MR, CT, and MASK are loaded and preprocessed
-4. how training is performed
-5. how results are logged and saved
-
-## Parameters you may need to modify
-
-In most cases, only a few parameters need to be adapted to your dataset and experiment.
-
-### Training name
-
-```yaml
-train_name: TRAIN_01
+```bash
+konfai TRAIN -y --gpu 0 --config Config_GAN.yml
 ```
 
-Defines the experiment name and the output folders where results will be saved.
+Predict from the generator weights saved inside the GAN checkpoint with the shared prediction workflow:
 
----
+Before running prediction, set `train_name` in `Prediction.yml` to `TRAIN_GAN_01` so the outputs are written to the right folder.
 
-### Dataset location
-
-Example used for training:
-
-```yaml
-dataset_filenames:
-- ./Dataset/:a:mha
+```bash
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_GAN_01/<checkpoint>.pt
 ```
 
-This indicates that the dataset is located in the `Dataset/` folder.
+Then evaluate the GAN predictions with the shared evaluation workflow:
 
-Multiple datasets can also be concatenated:
+Before running evaluation, update `Evaluation.yml` so both `train_name` and the prediction folder point to `TRAIN_GAN_01`.
 
-```yaml
-dataset_filenames:
-- ./Dataset/AB/:a:mha
-- ./Dataset/TH/:a:mha
+```bash
+konfai EVALUATION -y --config Evaluation.yml
 ```
 
-For evaluation (`Evaluation.yml`), the configuration usually includes both the **ground-truth dataset** and the **predicted outputs**:
+## Pretrained models
 
-```yaml
-dataset_filenames:
-- ./Dataset:a:mha
-- ./Predictions/TRAIN_01/Dataset:i:mha
-```
+If you want to test inference without training from scratch, you can use pretrained models from:
 
-Here:
+- `https://huggingface.co/VBoussot/Synthrad2025`
+- `https://huggingface.co/VBoussot/ImpactSynth`
 
-- `./Dataset` contains the **ground-truth images (CT)**  
-- `./Predictions/TRAIN_01/Dataset` contains the **predicted images (sCT)**
+The `Synthrad2025` repository contains challenge checkpoints that can be used as examples of ensemble prediction.
 
-In most cases, you only need to modify the **prediction path** to match the experiment you want to evaluate.
+## What this example demonstrates
 
+This example is useful because it shows several important KonfAI patterns in one place:
 
----
+- a custom model loaded through `classpath`
+- a custom postprocessing transform
+- patch-based training and prediction
+- a GAN variant with nested patching scopes
+- shared prediction and evaluation across baseline and GAN checkpoints
+- patch-wise outputs exposed through `;accu;`
+- masked evaluation
+- train / prediction / evaluation split across dedicated YAML files
 
-### Dataset modality names
+## What to adapt for your own project
 
-The `groups_src` section maps dataset filenames to the modalities used by the pipeline.
+The first fields you will usually change are:
 
-Each entry in `groups_src` corresponds to a modality used in the workflow, for example `MR`, `CT`, or `MASK`.
+1. `dataset_filenames`
+2. input and target groups
+3. preprocessing transforms
+4. patch size
+5. batch size
+6. model class and model hyperparameters
+7. losses and monitored metrics
+8. `train_name`
 
-Example dataset:
+## Notes
 
-```text
-Dataset/
-└── Patient001/
-    ├── MR.mha
-    ├── CT.mha
-    └── MASK.mha
-```
-
-Corresponding config:
-
-```yaml
-groups_src:
-  MR:
-  CT:
-  MASK:
-```
-
-The names defined in the configuration must match the **filenames present in each case directory**.
-
-If the filenames in your dataset are different (for example `T1.mha`, `CT_reg.mha`, or `BodyMask.mha`), the configuration must be updated accordingly so that each modality is correctly mapped.
-
----
-
-### Batch size
-
-```yaml
-batch_size: 5
-```
-
-Defines the number of samples processed in each training batch.
-
-This parameter mainly depends on **GPU memory**.
-
----
-
-### Validation frequency
-
-```yaml
-it_validation: 2500
-```
-
-Defines how often validation is performed during training, in number of iterations.
-
----
-
-### Validation cases
-
-```yaml
-validation: None
-```
-
-You can optionally provide a text file listing the cases used for validation.
-
-Example:
-
-```yaml
-validation: validation_cases.txt
-```
-
-Example file:
-
-```text
-1HNA001
-1THA001
-1HNA005
-```
-
-Each line corresponds to the name of a case directory in the dataset.
-
-If `validation` is set to `None`, no validation is performed.
-
-
----
-
-## `Prediction.yml` — Inference
-
-This file defines how predictions are generated from a trained model.
-
-Main ideas:
-
-- **Model**  
-  Uses the same model architecture as during training (`UNetpp5`).
-
-- **Input data**  
-  The model takes **MR images** as input.  
-  A **MASK** is also used to normalize the image inside the body region and mask irrelevant areas.
-
-- **Preprocessing**  
-  The MR image is standardized, then masked before being sent to the network.
-
-- **Test-time augmentation (TTA)**  
-  Two flip augmentations are applied during inference:
-  - horizontal flip
-  - vertical flip
-
-  Their predictions are combined to improve robustness.
-
-- **Patch inference**  
-  Inference is done on `512 × 512` patches with **2.5D context**:
-  - current slice
-  - 2 slices above
-  - 2 slices below
-
-- **Output generation**  
-  The predicted output is saved as **sCT**.
-
-- **Postprocessing**  
-  Before saving:
-  - CT intensity values are restored (`UnNormalize`)
-  - the output is masked outside the body
-  - the image is converted to `int16`
-
-- **Output geometry**  
-  The predicted sCT keeps the same geometry as the MR image:
-  - spacing
-  - origin
-  - orientation
-
-- **Prediction output**  
-  Results are saved in the folder defined by:
-
-  ```yaml
-  train_name: TRAIN_01
-  ```
-
-  which creates:
-
-  ```text
-  Predictions/TRAIN_01/
-  ```
-
-In short, `Prediction.yml` defines:
-
-1. which model is used
-2. how MR images are preprocessed
-3. how inference is performed
-4. how outputs are postprocessed and saved as sCT
-
-
-## `Evaluation.yml` — Evaluation
-
-This file defines how predictions are evaluated against the ground-truth images.
-
-Main ideas:
-
-- **Predicted modality**  
-  The evaluation compares the predicted **sCT** with the reference **CT** images.
-
-- **Metrics**  
-  Several metrics are computed to measure the quality of the prediction:
-  - `MAE` — Mean Absolute Error
-  - `PSNR` — Peak Signal-to-Noise Ratio
-  - `SSIM` — Structural Similarity Index
-
-  Metrics are computed **inside the MASK region** to avoid evaluating background areas.
-
-- **Input data**  
-  The evaluation uses three modalities:
-  - `CT` → ground-truth reference
-  - `sCT` → predicted image
-  - `MASK` → region where metrics are computed
-
-- **Preprocessing**  
-  Before computing the metrics, tensors are converted to the appropriate format (`float32` for images and `uint8` for masks).
-
-- **Dataset sources**  
-  The evaluation loads data from two locations:
-
-  ```yaml
-  dataset_filenames:
-  - ./Dataset:a:mha
-  - ./Predictions/TRAIN_01/Dataset:i:mha
-  ```
-
-  - `./Dataset` contains the **ground-truth images**
-  - `./Predictions/TRAIN_01/Dataset` contains the **predicted sCT images**
-
-  KonfAI automatically matches cases between these datasets.
-
-- **Evaluation output**  
-  The results are saved in:
-
-  ```
-  Evaluations/TRAIN_01/
-  ```
-
-  including:
-  - evaluation logs
-  - aggregated metrics
-  - per-case metrics
-
-In short, `Evaluation.yml` defines:
-
-1. which predictions are evaluated
-2. which ground-truth images are used
-3. which metrics are computed
-4. where evaluation results are saved
-
-### Built-in and custom components
-
-KonfAI pipelines are defined through **YAML configuration files**, while the actual operations are implemented by **Python classes**.
-
-The main extensible components are:
-
-- **Metrics**
-- **Transforms**
-- **Augmentations**
-- **Networks**
-
-Each component type has a **base class** that must be inherited when implementing custom behavior.
-
----
-
-## Metrics
-
-Metrics are used during **training and evaluation** to compute losses or evaluation scores.
-
-Built-in metrics are implemented in:
-
-https://github.com/vboussot/KonfAI/blob/main/konfai/metric/measure.py
-
-All metrics must inherit from the base class:
-
-```python
-class Criterion(torch.nn.Module, ABC):
-```
-
-Minimal example with parameters (Focal Loss):
-
-```python
-class FocalLoss(Criterion):
-
-    def __init__(self, gamma: float = 2.0):
-        super().__init__()
-        self.gamma = gamma
-
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        error = torch.abs(output - targets[0])
-        weight = error ** self.gamma
-        return torch.mean(weight * error)
-```
-
-The parameter can then be defined in the YAML configuration:
-
-```yaml
-metric:FocalLoss:
-  gamma: 2.0
-```
-
-In this example:
-
-- `gamma` controls how strongly larger errors are emphasized
-- the parameter is automatically passed from the YAML configuration to the metric constructor
-
----
-
-## Transforms
-
-Transforms are used for **preprocessing and postprocessing** of data.
-
-Built-in transforms are implemented in:
-
-https://github.com/vboussot/KonfAI/blob/main/konfai/data/transform.py
-
-All transforms must inherit from:
-
-```python
-class TransformInverse(NeedDevice, ABC)
-```
-
-Minimal example of a transform modifying the tensor shape:
-
-```python
-class CustomTransform(TransformInverse):
-
-    def __init__(self, pad: int = 2):
-        super().__init__()
-        self.pad = pad
-
-    def transform_shape(self, group_src, name, shape, cache_attribute):
-        shape[-1] += 2 * self.pad
-        shape[-2] += 2 * self.pad
-        return shape
-
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return torch.nn.functional.pad(tensor, (self.pad, self.pad, self.pad, self.pad))
-
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensor[..., self.pad:-self.pad, self.pad:-self.pad]
-```
-
-The parameter can then be defined in the YAML configuration:
-
-```yaml
-CustomTransform:
-  pad: 4
-```
-
-In this example:
-
-- `transform_shape(...)` updates the expected tensor shape
-- `__call__(...)` applies the corresponding padding to the tensor
-- `inverse(...)` removes the padding and restores the original tensor shape
-- the parameter `pad` controls the number of pixels added on each side
-
----
-
-## Data augmentations
-
-Augmentations are used to **randomly modify data during training or inference**.
-
-Built-in augmentations are implemented in:
-
-https://github.com/vboussot/KonfAI/blob/main/konfai/data/augmentation.py
-
-All augmentations must inherit from:
-
-```python
-class DataAugmentation(NeedDevice, ABC)
-```
-
-Three internal methods define how an augmentation works:
-
-```python
-_state_init(...)
-_compute(...)
-_inverse(...)
-```
-
-Example structure:
-
-```python
-class CustomAugmentation(DataAugmentation):
-
-    def _state_init(self, index, shapes, caches_attribute):
-        return shapes
-
-    def _compute(self, name, index, tensors):
-        return tensors
-
-    def _inverse(self, index, a, tensor):
-        return tensor
-```
-
----
-
-### Example: horizontal flip augmentation
-
-```python
-class HorizontalFlip(DataAugmentation):
-
-    def __init__(self):
-        super().__init__()
-
-    def _state_init(self, index, shapes, caches_attribute):
-        return shapes
-
-    def _compute(self, name, index, tensors):
-        return [torch.flip(tensor, dims=[-1]) for tensor in tensors]
-
-    def _inverse(self, index, a, tensor):
-        return torch.flip(tensor, dims=[-1])
-```
-
-This augmentation flips the image horizontally.
-
-The same operation is used in `_inverse(...)` because applying the flip twice restores the original image.
-
----
-
-### Role of the internal methods
-
-**`_state_init(...)`**
-
-Initializes the **random parameters of the augmentation** (for example rotation angles, translation offsets, etc.).  
-These parameters are stored so that the **same transformation is applied to all tensors of a sample** (e.g. MR, CT, MASK), ensuring that the different groups remain spatially aligned.
-
-For example, a translation augmentation may sample random offsets and build the associated transformation matrices.
-
----
-
-**`_compute(...)`**
-
-Applies the **actual transformation** to the tensors.
-
-For spatial augmentations (rotation, translation, etc.), this typically uses operations such as `grid_sample` to resample the image using the transformation defined in `_state_init(...)`.
-
----
-
-**`_inverse(...)`**
-
-This is mainly used for **test-time augmentation (TTA)**, where predictions are transformed back to the original orientation before being combined.
-
----
-
-Augmentations are referenced in the YAML configuration inside the `augmentations` section.
-
----
-
-## Networks
-
-Networks can be defined either using **built-in models** provided by KonfAI or by implementing **custom Python classes**.
-
-Several built-in architectures are available in the KonfAI repository:
-
-https://github.com/vboussot/KonfAI/tree/main/konfai/models
-
-These models can be used directly in configuration files.
-
----
-
-### Custom networks
-
-Custom networks can also be implemented as Python classes.
-
-In this tutorial, the model architecture is implemented in:
-
-```
-UNetpp.py
-```
-
-and used in the configuration with:
-
-```yaml
-classpath: UNetpp:UNetpp5
-```
-
-This means:
-
-- `UNetpp` → Python module (`UNetpp.py`)
-- `UNetpp5` → class inside that module
-
-KonfAI will automatically load the module and instantiate the specified class.
-
-This mechanism allows **any custom neural network architecture** to be integrated directly into the KonfAI pipeline.
-
----
-
-## Summary
-
-KonfAI pipelines combine:
-
-```
-YAML configuration
-        +
-Python components
-```
-
-Where:
-
-- **YAML** defines the workflow
-- **Python classes** implement the operations
-
-Custom components can be implemented for:
-
-- metrics
-- transforms
-- augmentations
-- networks
-
----
-
-## Contact
-
-If you have questions about KonfAI or this tutorial, feel free to contact me:
-
-**boussot.v@gmail.com**
-
-For bug reports, feature requests, or contributions, please open an **issue on GitHub** or submit a **pull request**.
+- This example is intended for **workflow understanding and experimentation**.
+- If you want a simpler user-facing interface for a mature workflow, the next step is usually to package it as a **KonfAI App**.
+- For a ready-to-use synthesis app, see `apps/impact_synth`.

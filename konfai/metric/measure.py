@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Criterion and metric implementations used by KonfAI workflows."""
+
 import copy
 import os
 from abc import ABC, abstractmethod

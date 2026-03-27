@@ -14,6 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+"""Top-level helpers and runtime utilities exposed by the KonfAI package."""
+
 import datetime
 import os
 from importlib import metadata
@@ -31,34 +33,42 @@ except metadata.PackageNotFoundError:
 
 
 def checkpoints_directory() -> Path:
+    """Return the configured checkpoint output directory."""
     return Path(_get_env("KONFAI_CHECKPOINTS_DIRECTORY"))
 
 
 def predictions_directory() -> Path:
+    """Return the configured prediction output directory."""
     return Path(_get_env("KONFAI_PREDICTIONS_DIRECTORY"))
 
 
 def evaluations_directory() -> Path:
+    """Return the configured evaluation output directory."""
     return Path(_get_env("KONFAI_EVALUATIONS_DIRECTORY"))
 
 
 def statistics_directory() -> Path:
+    """Return the configured statistics output directory."""
     return Path(_get_env("KONFAI_STATISTICS_DIRECTORY"))
 
 
 def config_file() -> Path:
+    """Return the active configuration file used by the current workflow."""
     return Path(_get_env("KONFAI_config_file"))
 
 
 def konfai_state() -> str:
+    """Return the current KonfAI workflow state stored in the environment."""
     return _get_env("KONFAI_STATE")
 
 
 def konfai_root() -> str:
+    """Return the root configuration section name for the current workflow."""
     return _get_env("KONFAI_ROOT")
 
 
 class RemoteServer:
+    """Connection settings for a remote KonfAI Apps server."""
 
     def __init__(self, host: str, port: int, token: str | None) -> None:
         self.host = host
@@ -70,15 +80,25 @@ class RemoteServer:
         return f"{self.host}|{self.port}"
 
     def get_headers(self) -> dict[str, str]:
+        """Return the HTTP headers required to talk to the remote server."""
         if self.token:
             return {"Authorization": f"Bearer {self.token}"}
         return {}
 
     def get_url(self) -> str:
+        """Return the base URL of the remote server."""
         return f"http://{self.host}:{self.port}"
 
 
 def cuda_visible_devices() -> list[int]:
+    """
+    Return the GPU indices visible to the current process.
+
+    Returns
+    -------
+    list[int]
+        GPU ids exposed through ``CUDA_VISIBLE_DEVICES`` or detected by PyTorch.
+    """
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         return [int(gpu) for gpu in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if gpu != ""]
     else:
@@ -93,6 +113,21 @@ def cuda_visible_devices() -> list[int]:
 def get_available_devices(
     remote_server: RemoteServer | None = None, timeout_s: float = 2.0
 ) -> tuple[list[int], list[str]]:
+    """
+    Return the available GPU indices and their display names.
+
+    Parameters
+    ----------
+    remote_server : RemoteServer | None, optional
+        Remote server to query instead of the local machine.
+    timeout_s : float, optional
+        HTTP timeout used for remote requests.
+
+    Returns
+    -------
+    tuple[list[int], list[str]]
+        Available device indices and the corresponding device names.
+    """
     if remote_server is not None:
         r = requests.get(
             f"{remote_server.get_url()}/available_devices", headers=remote_server.get_headers(), timeout=timeout_s
@@ -106,6 +141,21 @@ def get_available_devices(
 
 
 def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -> tuple[float, float]:
+    """
+    Return used and total RAM in gigabytes.
+
+    Parameters
+    ----------
+    remote_server : RemoteServer | None, optional
+        Remote server to query instead of the local machine.
+    timeout_s : float, optional
+        HTTP timeout used for remote requests.
+
+    Returns
+    -------
+    tuple[float, float]
+        Used RAM and total RAM in gigabytes.
+    """
     if remote_server is not None:
         r = requests.get(
             f"{remote_server.get_url()}/ram",
@@ -125,6 +175,23 @@ def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -
 def get_vram(
     devices: list[int], remote_server: RemoteServer | None = None, timeout_s: float = 2.0
 ) -> tuple[float, float]:
+    """
+    Return used and total VRAM in gigabytes for the selected devices.
+
+    Parameters
+    ----------
+    devices : list[int]
+        GPU indices to inspect.
+    remote_server : RemoteServer | None, optional
+        Remote server to query instead of the local machine.
+    timeout_s : float, optional
+        HTTP timeout used for remote requests.
+
+    Returns
+    -------
+    tuple[float, float]
+        Used VRAM and total VRAM in gigabytes.
+    """
     if remote_server is not None:
         r = requests.get(
             f"{remote_server.get_url()}/vram",
@@ -149,6 +216,7 @@ def get_vram(
 
 
 def current_date() -> str:
+    """Return the current timestamp formatted for KonfAI output folders."""
     return datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
 
@@ -184,6 +252,21 @@ def _try_import(import_name: str) -> str | None:
 
 
 def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[bool, str]:
+    """
+    Check whether a remote KonfAI Apps server is reachable and healthy.
+
+    Parameters
+    ----------
+    remote_server : RemoteServer
+        Remote server connection settings.
+    timeout_s : float, optional
+        HTTP timeout used for the health check.
+
+    Returns
+    -------
+    tuple[bool, str]
+        A boolean success flag and a human-readable status message.
+    """
     try:
         r = requests.get(
             f"{remote_server.get_url()}/health",
@@ -216,8 +299,11 @@ def check_konfai_install() -> tuple[bool, dict]:
     """
     Checks that KonfAI dependencies are importable.
 
-    Returns a report dict:
-      { ok, missing, errors, versions }
+    Returns
+    -------
+    tuple[bool, dict]
+        A pair containing a global success flag and a report dictionary with the
+        keys ``missing``, ``errors``, and ``versions``.
     """
     missing: list[str] = []
     errors: dict[str, str] = {}
@@ -255,7 +341,7 @@ class KonfAIPackagesError(RuntimeError):
 
 def assert_konfai_install() -> None:
     """
-    Same as check_konfai_packages(), but raises on failure.
+    Raise :class:`KonfAIPackagesError` if the KonfAI dependency check fails.
     """
     is_konfai_install, report = check_konfai_install()
     if not is_konfai_install:

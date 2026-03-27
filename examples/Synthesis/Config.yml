@@ -1,6 +1,6 @@
 Trainer:
   Model:
-    classpath: UNetpp:UNetpp5  # Model definition: UNetpp.py module, UNetpp5 class implementing UNet++ with 5-channel 2.5D input
+    classpath: Model:UNetpp5  # Local model definition from Model.py, implementing a 5-channel 2.5D UNet++
     UNetpp5:
       outputs_criterions:
         Head:Tanh: # Model output layer used for loss computation
@@ -55,6 +55,19 @@ Trainer:
                   stop: None
                   accumulation: false
                   reduction: mean
+        default:
+          targets_criterions:
+            Labels:
+              criterions_loader:
+                torch:nn:CrossEntropyLoss:
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                  is_loss: true
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
       optimizer:  # Optimizer used to update model weights during training
         name: AdamW
         lr: 0.001
@@ -76,6 +89,18 @@ Trainer:
           last_epoch: -1
           verbose: deprecated
           nb_step: 0
+        default:ReduceLROnPlateau:
+          nb_step: 0
+      Patch:
+        patch_size:
+        - 128
+        - 128
+        - 128
+        overlap: None
+        patch_combine: None
+        pad_value: 0
+        extend_slice: 0
+      dim: 2
   Dataset:
     groups_src: # Mapping between dataset modalities and how they are used by the model
       MASK:
@@ -171,4 +196,3 @@ Trainer:
     patience: 30  #Training stops if no improvement after 30 validations
     min_delta: 0.0
     mode: min
-
