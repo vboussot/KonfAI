@@ -303,16 +303,32 @@ class Evaluator(DistributedObject):
                     for group in target_group.split(";")
                     if group in batch_sample
                 ]
+                target_attribute = [batch_sample[output_group].attribute] + [
+                    batch_sample[group].attribute for group in target_group.split(";") if group in batch_sample
+                ]
                 name = batch_sample[output_group].name[0]
                 for metric in self.metrics[output_group][target_group]:
-                    loss = metric(
-                        (
-                            batch_sample[output_group].tensor.to(0)
-                            if torch.cuda.is_available()
-                            else batch_sample[output_group].tensor
-                        ),
-                        *targets,
-                    )
+                    if getattr(metric, "accepts_attributes", False):
+                        with torch.no_grad():
+                            loss = metric(
+                                (
+                                    batch_sample[output_group].tensor.to(0)
+                                    if torch.cuda.is_available()
+                                    else batch_sample[output_group].tensor
+                                ),
+                                *targets,
+                                attributes=target_attribute,
+                            )
+                    else:
+                        with torch.no_grad():
+                            loss = metric(
+                                (
+                                    batch_sample[output_group].tensor.to(0)
+                                    if torch.cuda.is_available()
+                                    else batch_sample[output_group].tensor
+                                ),
+                                *targets,
+                            )
                     if isinstance(loss, tuple):
                         true_loss = loss[1]
                         if len(loss) == 3:

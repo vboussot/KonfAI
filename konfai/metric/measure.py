@@ -740,6 +740,107 @@ class MutualInformationLoss(torch.nn.Module):
         return torch.mean(mi).neg()  # average over the batch and channel ndims
 
 
+class IMPACTReg(CriterionWithAttribute):
+
+    class Weights:
+
+        def __init__(self, weights: list[float] = [0, 1]) -> None:
+            self.weights = weights
+
+    def __init__(
+        self,
+        model_name: str = "SAM2.1/SAM2.1_Small.pt",
+        shape: list[int] = [0, 0],
+        in_channels: int = 3,
+        loss: str = "torch:nn:L1Loss",
+        weights: list[float] = [0, 1],
+    ) -> None:
+        super().__init__()
+        if model_name is None:
+            return
+        self.in_channels = in_channels
+        self.nb_layer = len(weights)
+        module, name = get_module(loss, "konfai.metric.measure")
+        self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(getattr(module, name))()
+        self.weights = weights
+        self.model_path = hf_hub_download(
+            repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
+        )  # nosec B615
+
+        self.model: torch.nn.Module = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
+        self.dim = len(shape)
+        self.shape = shape if all(s > 0 for s in shape) else None
+        self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
+        self.mode = "bilinear" if len(shape) == 2 else "trilinear"
+
+        dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
+        try:
+            out = self.model.to(0)(dummy_input, torch.tensor([self.nb_layer]))
+            if not isinstance(out, (list, tuple)):
+                raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
+            if len(weights) != len(out):
+                raise ValueError(
+                    f"Loss '{loss}': mismatch between the number of weights "
+                    f"({len(weights)}) and the number of model outputs "
+                    f"({len(out)}). Each output must have a corresponding weight."
+                )
+        except Exception as e:
+            msg = (
+                f"[Model Sanity Check Failed]\n"
+                f"Input shape attempted: {dummy_input.shape}\n"
+                f"Error: {type(e).__name__}: {e}"
+            )
+            raise RuntimeError(msg) from e
+        self.model = None
+
+    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> torch.Tensor:
+        if self.shape is not None and not all(
+            tensor.shape[-i - 1] == size for i, size in enumerate(reversed(self.shape))
+        ):
+            tensor = torch.nn.functional.interpolate(
+                tensor.float(), mode=self.mode, size=tuple(self.shape), align_corners=False
+            ).type(torch.float32)
+        if tensor.shape[1] != self.in_channels:
+            tensor = tensor.repeat(tuple([1, 3] + [1 for _ in range(self.dim)]))
+
+        def mean_attr(key):
+            return sum(float(attr[key]) for attr in attribute) / len(attribute)
+
+        return [
+            tensor,
+            torch.tensor([self.nb_layer]),
+            torch.tensor([mean_attr("ImageMin"), mean_attr("ImageMax"), mean_attr("ImageMean"), mean_attr("ImageStd")]),
+        ]
+
+    def _compute(
+        self, output: torch.Tensor, targets: list[torch.Tensor], attributes: list[list[Attribute]]
+    ) -> torch.Tensor:
+        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
+        self.model.to(output.device)
+        self.model.eval()
+        output = self.preprocessing(output, attributes[0])
+        target = self.preprocessing(targets[0], attributes[1])
+        for i, zipped_output in enumerate(zip(self.model(*output), self.model(*target))):
+            output_feature = zipped_output[0]
+            target_feature = zipped_output[1]
+            loss += self.weights[i] * self.loss(output_feature, target_feature)
+        return loss
+
+    def forward(  # type: ignore[override]
+        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    ) -> torch.Tensor:
+        if self.model is None:
+            self.model = torch.jit.load(self.model_path)  # nosec B614
+        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
+        if len(output.shape) == 5 and self.dim == 2:
+            for i in range(output.shape[2]):
+                loss += self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets], attributes)
+            loss /= output.shape[2]
+        else:
+            loss = self._compute(output, list(targets), attributes)
+        return loss.to(output.device)
+
+
 class IMPACTSynth(CriterionWithAttribute):
 
     class Weights:
@@ -815,18 +916,18 @@ class IMPACTSynth(CriterionWithAttribute):
             return sum(float(attr[key]) for attr in attribute) / len(attribute)
 
         if "Mean" in attribute[0] and "Std" in attribute[0]:
-            mean_value = torch.tensor([float(a.get_tensor("Mean")) for a in attribute], device=tensor.device).view(
+            mean_value = torch.tensor([float(a["Mean"]) for a in attribute], device=tensor.device).view(
                 -1, *([1] * (tensor.dim() - 1))
             )
-            std_value = torch.tensor([float(a.get_tensor("Std")) for a in attribute], device=tensor.device).view(
+            std_value = torch.tensor([float(a["Std"]) for a in attribute], device=tensor.device).view(
                 -1, *([1] * (tensor.dim() - 1))
             )
             tensor = tensor * std_value + mean_value
         elif "Min" in attribute[0] and "Max" in attribute[0]:
-            min_value = torch.tensor([float(a.get_tensor("Min")) for a in attribute], device=tensor.device).view(
+            min_value = torch.tensor([float(a["Min"]) for a in attribute], device=tensor.device).view(
                 -1, *([1] * (tensor.dim() - 1))
             )
-            max_value = torch.tensor([float(a.get_tensor("Max")) for a in attribute], device=tensor.device).view(
+            max_value = torch.tensor([float(a["Max"]) for a in attribute], device=tensor.device).view(
                 -1, *([1] * (tensor.dim() - 1))
             )
             tensor = (tensor + 1) / 2 * (max_value - min_value) + min_value
@@ -839,9 +940,8 @@ class IMPACTSynth(CriterionWithAttribute):
     def _compute(
         self, output: torch.Tensor, targets: list[torch.Tensor], attributes: list[list[Attribute]]
     ) -> torch.Tensor:
-        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
-        self.model.to(output.device)
-        self.model.eval()
+        loss = torch.zeros(1, device=output.device, dtype=torch.float32)
+
         output = self.preprocessing(output, attributes[-1])
         targets = [self.preprocessing(target, attribute) for target, attribute in zip(targets, attributes)]
         for i, zipped_output in enumerate(zip(self.model(*output), *[self.model(*target) for target in targets])):
@@ -849,22 +949,27 @@ class IMPACTSynth(CriterionWithAttribute):
 
             targets_features = zipped_output[1:]
             for target_feature, (sub_loss, weights) in zip(targets_features, self.weighted_losses.items()):
-                loss += weights[i] * sub_loss(output_feature, target_feature)
+                loss = loss + weights[i] * sub_loss(output_feature, target_feature)
         return loss
 
     def forward(  # type: ignore[override]
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> torch.Tensor:
         if self.model is None:
-            self.model = torch.jit.load(self.model_path)  # nosec B614
-        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
+            self.model = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
+        print(output.device)
+
+        self.model = self.model.to(output.device)
+        self.model = self.model.eval()
+        loss = torch.zeros(1, device=output.device, dtype=torch.float32)
+
         if len(output.shape) == 5 and self.dim == 2:
             for i in range(output.shape[2]):
-                loss += self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets], attributes)
-            loss /= output.shape[2]
+                loss = loss + self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets], attributes)
+            loss = loss / output.shape[2]
         else:
             loss = self._compute(output, list(targets), attributes)
-        return loss.to(output)
+        return loss.to(output.device)
 
 
 class Variance(Criterion):

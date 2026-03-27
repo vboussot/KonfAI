@@ -36,8 +36,9 @@ def main():
     )
     parser.add_argument("--models", nargs="+", default=[], help="Explicit list of model identifiers/paths to use.")
     kwargs = add_common_konfai_apps(parser, False)
+    task = kwargs.pop("task")
     konfai_app = KonfAIApp(
-        f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{kwargs.pop("task")}", kwargs.pop("download"), kwargs.pop("force_update")
+        f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{task}", kwargs.pop("download"), kwargs.pop("force_update")
     )
     kwargs["ensemble_models"] = kwargs.pop("models")
     konfai_app.pipeline(**kwargs)

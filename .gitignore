@@ -9,6 +9,4 @@ examples/Synthesis/Task_1
 docs
 .vscode
 .mypy_cache
-Local/
 apps/impact_reg
-mcp_server.py

@@ -68,6 +68,69 @@ pip install -e .
 
 ---
 
+## 🐳 Docker
+
+KonfAI can be packaged as a GPU-ready Docker image that exposes the existing
+CLI entrypoints: `konfai`, `konfai-apps`, `konfai-apps-server`, and
+`konfai-cluster`.
+
+Build the image:
+
+```bash
+docker build -f docker/Dockerfile -t konfai .
+```
+
+This build installs KonfAI from PyPI, and preinstalls the CUDA-enabled PyTorch wheel. To target another KonfAI or PyTorch version, override the corresponding build arguments.
+
+The official Docker image is published on Docker Hub as `vboussot/konfai`.
+
+Run the main CLI from your current working directory:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  -v "$(pwd):/workspace" \
+  -w /workspace \
+  konfai TRAIN --gpu 0 -c examples/Synthesis/Config.yml
+```
+
+Run KonfAI Apps:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  -v "$(pwd):/workspace" \
+  -w /workspace \
+  konfai konfai-apps infer my_app -i input.mha -o ./Output
+```
+
+Run the apps server image with the `server` extra installed by default:
+
+```bash
+docker run --rm -it -p 8000:8000 \
+  --gpus all \
+  -v "$(pwd):/workspace" \
+  -w /workspace \
+  -e KONFAI_API_TOKEN=my-token \
+  konfai konfai-apps-server --host 0.0.0.0 --port 8000 --apps tests/assets/apps.json
+```
+
+Notes:
+
+- The container defaults to `konfai --help` when no command is provided.
+- If the first argument is not a known KonfAI executable, it is forwarded to
+  `konfai`.
+- To override the KonfAI version from PyPI, rebuild with
+  `docker build -f docker/Dockerfile --build-arg KONFAI_PYPI_VERSION=1.5.3 -t konfai .`
+- For custom optional dependencies, rebuild with
+  `docker build -f docker/Dockerfile --build-arg KONFAI_EXTRAS=server,cluster -t konfai .`
+- To override the PyTorch wheel source, rebuild with
+  `docker build -f docker/Dockerfile --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 -t konfai .`
+- To force a CPU-only image, rebuild with
+  `docker build -f docker/Dockerfile --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu -t konfai .`
+
+---
+
 ## 🧪 Usage
 
 ```bash

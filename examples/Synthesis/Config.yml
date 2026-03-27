@@ -23,7 +23,7 @@ Trainer:
                   schedulers:
                     Constant:
                       nb_step: 0
-                      value: 1                
+                      value: 1
                   group: 0
                   start: 0
                   stop: None
@@ -148,7 +148,7 @@ Trainer:
     - ./Dataset/:a:mha
     inline_augmentations: true # Apply new augmentations at each epoch
     use_cache: true # Cache processed data in memory for faster training
-    batch_size: 5 # Number of samples per training batch
+    batch_size: 32 # Number of samples per training batch
     validation: None  # Path to a file defining validation cases (each line = patient name)
   train_name: TRAIN_01  # Training name used to create the output folder structure
   manual_seed: 32 # Fixed seed for reproducibility

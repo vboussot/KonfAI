@@ -40,7 +40,7 @@ def main():
 
     kwargs = add_common_konfai_apps(parser)
 
-    konfai_app = KonfAIApp(
-        f"{IMPACT_SYNTH_KONFAI_REPO}:{kwargs.pop("model")}", kwargs.pop("download"), kwargs.pop("force_update")
-    )
+    model = kwargs.pop("model")
+
+    konfai_app = KonfAIApp(f"{IMPACT_SYNTH_KONFAI_REPO}:{model}", kwargs.pop("download"), kwargs.pop("force_update"))
     konfai_app.pipeline(**kwargs)
