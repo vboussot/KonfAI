@@ -12,6 +12,12 @@ It provides a clean separation between configuration and implementation, allowin
 
 KonfAI natively supports **multi-model training**, **patch-based learning**, **test-time augmentation**, and **loss scheduling**, making it ideal for medical imaging research and large-scale experimentation.
 
+In practice, KonfAI is meant to help you:
+
+- design and iterate on low-level deep learning workflows through YAML
+- keep experiments reproducible and easy to inspect
+- turn mature workflows into reusable **KonfAI Apps** for inference, evaluation, fine-tuning, or remote execution
+
 **KonfAI** has been used in several top-performing challenge projects:  
 [🔗 SynthRAD2025 – Task 1](https://github.com/vboussot/Synthrad2025_Task_1) •  
 [🔗 SynthRAD2025 – Task 2](https://github.com/vboussot/Synthrad2025_Task_2) •  
@@ -32,6 +38,8 @@ For more details on the design principles and scientific background, refer to th
 - 🧩 Modular plugin-like structure (transforms, augmentations, models, losses, schedulers)
 - 🔄 Dynamic criterion scheduling per head / target
 - 🧠 Multi-branch / multi-output model support
+- 🧱 Patch-based learning and reconstruction
+- 📦 Packaged workflows through KonfAI Apps
 - 🖥️ Cluster-ready
 - 📈 TensorBoard and custom logging support
 
@@ -43,14 +51,28 @@ For more details on the design principles and scientific background, refer to th
 
 Install KonfAI from PyPI:
 
-```
+```bash
 pip install konfai
 ```
 
-This will install the command-line tools:
+This installs the core command-line tools:
 
-```
+```bash
 konfai --help
+konfai-apps --help
+```
+
+Optional extras:
+
+```bash
+pip install "konfai[server]"
+pip install "konfai[cluster]"
+```
+
+Use these extra commands when the matching optional dependencies are installed:
+
+```bash
+konfai-apps-server --help
 konfai-cluster --help
 ```
 
@@ -60,11 +82,30 @@ konfai-cluster --help
 
 Clone the repository and install:
 
-```
+```bash
 git clone https://github.com/vboussot/KonfAI.git
 cd KonfAI
 pip install -e .
 ```
+
+This is the best option if you want to edit YAML examples, develop custom models, or work on KonfAI itself.
+
+---
+
+## ✨ Start Here
+
+If you are discovering KonfAI, the easiest path is:
+
+1. install the package
+2. start from one of the examples in [`examples/`](https://github.com/vboussot/KonfAI/tree/main/examples)
+3. run the workflow with `konfai`
+4. package the stabilized workflow as a **KonfAI App** if you want a simpler reusable interface
+
+Recommended entry points:
+
+- [`examples/Synthesis`](https://github.com/vboussot/KonfAI/tree/main/examples/Synthesis) for image synthesis workflows
+- [`examples/Segmentation`](https://github.com/vboussot/KonfAI/tree/main/examples/Segmentation) for a clean segmentation baseline
+- [`apps/`](https://github.com/vboussot/KonfAI/tree/main/apps) for packaged workflows ready to use
 
 ---
 
@@ -84,6 +125,14 @@ This build installs KonfAI from PyPI, and preinstalls the CUDA-enabled PyTorch w
 
 The official Docker image is published on Docker Hub as `vboussot/konfai`.
 
+Pull the published image directly:
+
+```bash
+docker pull vboussot/konfai
+```
+
+If you built the image locally, replace `vboussot/konfai` with your local image tag, for example `konfai`.
+
 Run the main CLI from your current working directory:
 
 ```bash
@@ -91,7 +140,7 @@ docker run --rm -it \
   --gpus all \
   -v "$(pwd):/workspace" \
   -w /workspace \
-  konfai TRAIN --gpu 0 -c examples/Synthesis/Config.yml
+  vboussot/konfai TRAIN --gpu 0 -c examples/Synthesis/Config.yml
 ```
 
 Run KonfAI Apps:
@@ -101,7 +150,7 @@ docker run --rm -it \
   --gpus all \
   -v "$(pwd):/workspace" \
   -w /workspace \
-  konfai konfai-apps infer my_app -i input.mha -o ./Output
+  vboussot/konfai konfai-apps infer my_app -i input.mha -o ./Output
 ```
 
 Run the apps server image with the `server` extra installed by default:
@@ -112,7 +161,7 @@ docker run --rm -it -p 8000:8000 \
   -v "$(pwd):/workspace" \
   -w /workspace \
   -e KONFAI_API_TOKEN=my-token \
-  konfai konfai-apps-server --host 0.0.0.0 --port 8000 --apps tests/assets/apps.json
+  vboussot/konfai konfai-apps-server --host 0.0.0.0 --port 8000 --apps tests/assets/apps.json
 ```
 
 Notes:
@@ -134,10 +183,15 @@ Notes:
 ## 🧪 Usage
 
 ```bash
-konfai TRAIN --gpu 0
-konfai PREDICTION --models checkpoint.pt --gpu 0
-konfai EVALUATION
+konfai TRAIN -y --gpu 0 --config Config.yml
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models checkpoint.pt
+konfai EVALUATION -y --config Evaluation.yml
 ```
+
+For complete, ready-to-adapt workflows, see:
+
+- [`examples/Synthesis/README.md`](https://github.com/vboussot/KonfAI/tree/main/examples/Synthesis)
+- [`examples/Segmentation/README.md`](https://github.com/vboussot/KonfAI/tree/main/examples/Segmentation)
 
 ---
 
@@ -152,7 +206,7 @@ They can be executed **identically** from:
 
 | Interface | Command |
 |----------|---------|
-| 🖥️ CLI | `konfai-apps infer / eval / uncertainty / pipeline  app name` |
+| 🖥️ CLI | `konfai-apps infer / eval / uncertainty / pipeline <app>` |
 | 🧠 3D Slicer | Via **SlicerKonfAI** GUI https://github.com/vboussot/SlicerKonfAI |
 | 🐍 Python API | Via `konfai.app.KonfAIApp` |
 | 🌐 Remote Server (client/server mode) |
@@ -161,7 +215,7 @@ They can be executed **identically** from:
 
 ### 📂 Structure of a KonfAI App
 
-```
+```text
 my_konfai_app/
 ├── app.json                # Metadata for UI + behaviors
 ├── Prediction.yml          # Inference workflow (required)
@@ -212,7 +266,7 @@ konfai-apps fine-tune my_app name -d ./Dataset --epochs 20
 ```
 
 The very same commands can be executed on a remote KonfAI Apps server by adding
---host, --port, and --token. This allows heavy workloads to run on shared GPU
+`--host`, `--port`, and `--token`. This allows heavy workloads to run on shared GPU
 machines while keeping a lightweight local client.
 
 More detailed documentation and usage examples for each app are available in the corresponding subdirectories of the `apps/` folder.
@@ -224,6 +278,12 @@ More detailed documentation and usage examples for each app are available in the
 ### 📘 Documentation
 
 The official KonfAI documentation is in progress and will be released soon.
+
+In the meantime, the most useful documentation is currently:
+
+- the examples in [`examples/`](https://github.com/vboussot/KonfAI/tree/main/examples)
+- the packaged workflows in [`apps/`](https://github.com/vboussot/KonfAI/tree/main/apps)
+- the Docker guide in [`docker/README.md`](https://github.com/vboussot/KonfAI/tree/main/docker/README.md)
 
 ### 🤖 KonfAI-MCP Server
 
