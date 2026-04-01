@@ -2,12 +2,12 @@ Quickstart
 ==========
 
 This quickstart shows the **smallest useful end-to-end KonfAI workflow**:
-install the package, download the public demo dataset, train a baseline model,
-run prediction, then evaluate the saved outputs.
+install the package, prepare a demo dataset, train a baseline model, run
+prediction, then evaluate the saved outputs.
 
 The example used here is the shipped segmentation baseline in
-``examples/Segmentation`` because it is the most conservative starting point in
-the repository.
+``examples/Segmentation`` because it is the simplest starting point in the
+repository.
 
 Prerequisites
 -------------
@@ -39,40 +39,34 @@ Verify the install:
 
    konfai --help
 
+What to keep in mind before you start:
+
+- run the commands from the directory that contains the YAML files
+- `Config.yml` is the training workflow
+- `Prediction.yml` writes model outputs to disk
+- `Evaluation.yml` compares those saved outputs against references
+
 Download the demo dataset
 -------------------------
 
-Run these commands from the repository root:
+Run these commands from the repository root. The example expects you to work
+from the example directory itself so that local YAML references and Python
+modules resolve correctly.
 
 .. code-block:: bash
 
    cd examples/Segmentation
 
-.. code-block:: python
+.. code-block:: bash
 
-   from pathlib import Path
-   import shutil
-   from huggingface_hub import snapshot_download
-
-   dataset_dir = Path("Dataset")
-   snapshot_download(
-       repo_id="VBoussot/konfai-demo",
-       repo_type="dataset",
-       local_dir=str(dataset_dir),
-       allow_patterns=["Segmentation/**"],
-   )
-
-   nested = dataset_dir / "Segmentation"
-   if nested.exists():
-       for item in nested.iterdir():
-           target = dataset_dir / item.name
-           if target.exists():
-               if target.is_dir():
-                   shutil.rmtree(target)
-               else:
-                   target.unlink()
-           shutil.move(str(item), str(target))
-       shutil.rmtree(nested)
+   python -m pip install -U "huggingface_hub[cli]"
+   hf download VBoussot/konfai-demo \
+     --repo-type dataset \
+     --include "Segmentation/**" \
+     --local-dir Dataset
+   mv Dataset/Segmentation/* Dataset/
+   rmdir Dataset/Segmentation
+   rm -rf Dataset/.cache
 
 After the download, the example expects this layout:
 
@@ -91,15 +85,14 @@ After the download, the example expects this layout:
 Train a baseline
 ----------------
 
+At this stage, KonfAI reads ``Config.yml`` and builds a ``Trainer`` object from
+it.
+
 .. code-block:: bash
 
    konfai TRAIN -y --gpu 0 --config Config.yml
 
-CPU-only alternative:
-
-.. code-block:: bash
-
-   konfai TRAIN -y --cpu 1 --config Config.yml
+If you do not have a GPU available, use ``--cpu 1`` instead of ``--gpu 0``.
 
 Training creates, at minimum:
 
@@ -109,7 +102,8 @@ Training creates, at minimum:
 Run prediction
 --------------
 
-Use one checkpoint from ``Checkpoints/SEG_BASELINE``:
+Use one checkpoint from ``Checkpoints/SEG_BASELINE``. ``Prediction.yml`` defines
+which outputs are written and under which group names.
 
 .. code-block:: bash
 
@@ -123,6 +117,9 @@ Prediction writes:
 Run evaluation
 --------------
 
+``Evaluation.yml`` does not run the model again. It compares saved prediction
+groups against reference groups on disk.
+
 .. code-block:: bash
 
    konfai EVALUATION -y --config Evaluation.yml
@@ -134,7 +131,8 @@ Evaluation writes:
 What to inspect
 ---------------
 
-- The copied YAML files inside ``Statistics/`` and ``Evaluations/`` for reproducibility
+- The copied YAML files inside ``Statistics/``, ``Predictions/``, and
+  ``Evaluations/`` for reproducibility
 - The prediction dataset written under ``Predictions/SEG_BASELINE/Dataset/``
 - The aggregated metrics in ``Metric_TRAIN.json``
 
@@ -156,6 +154,11 @@ Common first issues
   KonfAI expects the group names used in ``groups_src`` to exist on disk. In
   this example that means ``CT.mha`` and ``SEG.mha`` for every case directory.
 
+- **The workflow runs, but evaluation cannot find predictions**
+
+  Check that ``Prediction.yml`` and ``Evaluation.yml`` use the same
+  ``train_name`` and that evaluation points to the correct prediction dataset.
+
 - **A metric or output group name is rejected**
 
   Output names in ``outputs_criterions`` and ``outputs_dataset`` must match real
@@ -170,3 +173,4 @@ Next steps
 - :doc:`config_guide/index`
 - :doc:`usage/training`
 - :doc:`examples/index`
+- ``examples/Segmentation/Segmentation_demo.ipynb`` if you prefer a notebook walkthrough

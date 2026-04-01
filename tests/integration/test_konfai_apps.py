@@ -22,6 +22,18 @@ def read_json(path: Path) -> dict:
         raise AssertionError(f"Invalid JSON in file: {path}\n{exc}") from exc
 
 
+def assert_exists(path: Path, *, context: str) -> None:
+    if not path.exists():
+        raise AssertionError(f"{context}: expected path does not exist: {path}")
+
+
+def assert_non_empty_glob(root: Path, pattern: str, *, context: str) -> list[Path]:
+    matches = sorted(root.rglob(pattern))
+    if not matches:
+        raise AssertionError(f"{context}: no match for pattern {pattern!r} under {root}")
+    return matches
+
+
 def extract_case_metrics(data: dict, *, context: str) -> dict[str, float]:
     """
     Returns {metric_key: single_value} from:
@@ -82,9 +94,12 @@ def assert_metrics_close(
 
 
 def test_konfai_apps_infer(tmp_path: Path):
-    # --- Load baselines
+    dataset_dir = Path("tests/assets/Dataset/P001")
     eval_base_path = Path("tests/assets/Baselines/Evaluation.json")
     unc_base_path = Path("tests/assets/Baselines/Uncertainties.json")
+    predictions_dir = tmp_path / "Predictions"
+    evaluations_dir = tmp_path / "Evaluations"
+    uncertainties_dir = tmp_path / "Uncertainties"
 
     eval_baseline_data = read_json(eval_base_path)
     unc_baseline_data = read_json(unc_base_path)
@@ -98,13 +113,13 @@ def test_konfai_apps_infer(tmp_path: Path):
         "pipeline",
         "VBoussot/ImpactSynth:CBCT",
         "-i",
-        "tests/assets/Dataset/P001/CBCT.mha",
+        str(dataset_dir / "CBCT.mha"),
         "-o",
         str(tmp_path),
         "--gt",
-        "tests/assets/Dataset/P001/CT.mha",
+        str(dataset_dir / "CT.mha"),
         "--mask",
-        "tests/assets/Dataset/P001/MASK.mha",
+        str(dataset_dir / "MASK.mha"),
         "--ensemble",
         "2",
         "--tta",
@@ -122,9 +137,14 @@ def test_konfai_apps_infer(tmp_path: Path):
         f"STDERR:\n{p.stderr}"
     )
 
-    # --- Load outputs
-    eval_out_path = tmp_path / "Evaluations" / "ImpactSynth" / "Metric_TRAIN.json"
-    unc_out_path = tmp_path / "Uncertainties" / "ImpactSynth" / "Metric_TRAIN.json"
+    assert_exists(predictions_dir, context="Pipeline output")
+    assert_exists(evaluations_dir, context="Pipeline output")
+    assert_exists(uncertainties_dir, context="Pipeline output")
+    assert_non_empty_glob(predictions_dir, "*.mha", context="Predictions")
+    assert_non_empty_glob(uncertainties_dir, "*.mha", context="Uncertainties")
+
+    eval_out_path = evaluations_dir / "ImpactSynth" / "Metric_TRAIN.json"
+    unc_out_path = uncertainties_dir / "ImpactSynth" / "Metric_TRAIN.json"
 
     eval_out_data = read_json(eval_out_path)
     unc_out_data = read_json(unc_out_path)

@@ -63,32 +63,17 @@ The public demo dataset is hosted on Hugging Face:
 
 If you want a notebook-driven first run, use `Synthesis_demo.ipynb`.
 
-If you prefer to fetch the demo subset manually, the most robust approach is:
+If you prefer to fetch the demo subset manually, use the Hugging Face CLI:
 
-```python
-from pathlib import Path
-import shutil
-from huggingface_hub import snapshot_download
-
-dataset_dir = Path("Dataset")
-snapshot_download(
-    repo_id="VBoussot/konfai-demo",
-    repo_type="dataset",
-    local_dir=str(dataset_dir),
-    allow_patterns=["Synthesis/**"],
-)
-
-nested = dataset_dir / "Synthesis"
-if nested.exists():
-    for item in nested.iterdir():
-        target = dataset_dir / item.name
-        if target.exists():
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        shutil.move(str(item), str(target))
-    shutil.rmtree(nested)
+```bash
+python -m pip install -U "huggingface_hub[cli]"
+hf download VBoussot/konfai-demo \
+  --repo-type dataset \
+  --include "Synthesis/**" \
+  --local-dir Dataset
+mv Dataset/Synthesis/* Dataset/
+rmdir Dataset/Synthesis
+rm -rf Dataset/.cache
 ```
 
 After that, your local layout should look like:
@@ -131,11 +116,7 @@ For the smoothest first run on a fresh machine or in Colab, start with `Synthesi
 konfai TRAIN -y --gpu 0 --config Config.yml
 ```
 
-CPU-only alternative:
-
-```bash
-konfai TRAIN -y --cpu 1 --config Config.yml
-```
+If you do not have a GPU available, use `--cpu 1` instead of `--gpu 0`.
 
 This creates:
 

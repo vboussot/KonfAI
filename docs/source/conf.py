@@ -22,10 +22,14 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
+html_static_path = ["_static"]
 exclude_patterns = ["_build", "build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "shibuya"
 html_title = "KonfAI documentation"
+html_logo = os.path.abspath("../../logo.png")
+html_favicon = os.path.abspath("../../logo.png")
+html_css_files = ["custom.css"]
 
 myst_enable_extensions = [
     "deflist",

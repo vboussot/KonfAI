@@ -3,6 +3,9 @@
 KonfAI Apps are packaged workflows that expose a stable user interface on top of
 KonfAI's low-level prediction, evaluation, uncertainty, and fine-tuning logic.
 
+Use apps when the low-level YAML workflow is already stable and you want a
+smaller, more repeatable interface for end users.
+
 ## The `konfai-apps` CLI
 
 The app CLI currently exposes these subcommands:
@@ -30,6 +33,9 @@ tests show Hugging Face style identifiers such as:
 
 ## Common app workflows
 
+These commands all use the same app package, but they expose different levels
+of workflow orchestration.
+
 Inference:
 
 .. code-block:: bash
@@ -56,7 +62,11 @@ Pipeline:
 The CLI accepts grouped inputs by repeating `--inputs` / `-i`. This matches the
 grouping behavior documented in `konfai.main.add_common_konfai_apps()`.
 
-Use this when an app expects multiple input groups or multiple files per group.
+Use this when an app expects:
+
+- multiple input groups
+- multiple files per group
+- paired inputs such as image + mask
 
 ## Fine-tuning
 
@@ -72,7 +82,8 @@ the low-level training flow in resume mode.
 ## Local vs remote
 
 If you add `--host`, the same command switches from local execution to
-client/server mode automatically.
+client/server mode automatically. The CLI still looks the same; only the
+execution backend changes.
 
 See also
 --------

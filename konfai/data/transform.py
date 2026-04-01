@@ -30,8 +30,10 @@ import torch.nn.functional as F  # noqa: N812
 from konfai import cuda_visible_devices
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
+from konfai.utils.errors import TransformError
 from konfai.utils.ITK import box_with_mask, crop_with_mask
-from konfai.utils.utils import NeedDevice, TransformError, _affine_matrix, _resample_affine, get_module
+from konfai.utils.runtime import NeedDevice
+from konfai.utils.utils import get_module
 
 
 class Transform(NeedDevice, ABC):
@@ -724,31 +726,63 @@ class Canonical(TransformInverse):
         super().__init__(inverse)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
 
+    @staticmethod
+    def _affine_matrix(matrix: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            (
+                torch.cat((matrix, translation.unsqueeze(0).T), dim=1),
+                torch.tensor([[0, 0, 0, 1]]),
+            ),
+            dim=0,
+        )
+
+    @staticmethod
+    def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
+        if data.dtype == torch.uint8:
+            mode = "nearest"
+        else:
+            mode = "bilinear"
+        return (
+            torch.nn.functional.grid_sample(
+                data.unsqueeze(0).type(torch.float32),
+                torch.nn.functional.affine_grid(
+                    matrix[:, :-1, ...].type(torch.float32),
+                    [1] + list(data.shape),
+                    align_corners=True,
+                ),
+                align_corners=True,
+                mode=mode,
+                padding_mode="reflection",
+            )
+            .squeeze(0)
+            .type(data.dtype)
+        )
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         spacing = cache_attribute.get_tensor("Spacing")
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
         initial_origin = cache_attribute.get_tensor("Origin")
         cache_attribute["Direction"] = (self.canonical_direction).flatten()
-        matrix = _affine_matrix(self.canonical_direction @ initial_matrix.inverse(), torch.tensor([0, 0, 0]))
+        matrix = Canonical._affine_matrix(self.canonical_direction @ initial_matrix.inverse(), torch.tensor([0, 0, 0]))
         center_voxel = torch.tensor(
             [(tensor.shape[-i - 1] - 1) * spacing[i] / 2 for i in range(3)],
             dtype=torch.double,
         )
         center_physical = initial_matrix @ center_voxel + initial_origin
         cache_attribute["Origin"] = center_physical - (self.canonical_direction @ center_voxel)
-        return _resample_affine(tensor, matrix.unsqueeze(0))
+        return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         cache_attribute.pop("Direction")
         cache_attribute.pop("Origin")
-        matrix = _affine_matrix(
+        matrix = Canonical._affine_matrix(
             (
                 self.canonical_direction
                 @ cache_attribute.get_tensor("Direction").to(torch.double).reshape(3, 3).inverse()
             ).inverse(),
             torch.tensor([0, 0, 0]),
         )
-        return _resample_affine(tensor, matrix.unsqueeze(0))
+        return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
 
 
 class HistogramMatching(Transform):

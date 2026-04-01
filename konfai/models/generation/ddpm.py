@@ -23,7 +23,7 @@ import tqdm
 from konfai.data.patching import ModelPatch
 from konfai.metric.measure import Criterion
 from konfai.network import blocks, network
-from konfai.utils.utils import gpu_info
+from konfai.utils.runtime import gpu_info
 
 
 def cosine_beta_schedule(timesteps, s=0.008):

@@ -27,9 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from konfai import RemoteServer, cuda_visible_devices
-from konfai.utils.utils import State
+from konfai.utils.runtime import State
 
-sys.path.insert(0, os.getcwd())
+_cwd = os.getcwd()
+if _cwd not in sys.path:
+    sys.path.insert(0, _cwd)
 
 
 def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bool = True) -> dict[str, Any]:
@@ -523,7 +525,7 @@ def main_apps_server():
         os.environ["KONFAI_APPS_CONFIG"] = json.dumps(data)
     apps = []
     if args.check or args.download:
-        from konfai.utils.utils import get_app_repository_info
+        from konfai.utils.app_repository import get_app_repository_info
 
         errors = []
         for app_id in data["apps"]:
@@ -540,7 +542,7 @@ def main_apps_server():
         print("[KonfAI-Apps] All apps validated successfully.")
 
     if args.download:
-        from konfai.utils.utils import LocalAppRepository
+        from konfai.utils.app_repository import LocalAppRepository
 
         for app in apps:
             try:

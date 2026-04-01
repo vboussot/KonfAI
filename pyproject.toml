@@ -46,6 +46,25 @@ vtk = ["vtk"]
 lpips = ["lpips"]
 cluster = ["submitit"]
 server = ["fastapi", "uvicorn", "python-multipart"]
+dev = [
+  "submitit",
+  "fastapi",
+  "uvicorn",
+  "python-multipart",
+  "pytest",
+  "pre-commit",
+  "types-requests",
+  "sphinx>=7.0",
+  "shibuya",
+  "myst-parser",
+  "nbsphinx",
+  "ipython",
+  "ipykernel",
+  "sphinx-autodoc-typehints",
+  "sphinx-copybutton",
+  "sphinx-togglebutton",
+  "sphinx-tabs"
+]
 
 [tool.setuptools_scm]
 tag_regex = "^v(?P<version>.*)$"

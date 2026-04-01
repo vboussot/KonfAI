@@ -43,7 +43,9 @@ from konfai.data.data_manager import BatchSample
 from konfai.data.patching import Accumulator, ModelPatch
 from konfai.metric.schedulers import Scheduler
 from konfai.utils.config import apply_config, config
-from konfai.utils.utils import MeasureError, State, TrainerError, get_device, get_gpu_memory, get_module
+from konfai.utils.errors import MeasureError, TrainerError
+from konfai.utils.runtime import State, get_device, get_gpu_memory
+from konfai.utils.utils import get_module
 
 
 class NetState(Enum):
@@ -111,6 +113,41 @@ class LossSchedulersLoader:
         )()
 
 
+def build_configured_criterions(
+    criterions_loader: dict[str, Any],
+    config_key_prefix: str,
+    configure_attr: Callable[[str, Any, Any], None] | None = None,
+) -> dict[torch.nn.Module, Any]:
+    """
+    Instantiate criteria from a KonfAI config subtree.
+
+    Parameters
+    ----------
+    criterions_loader : dict[str, Any]
+        Mapping from criterion classpath to criterion attributes.
+    config_key_prefix : str
+        Config subtree preceding ``.criterions_loader.<classpath>``.
+    configure_attr : Callable[[str, Any, Any], None] | None, optional
+        Optional callback used to enrich the attribute object with runtime
+        metadata before the criterion is instantiated. It receives the
+        criterion classpath, the attribute object, and the imported module.
+
+    Returns
+    -------
+    dict[torch.nn.Module, Any]
+        Instantiated criteria mapped to their configuration attributes.
+    """
+    criterions = {}
+    for module_classpath, criterions_attr in criterions_loader.items():
+        module, name = get_module(module_classpath, "konfai.metric.measure")
+        if configure_attr is not None:
+            configure_attr(module_classpath, criterions_attr, module)
+        criterions[
+            apply_config(f"{config_key_prefix}.criterions_loader.{module_classpath}")(getattr(module, name))()
+        ] = criterions_attr
+    return criterions
+
+
 class CriterionsAttr:
     """Metadata describing how a criterion is applied within the model graph."""
 
@@ -145,10 +182,9 @@ class CriterionsLoader:
     def get_criterions(
         self, model_classname: str, output_group: str, target_group: str
     ) -> dict[torch.nn.Module, CriterionsAttr]:
-        criterions = {}
-        for module_classpath, criterions_attr in self.criterions_loader.items():
-            module, name = get_module(module_classpath, "konfai.metric.measure")
+        def configure_attr(module_classpath: str, criterions_attr: CriterionsAttr, module: Any) -> None:
             criterions_attr.isTorchCriterion = module.__name__.startswith("torch")
+            criterions_attr.schedulers = {}
             for (
                 scheduler_classname,
                 schedulers,
@@ -161,14 +197,15 @@ class CriterionsLoader:
                         scheduler_classname,
                     )
                 ] = schedulers.nb_step
-            criterions[
-                apply_config(
-                    f"{konfai_root()}.Model.{model_classname}.outputs_criterions."
-                    f"{output_group}.targets_criterions.{target_group}."
-                    f"criterions_loader.{module_classpath}"
-                )(getattr(module, name))()
-            ] = criterions_attr
-        return criterions
+
+        return build_configured_criterions(
+            self.criterions_loader,
+            (
+                f"{konfai_root()}.Model.{model_classname}.outputs_criterions."
+                f"{output_group}.targets_criterions.{target_group}"
+            ),
+            configure_attr=configure_attr,
+        )
 
 
 class TargetCriterionsLoader:

@@ -1,0 +1,49 @@
+Predictor:
+  Model:
+    classpath: TinySynth:TinySynthNet
+    TinySynthNet:
+      outputs_criterions: None
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          MR:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+    augmentations: None
+    Patch:
+      patch_size: [1, 16, 16]
+      overlap: None
+      mask: None
+      pad_value: 0
+      extend_slice: 0
+    subset: None
+    filter: None
+    dataset_filenames:
+      - ./Dataset:a:mha
+    use_cache: false
+    batch_size: 16
+  outputs_dataset:
+    Head:Tanh:
+      OutputDataset:
+        name_class: OutSameAsGroupDataset
+        before_reduction_transforms: None
+        after_reduction_transforms: None
+        final_transforms:
+          TensorCast:
+            dtype: float32
+            inverse: false
+        dataset_filename: Dataset:mha
+        group: sCT
+        same_as_group: Volume_0:MR
+        patch_combine: None
+        inverse_transform: false
+        reduction: Mean
+        Mean: {}
+  train_name: TinyApp
+  manual_seed: 0
+  gpu_checkpoints: None
+  autocast: false
+  combine: Mean
+  data_log: None

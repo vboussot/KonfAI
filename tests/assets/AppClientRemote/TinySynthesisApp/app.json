@@ -1,0 +1,24 @@
+{
+  "display_name": "Tiny Synth",
+  "description": "Tiny local synthesis app for integration testing",
+  "short_description": "Tiny synth",
+  "tta": 0,
+  "mc_dropout": 0,
+  "models": [
+    "tiny.pt"
+  ],
+  "inputs": {
+    "Volume_0": {
+      "display_name": "MR",
+      "volume_type": "VOLUME",
+      "required": true
+    }
+  },
+  "outputs": {
+    "sCT": {
+      "display_name": "sCT",
+      "volume_type": "VOLUME",
+      "required": true
+    }
+  }
+}

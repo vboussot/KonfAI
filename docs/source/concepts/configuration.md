@@ -1,12 +1,13 @@
 # Configuration model
 
-KonfAI is fundamentally a **configuration-driven object builder**. The YAML file
-does not just pass values into a fixed script; it determines which Python
-classes are instantiated and how they are wired together.
+KonfAI is fundamentally a **configuration-driven object builder**.
 
-## Root objects
+The YAML file does not just pass values into a fixed script. It determines
+which Python classes are instantiated and how they are connected.
 
-The root key of the YAML selects the high-level workflow:
+## Root workflow objects
+
+The root key of the YAML selects the high-level workflow object:
 
 - `Trainer` for training
 - `Predictor` for inference
@@ -18,25 +19,29 @@ These names map directly to the public classes in:
 - `konfai.predictor.Predictor`
 - `konfai.evaluator.Evaluator`
 
-## How YAML becomes objects
+## How YAML becomes Python objects
 
 This behavior is implemented by `konfai.utils.config.Config`, `config()`, and
 `apply_config()`.
 
-In practice:
+In practice, the mapping is straightforward:
 
 1. a class or function is annotated with `@config("...")`
 2. `apply_config()` inspects the constructor signature
 3. YAML fields are matched against constructor parameter names
 4. nested objects are recursively instantiated from nested mappings
 
-This is why KonfAI configuration keys should generally use **snake_case** and
-mirror the actual Python constructor arguments.
+This is why KonfAI configuration keys should generally:
+
+- use **snake_case**
+- match the actual Python constructor arguments
+- stay close to the shipped examples when you introduce a custom class
 
 ## `classpath`
 
 Many configurable components are selected dynamically through a `classpath`
-string. The exact resolution logic is implemented by `konfai.utils.utils.get_module()`.
+string. The exact resolution logic is implemented by
+`konfai.utils.utils.get_module()`.
 
 Typical examples:
 
@@ -56,7 +61,7 @@ The two main styles are:
 - `module:ClassName` references for explicit imports, often used for local files next to the YAML
 
 Use the second form when you add custom files inside an example or project
-directory.
+directory. It is usually the least ambiguous option.
 
 ## `default|...` values
 
@@ -89,6 +94,16 @@ nest:
 
 This is why KonfAI examples are such a good source of truth: they show real
 constructor trees that the framework accepts.
+
+## Practical mapping rules
+
+When a config does not behave as expected, check these rules first:
+
+- the YAML root must match the workflow you are launching
+- nested section names must match constructor parameters or `@config(...)` keys
+- local `classpath` modules must be importable from the current working directory
+- the YAML shape should mirror the Python object graph, not just the names you
+  want conceptually
 
 ## When to use local Python modules
 

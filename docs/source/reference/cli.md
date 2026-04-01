@@ -1,5 +1,8 @@
 # CLI reference
 
+This page lists the package entrypoints exposed by `pyproject.toml`. Use it as
+the quick map of "which command should I run?".
+
 KonfAI ships four main command-line entrypoints:
 
 - `konfai`
@@ -10,6 +13,8 @@ KonfAI ships four main command-line entrypoints:
 ## `konfai`
 
 Low-level workflow runner for training, prediction, and evaluation.
+
+Use `konfai` when you are still designing a workflow directly from YAML.
 
 ### Commands
 
@@ -57,6 +62,9 @@ Low-level workflow runner for training, prediction, and evaluation.
 
 Higher-level packaged workflow runner.
 
+Use `konfai-apps` when a workflow is already packaged as a KonfAI App and you
+want a simpler interface than the low-level YAML CLI.
+
 ### Commands
 
 | Command | Purpose |
@@ -72,7 +80,7 @@ Higher-level packaged workflow runner.
 | Option | Meaning |
 | --- | --- |
 | `app` | App identifier or repository path. |
-| `--host`, `--port`, `--token` | Switch to remote server mode. |
+| `--host`, `--port`, `--token` | Switch from local app execution to remote server mode. |
 | `-i`, `--inputs` | Input paths, grouped by repeated flag occurrences. |
 | `-o`, `--output` | Output directory. |
 | `--gpu` / `--cpu` | Device selection. |
@@ -89,17 +97,17 @@ Higher-level packaged workflow runner.
 - `--tta`
 - `--mc`
 - `-uncertainty`
-- `--prediction-file`
+- `--prediction-file` (alias: `--prediction_file`)
 
 `eval`
 
 - `--gt`
 - `--mask`
-- `--evaluation-file`
+- `--evaluation-file` (alias: `--evaluation_file`)
 
 `uncertainty`
 
-- `--uncertainty-file`
+- `--uncertainty-file` (alias: `--uncertainty_file`)
 
 `pipeline`
 
@@ -115,6 +123,8 @@ Higher-level packaged workflow runner.
 ## `konfai-apps-server`
 
 FastAPI server exposing packaged apps remotely.
+
+This command is the server-side counterpart of `konfai-apps --host ...`.
 
 Important options:
 

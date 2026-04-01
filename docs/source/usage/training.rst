@@ -31,11 +31,7 @@ From the example directory:
 
    konfai TRAIN -y --gpu 0 --config Config.yml
 
-CPU-only:
-
-.. code-block:: bash
-
-   konfai TRAIN -y --cpu 1 --config Config.yml
+If you do not have a GPU available, use ``--cpu 1`` instead of ``--gpu 0``.
 
 What training writes
 --------------------

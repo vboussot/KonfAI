@@ -30,7 +30,7 @@ Depending on the app, some files are optional:
 - `Prediction.yml` is the core inference entrypoint
 - `Evaluation.yml` is needed for `eval`
 - `Uncertainty.yml` is needed for `uncertainty`
-- fine-tuning relies on training config and checkpoint assets
+- fine-tuning relies on training assets and checkpoint files that live next to the app
 
 ## Local and remote usage
 
@@ -39,7 +39,7 @@ The same app command can run:
 - locally, through `KonfAIApp`
 - remotely, through `KonfAIAppClient`, if `--host` is provided
 
-The remote mode:
+In remote mode, the client:
 
 1. uploads files to the server
 2. schedules the job

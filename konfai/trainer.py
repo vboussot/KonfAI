@@ -39,7 +39,16 @@ from konfai import (
 from konfai.data.data_manager import BatchSample, DataTrain
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
-from konfai.utils.utils import DataLog, DistributedObject, State, TrainerError, description, run_distributed_app
+from konfai.utils.errors import ConfigError, TrainerError
+from konfai.utils.runtime import (
+    DataLog,
+    DistributedObject,
+    State,
+    configure_workflow_environment,
+    confirm_overwrite_or_raise,
+    description,
+    run_distributed_app,
+)
 
 
 class EarlyStoppingBase:
@@ -523,7 +532,7 @@ class Trainer(DistributedObject):
         save_checkpoint_mode: str = "BEST",
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
-            exit(0)
+            raise ConfigError("Trainer requires KONFAI_CONFIG_MODE='Done' before initialization.")
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
@@ -548,6 +557,62 @@ class Trainer(DistributedObject):
         config_namefile = self.config_path_src.name.replace(".yml", "")
         self.config_namefile = statistics_directory() / self.name / f"{config_namefile}_{self.it}.yml"
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
+
+        state = State[konfai_state()]
+        self.dataset.prepare()
+        self.model.init(self.autocast, state, self.dataset.get_groups_dest())
+        self.model.init_outputs_group()
+        self.model._compute_channels_trace(
+            self.model,
+            self.model.in_channels,
+            self.gradient_checkpoints,
+            self.gpu_checkpoints,
+        )
+
+    def setup(self, world_size: int):
+        """
+        Initializes the training environment:
+        - Clears previous outputs (unless resuming)
+        - Initializes model and EMA
+        - Loads checkpoint (if resuming)
+        - Prepares dataloaders
+
+        Args:
+            world_size (int): Total number of distributed processes.
+        """
+        state = State[konfai_state()]
+        if state != State.RESUME and (checkpoints_directory() / self.name).exists():
+            confirm_overwrite_or_raise(checkpoints_directory() / self.name, "model", TrainerError)
+            for directory_path in [
+                statistics_directory(),
+                checkpoints_directory(),
+            ]:
+                path = directory_path / self.name
+                if path.exists():
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+
+        state_dict = {}
+        if state != State.TRAIN:
+            state_dict = self._load()
+        self.model.load(state_dict, init=True, ema=False)
+        if self.ema_decay > 0:
+            self.model_ema = AveragedModel(self.model, avg_fn=self._avg_fn)
+            if state_dict is not None:
+                self.model_ema.module.load(state_dict, init=False, ema=True)
+
+        (statistics_directory() / self.name).mkdir(exist_ok=True)
+        shutil.copyfile(self.config_path_src, self.config_namefile)
+
+        self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
+        with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
+            for name in train_names:
+                f.write(name + "\n")
+        with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
+            for name in validation_names:
+                f.write(name + "\n")
 
     def set_model(self, path_to_model: Path) -> None:
         self.path_to_model = str(path_to_model)
@@ -603,63 +668,6 @@ class Trainer(DistributedObject):
         """
         return (1 - self.ema_decay) * averaged_model_parameter + self.ema_decay * model_parameter
 
-    def setup(self, world_size: int):
-        """
-        Initializes the training environment:
-        - Clears previous outputs (unless resuming)
-        - Initializes model and EMA
-        - Loads checkpoint (if resuming)
-        - Prepares dataloaders
-
-        Args:
-            world_size (int): Total number of distributed processes.
-        """
-        state = State[konfai_state()]
-        if state != State.RESUME and (checkpoints_directory() / self.name).exists():
-            if os.environ["KONFAI_OVERWRITE"] != "True":
-                accept = input(f"The model {self.name} already exists ! Do you want to overwrite it (yes,no) : ")
-                if accept != "yes":
-                    exit(0)
-            for directory_path in [
-                statistics_directory(),
-                checkpoints_directory(),
-            ]:
-                path = directory_path / self.name
-                if path.exists():
-                    if path.is_dir():
-                        shutil.rmtree(path)
-                    else:
-                        path.unlink()
-
-        state_dict = {}
-        if state != State.TRAIN:
-            state_dict = self._load()
-
-        self.model.init(self.autocast, state, self.dataset.get_groups_dest())
-        self.model.init_outputs_group()
-        self.model._compute_channels_trace(
-            self.model,
-            self.model.in_channels,
-            self.gradient_checkpoints,
-            self.gpu_checkpoints,
-        )
-        self.model.load(state_dict, init=True, ema=False)
-        if self.ema_decay > 0:
-            self.model_ema = AveragedModel(self.model, avg_fn=self._avg_fn)
-            if state_dict is not None:
-                self.model_ema.module.load(state_dict, init=False, ema=True)
-
-        (statistics_directory() / self.name).mkdir(exist_ok=True)
-        shutil.copyfile(self.config_path_src, self.config_namefile)
-
-        self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
-        with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
-            for name in train_names:
-                f.write(name + "\n")
-        with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
-            for name in validation_names:
-                f.write(name + "\n")
-
     def run_process(
         self,
         world_size: int,
@@ -702,6 +710,50 @@ class Trainer(DistributedObject):
             t.run()
 
 
+def build_train(
+    command: State = State.TRAIN,
+    model: Path | str | None = None,
+    config: Path | str = Path("./Config.yml"),
+    checkpoints_dir: Path | str = Path("./Checkpoints/"),
+    statistics_dir: Path | str = Path("./Statistics/"),
+) -> DistributedObject:
+    """
+    Build and return the configured training workflow without executing it.
+
+    Parameters
+    ----------
+    command : State, optional
+        Training command variant, typically ``State.TRAIN`` or ``State.RESUME``.
+    model : Path | str | None, optional
+        Checkpoint path used when resuming training.
+    config : Path | str, optional
+        Training configuration file.
+    checkpoints_dir : Path | str, optional
+        Output directory for checkpoints.
+    statistics_dir : Path | str, optional
+        Output directory for statistics and logs.
+
+    Returns
+    -------
+    DistributedObject
+        Configured trainer object ready to be executed by the runtime wrapper.
+    """
+    configure_workflow_environment(
+        config_path=config,
+        root="Trainer",
+        state=command,
+        path_env={
+            "KONFAI_CHECKPOINTS_DIRECTORY": checkpoints_dir,
+            "KONFAI_STATISTICS_DIRECTORY": statistics_dir,
+        },
+    )
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    trainer = apply_config()(Trainer)()
+    if model is not None:
+        trainer.set_model(Path(model))
+    return trainer
+
+
 @run_distributed_app
 def train(
     command: State = State.TRAIN,
@@ -716,48 +768,19 @@ def train(
     statistics_dir: Path | str = Path("./Statistics/"),
 ) -> DistributedObject:
     """
-    Build and return the configured training workflow.
+    Build and execute the configured training workflow.
 
-    The decorator surrounding this function initializes the distributed runtime
-    and prompts for overwrite handling before the returned object is executed.
-
-    Parameters
-    ----------
-    command : State, optional
-        Training command variant, typically ``State.TRAIN`` or ``State.RESUME``.
-    overwrite : bool, optional
-        Whether existing outputs may be overwritten without prompting.
-    model : Path | str | None, optional
-        Checkpoint path used when resuming training.
-    gpu : list[int] | None, optional
-        GPU ids to expose to the workflow.
-    cpu : int | None, optional
-        Number of CPU workers when running without GPUs.
-    quiet : bool, optional
-        Whether to reduce console output.
-    tensorboard : bool, optional
-        Whether to start TensorBoard through the runtime wrapper.
-    config : Path | str, optional
-        Training configuration file.
-    checkpoints_dir : Path | str, optional
-        Output directory for checkpoints.
-    statistics_dir : Path | str, optional
-        Output directory for statistics and logs.
-
-    Returns
-    -------
-    DistributedObject
-        Configured trainer object ready to be executed by the runtime wrapper.
+    This compatibility wrapper preserves the historical CLI-facing API while
+    delegating the pure build step to :func:`build_train`.
     """
-    os.environ["KONFAI_config_file"] = str(Path(config).resolve())
-    os.environ["KONFAI_ROOT"] = "Trainer"
-    os.environ["KONFAI_STATE"] = str(command)
-    os.environ["KONFAI_CHECKPOINTS_DIRECTORY"] = str(Path(checkpoints_dir).resolve())
-    os.environ["KONFAI_STATISTICS_DIRECTORY"] = str(Path(statistics_dir).resolve())
-    trainer = apply_config()(Trainer)()
-    if model is not None:
-        trainer.set_model(Path(model))
-    return trainer
+    del overwrite, gpu, cpu, quiet, tensorboard
+    return build_train(
+        command=command,
+        model=model,
+        config=config,
+        checkpoints_dir=checkpoints_dir,
+        statistics_dir=statistics_dir,
+    )
 
 
 if __name__ == "__main__":

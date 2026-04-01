@@ -34,15 +34,11 @@ import requests
 import SimpleITK as sitk  # noqa: N813
 
 from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
+from konfai.utils.app_repository import LocalAppRepository, get_app_repository_info
 from konfai.utils.dataset import Dataset
-from konfai.utils.utils import (
-    SUPPORTED_EXTENSIONS,
-    KonfAIAppClientError,
-    LocalAppRepository,
-    MinimalLog,
-    State,
-    get_app_repository_info,
-)
+from konfai.utils.errors import KonfAIAppClientError
+from konfai.utils.runtime import MinimalLog, State
+from konfai.utils.utils import SUPPORTED_EXTENSIONS
 
 
 class CancelProcess(RuntimeError):
@@ -158,16 +154,20 @@ def run_distributed_app(
         try:
             os.makedirs(tmp_dir, exist_ok=True)
             os.chdir(str(tmp_dir))
-            sys.path.insert(0, os.getcwd())
+            cwd = os.getcwd()
+            added_to_syspath = False
+            if cwd not in sys.path:
+                sys.path.insert(0, cwd)
+                added_to_syspath = True
             with MinimalLog():
                 func(*args, **kwargs)
         except KeyboardInterrupt:
             print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
-            exit(0)
+            return
         finally:
             if Path(os.getcwd()).resolve() != Path(user_dir).resolve():
                 tmp_dir = Path(os.getcwd()).resolve()
-                if str(tmp_dir) in sys.path:
+                if added_to_syspath and str(tmp_dir) in sys.path:
                     sys.path.remove(str(tmp_dir))
                 os.chdir(user_dir)
                 if tmp_dir.parent == Path(tempfile.gettempdir()):
@@ -183,7 +183,7 @@ class AbstractKonfAIApp:
         super().__init__()
 
 
-class Cancelprocess(Exception):
+class Cancelprocess(CancelProcess):
     """Backward-compatible cancellation exception kept for app integrations."""
 
     def __init__(self, *args: object) -> None:

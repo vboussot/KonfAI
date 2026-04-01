@@ -41,15 +41,9 @@ from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Transform, TransformLoader
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.utils import (
-    SUPPORTED_EXTENSIONS,
-    DatasetManagerError,
-    State,
-    get_cpu_info,
-    get_memory,
-    get_memory_info,
-    memory_forecast,
-)
+from konfai.utils.errors import DatasetManagerError
+from konfai.utils.runtime import State, get_cpu_info, get_memory, get_memory_info, memory_forecast
+from konfai.utils.utils import SUPPORTED_EXTENSIONS
 
 
 class GroupTransform:
@@ -71,14 +65,15 @@ class GroupTransform:
         self.patch_transforms: list[Transform] = []
         self.is_input = is_input
 
-    def load(self, group_src: str, group_dest: str, datasets: list[Dataset]):
+    def prepare(self, group_src: str, group_dest: str) -> None:
+        self.transforms = []
+        self.patch_transforms = []
         if self._transforms is not None:
             for classpath, transform_loader in self._transforms.items():
                 transform = transform_loader.get_transform(
                     classpath,
                     konfai_args=f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}.transforms",
                 )
-                transform.set_datasets(datasets)
                 self.transforms.append(transform)
         if self._patch_transforms is not None:
             for classpath, transform_loader in self._patch_transforms.items():
@@ -87,8 +82,13 @@ class GroupTransform:
                     konfai_args=f"{konfai_root()}.Dataset.groups_src.{group_src}"
                     f".groups_dest.{group_dest}.patch_transforms",
                 )
-                transform.set_datasets(datasets)
                 self.patch_transforms.append(transform)
+
+    def set_datasets(self, datasets: list[Dataset]) -> None:
+        for transform in self.transforms:
+            transform.set_datasets(datasets)
+        for transform in self.patch_transforms:
+            transform.set_datasets(datasets)
 
     def to(self, device: int):
         for transform in self.transforms:
@@ -493,6 +493,241 @@ class Data(ABC):
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self.datasets: dict[str, Dataset] = {}
+        self._prepared_data: dict[str, list[DatasetManager]] | None = None
+        self._prepared_mapping: list[tuple[int, int, int]] = []
+        self._prepared_validation_mapping: list[tuple[int, int, int]] = []
+        self._prepared_train_names: list[str] = []
+        self._prepared_validation_names: list[str] = []
+
+    def prepare(self) -> None:
+        """Instantiate config-driven transforms and augmentations before runtime."""
+        if self._prepared_data is not None:
+            return
+
+        model_have_input = False
+        last_group_src: str | None = None
+        for group_src in self.groups_src:
+            last_group_src = group_src
+            for group_dest in self.groups_src[group_src]:
+                self.groups_src[group_src][group_dest].prepare(group_src, group_dest)
+                model_have_input |= self.groups_src[group_src][group_dest].is_input
+
+        if self.patch is not None:
+            self.patch.init()
+
+        if not model_have_input:
+            raise DatasetManagerError(
+                "At least one group must be defined with 'is_input: true' to provide input to the network."
+            )
+
+        if last_group_src is not None:
+            for key, data_augmentations in self.data_augmentations_list.items():
+                data_augmentations.prepare(key)
+        self._prepare_datasets()
+
+    def _resolve_dataset_sources(self) -> dict[str, list[tuple[str, bool]]]:
+        datasets: dict[str, list[tuple[str, bool]]] = {}
+        if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
+            raise DatasetManagerError("No dataset filenames were provided")
+        self.datasets = {}
+        for dataset_filename in self.dataset_filenames:
+            if dataset_filename is None:
+                raise DatasetManagerError(
+                    "Invalid dataset entry: 'None' received.",
+                    "Each dataset must be a valid path string (e.g., './Dataset/', './Dataset/:mha, "
+                    "'./Dataset/:a:mha', './Dataset/:i:mha').",
+                    "Please check your 'dataset_filenames' list for missing or null entries.",
+                )
+            if len(dataset_filename.split(":")) == 1:
+                filename = dataset_filename
+                file_format = "mha"
+                append = True
+            elif len(dataset_filename.split(":")) == 2:
+                filename, file_format = dataset_filename.split(":")
+                append = True
+            else:
+                filename, flag, file_format = dataset_filename.split(":")
+                append = flag == "a"
+
+            if file_format not in SUPPORTED_EXTENSIONS:
+                raise DatasetManagerError(
+                    f"Unsupported file format '{file_format}'.",
+                    f"Supported extensions are: {', '.join(SUPPORTED_EXTENSIONS)}",
+                )
+
+            dataset = Dataset(filename, file_format)
+            self.datasets[filename] = dataset
+            for group in self.groups_src:
+                if dataset.is_group_exist(group):
+                    datasets.setdefault(group, []).append((filename, append))
+
+        for group_src in self.groups_src:
+            if group_src not in datasets:
+                raise DatasetManagerError(
+                    f"Group source '{group_src}' not found in any dataset.",
+                    f"Dataset filenames provided: {self.dataset_filenames}",
+                    f"Available groups across all datasets: "
+                    f"{[f'{f} {d.get_group()}' for f, d in self.datasets.items()]}\n"
+                    f"Please check that an entry in the dataset with the name '{group_src}' exists.",
+                )
+
+            for group_dest in self.groups_src[group_src]:
+                self.groups_src[group_src][group_dest].set_datasets(list(self.datasets.values()))
+
+        for _group_src, entries in datasets.items():
+            for _key, data_augmentations in self.data_augmentations_list.items():
+                data_augmentations.set_datasets([self.datasets[filename] for filename, _ in entries])
+            break
+        return datasets
+
+    def _resolve_common_names(
+        self,
+        datasets: dict[str, list[tuple[str, bool]]],
+    ) -> tuple[dict[str, dict[str, list[str]]], set[str]]:
+        dataset_name: dict[str, dict[str, list[str]]] = {}
+        dataset_info: dict[str, dict[str, dict[str, tuple[list[int], Attribute]]]] = {}
+        names: set[str] = set()
+        for group in self.groups_src:
+            names_by_group = set()
+            dataset_name[group] = {}
+            dataset_info[group] = {}
+            for filename, _ in datasets[group]:
+                names_by_group.update(self.datasets[filename].get_names(group))
+                dataset_name[group][filename] = self.datasets[filename].get_names(group)
+                dataset_info[group][filename] = {
+                    name: self.datasets[filename].get_infos(group, name) for name in dataset_name[group][filename]
+                }
+            if len(names) == 0:
+                names.update(names_by_group)
+            else:
+                names = names.intersection(names_by_group)
+        if len(names) == 0:
+            raise DatasetManagerError(
+                f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "
+                "from a dataset, there are no common dataset names shared across all groups, the intersection is empty."
+            )
+
+        subset_names: set[str] = set()
+        for group in dataset_name:
+            subset_names_bygroup: set[str] = set()
+            for filename, append in datasets[group]:
+                resolved_subset = self.subset(
+                    dataset_name[group][filename],
+                    dataset_info[group][filename],
+                )
+                if append:
+                    subset_names_bygroup.update(resolved_subset)
+                elif len(subset_names_bygroup) == 0:
+                    subset_names_bygroup.update(resolved_subset)
+                else:
+                    subset_names_bygroup = subset_names_bygroup.intersection(resolved_subset)
+            if len(subset_names) == 0:
+                subset_names.update(subset_names_bygroup)
+            else:
+                subset_names = subset_names.intersection(subset_names_bygroup)
+
+        if len(subset_names) == 0:
+            raise DatasetManagerError(
+                "All data entries were excluded by the subset filter.",
+                f"Dataset entries found: {', '.join(names)}",
+                f"Subset object applied: {self.subset}",
+                f"Subset requested : {', '.join(subset_names)}",
+                "None of the dataset entries matched the given subset.",
+                "Please check your 'subset' configuration — it may be too restrictive or incorrectly formatted.",
+                "Examples of valid subset formats:",
+                "\tsubset: [0, 1]            # explicit indices",
+                "\tsubset: 0:10              # slice notation",
+                "\tsubset: ./Validation.txt  # external file",
+                "\tsubset: None              # to disable filtering",
+            )
+        return dataset_name, subset_names
+
+    def _split_train_validation(
+        self,
+        subset_names: list[str],
+        mapping: list[tuple[int, int, int]],
+    ) -> tuple[list[tuple[int, int, int]], list[tuple[int, int, int]], list[str], list[str]]:
+        index: list[int] = []
+        if isinstance(self.validation, float):
+            if self.validation <= 0 or self.validation >= 1:
+                raise DatasetManagerError(
+                    "Validation must be a float between 0 and 1.",
+                    f"Received: {self.validation}",
+                    "Example: validation = 0.2  # for a 20% validation split",
+                )
+            index = [m[0] for m in mapping[int(math.floor(len(mapping) * (1 - self.validation))) :]]
+        elif isinstance(self.validation, str):
+            if ":" in self.validation:
+                index = list(range(int(self.validation.split(":")[0]), int(self.validation.split(":")[1])))
+            elif os.path.exists(self.validation):
+                validation_names = []
+                with open(self.validation) as f:
+                    for name in f:
+                        validation_names.append(name.strip())
+                index = [i for i, n in enumerate(subset_names) if n in validation_names]
+            else:
+                raise DatasetManagerError(
+                    f"Invalid string value for 'validation': '{self.validation}'",
+                    "Expected one of the following formats:",
+                    "\t• A slice string like '0:10'",
+                    "\t• A path to a text file listing validation sample names (e.g., './val.txt')",
+                    "\t• A float between 0 and 1 (e.g., 0.2)",
+                    "\t• A list of sample names or indices",
+                    "The provided value is neither a valid slice nor a readable file.",
+                    "Please fix your 'validation' setting in the configuration.",
+                )
+        elif isinstance(self.validation, list):
+            if isinstance(self.validation[0], int):
+                index = cast(list[int], self.validation)
+            elif isinstance(self.validation[0], str):
+                index = [i for i, n in enumerate(subset_names) if n in self.validation]
+            else:
+                raise DatasetManagerError(
+                    "Invalid list type for 'validation': elements of type "
+                    f"'{type(self.validation[0]).__name__}' are not supported.",
+                    "Supported list element types are:",
+                    "\t• int  → list of indices (e.g., [0, 1, 2])",
+                    "\t• str  → list of sample names (e.g., ['patient01', 'patient02'])",
+                    f"Received list: {self.validation}",
+                )
+        train_mapping = [m for m in mapping if m[0] not in index]
+        validate_mapping = [m for m in mapping if m[0] in index]
+
+        if len(train_mapping) == 0:
+            raise DatasetManagerError(
+                "No data left for training after applying the validation split.",
+                f"Dataset size: {len(mapping)}",
+                f"Validation setting: {self.validation}",
+                "Please reduce the validation size, increase the dataset, or disable validation.",
+            )
+
+        if self.validation is not None and len(validate_mapping) == 0:
+            raise DatasetManagerError(
+                "No data left for validation after applying the validation split.",
+                f"Dataset size: {len(mapping)}",
+                f"Validation setting: {self.validation}",
+                "Please increase the validation size, increase the dataset, or disable validation.",
+            )
+
+        validation_names = [name for i, name in enumerate(subset_names) if i in index]
+        train_names = [name for name in subset_names if name not in validation_names]
+        return train_mapping, validate_mapping, train_names, validation_names
+
+    def _prepare_datasets(self) -> None:
+        """Resolve dataset files, validate subsets, and precompute train/validation mappings."""
+        datasets = self._resolve_dataset_sources()
+        dataset_name, subset_names = self._resolve_common_names(datasets)
+        subset_names_list = list(subset_names)
+        data, mapping = self._get_datasets(subset_names_list, dataset_name)
+        train_mapping, validate_mapping, train_names, validation_names = self._split_train_validation(
+            subset_names_list, mapping
+        )
+
+        self._prepared_data = data
+        self._prepared_mapping = train_mapping
+        self._prepared_validation_mapping = validate_mapping
+        self._prepared_train_names = train_names
+        self._prepared_validation_names = validation_names
 
     def _get_datasets(
         self, names: list[str], dataset_name: dict[str, dict[str, list[str]]]
@@ -571,212 +806,13 @@ class Data(ABC):
         return mappings
 
     def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
-        datasets: dict[str, list[tuple[str, bool]]] = {}
-        if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
-            raise DatasetManagerError("No dataset filenames were provided")
-        for dataset_filename in self.dataset_filenames:
-            if dataset_filename is None:
-                raise DatasetManagerError(
-                    "Invalid dataset entry: 'None' received.",
-                    "Each dataset must be a valid path string (e.g., './Dataset/', './Dataset/:mha, "
-                    "'./Dataset/:a:mha', './Dataset/:i:mha').",
-                    "Please check your 'dataset_filenames' list for missing or null entries.",
-                )
-            if len(dataset_filename.split(":")) == 1:
-                filename = dataset_filename
-                file_format = "mha"
-                append = True
-            elif len(dataset_filename.split(":")) == 2:
-                filename, file_format = dataset_filename.split(":")
-                append = True
-            else:
-                filename, flag, file_format = dataset_filename.split(":")
-                append = flag == "a"
+        if self._prepared_data is None:
+            raise DatasetManagerError("Dataset configuration was not prepared before runtime data loading.")
 
-            if file_format not in SUPPORTED_EXTENSIONS:
-                raise DatasetManagerError(
-                    f"Unsupported file format '{file_format}'.",
-                    f"Supported extensions are: {', '.join(SUPPORTED_EXTENSIONS)}",
-                )
-
-            dataset = Dataset(filename, file_format)
-
-            self.datasets[filename] = dataset
-            for group in self.groups_src:
-                if dataset.is_group_exist(group):
-                    if group in datasets:
-                        datasets[group].append((filename, append))
-                    else:
-                        datasets[group] = [(filename, append)]
-        model_have_input = False
-        for group_src in self.groups_src:
-            if group_src not in datasets:
-
-                raise DatasetManagerError(
-                    f"Group source '{group_src}' not found in any dataset.",
-                    f"Dataset filenames provided: {self.dataset_filenames}",
-                    f"Available groups across all datasets: "
-                    f"{[f'{f} {d.get_group()}' for f, d in self.datasets.items()]}\n"
-                    f"Please check that an entry in the dataset with the name '{group_src}' exists.",
-                )
-
-            for group_dest in self.groups_src[group_src]:
-                self.groups_src[group_src][group_dest].load(
-                    group_src,
-                    group_dest,
-                    list(self.datasets.values()),
-                )
-                model_have_input |= self.groups_src[group_src][group_dest].is_input
-        if self.patch is not None:
-            self.patch.init()
-
-        if not model_have_input:
-            raise DatasetManagerError(
-                "At least one group must be defined with 'is_input: true' to provide input to the network."
-            )
-
-        for key, data_augmentations in self.data_augmentations_list.items():
-            data_augmentations.load(key, [self.datasets[filename] for filename, _ in datasets[group_src]])
-
-        names: set[str] = set()
-        dataset_name: dict[str, dict[str, list[str]]] = {}
-        dataset_info: dict[str, dict[str, dict[str, tuple[list[int], Attribute]]]] = {}
-        for group in self.groups_src:
-            names_by_group = set()
-            if group not in dataset_name:
-                dataset_name[group] = {}
-                dataset_info[group] = {}
-            for filename, _ in datasets[group]:
-                names_by_group.update(self.datasets[filename].get_names(group))
-                dataset_name[group][filename] = self.datasets[filename].get_names(group)
-                dataset_info[group][filename] = {
-                    name: self.datasets[filename].get_infos(group, name) for name in dataset_name[group][filename]
-                }
-            if len(names) == 0:
-                names.update(names_by_group)
-            else:
-                names = names.intersection(names_by_group)
-        if len(names) == 0:
-            raise DatasetManagerError(
-                f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "
-                "from a dataset, there are no common dataset names shared across all groups, the intersection is empty."
-            )
-
-        subset_names: set[str] = set()
-        for group in dataset_name:
-            subset_names_bygroup: set[str] = set()
-            for filename, append in datasets[group]:
-                if append:
-                    subset_names_bygroup.update(
-                        self.subset(
-                            dataset_name[group][filename],
-                            dataset_info[group][filename],
-                        )
-                    )
-                else:
-                    if len(subset_names_bygroup) == 0:
-                        subset_names_bygroup.update(
-                            self.subset(
-                                dataset_name[group][filename],
-                                dataset_info[group][filename],
-                            )
-                        )
-                    else:
-                        subset_names_bygroup = subset_names_bygroup.intersection(
-                            self.subset(
-                                dataset_name[group][filename],
-                                dataset_info[group][filename],
-                            )
-                        )
-            if len(subset_names) == 0:
-                subset_names.update(subset_names_bygroup)
-            else:
-                subset_names = subset_names.intersection(subset_names_bygroup)
-
-        if len(subset_names) == 0:
-            raise DatasetManagerError(
-                "All data entries were excluded by the subset filter.",
-                f"Dataset entries found: {', '.join(names)}",
-                f"Subset object applied: {self.subset}",
-                f"Subset requested : {', '.join(subset_names)}",
-                "None of the dataset entries matched the given subset.",
-                "Please check your 'subset' configuration — it may be too restrictive or incorrectly formatted.",
-                "Examples of valid subset formats:",
-                "\tsubset: [0, 1]            # explicit indices",
-                "\tsubset: 0:10              # slice notation",
-                "\tsubset: ./Validation.txt  # external file",
-                "\tsubset: None              # to disable filtering",
-            )
-
-        data, mapping = self._get_datasets(list(subset_names), dataset_name)
-
-        index = []
-        if isinstance(self.validation, float):
-            if self.validation <= 0 or self.validation >= 1:
-                raise DatasetManagerError(
-                    "Validation must be a float between 0 and 1.",
-                    f"Received: {self.validation}",
-                    "Example: validation = 0.2  # for a 20% validation split",
-                )
-            index = [m[0] for m in mapping[int(math.floor(len(mapping) * (1 - self.validation))) :]]
-        elif isinstance(self.validation, str):
-            if ":" in self.validation:
-                index = list(range(int(self.validation.split(":")[0]), int(self.validation.split(":")[1])))
-            elif os.path.exists(self.validation):
-                validation_names = []
-                with open(self.validation) as f:
-                    for name in f:
-                        validation_names.append(name.strip())
-                index = [i for i, n in enumerate(subset_names) if n in validation_names]
-            else:
-                raise DatasetManagerError(
-                    f"Invalid string value for 'validation': '{self.validation}'",
-                    "Expected one of the following formats:",
-                    "\t• A slice string like '0:10'",
-                    "\t• A path to a text file listing validation sample names (e.g., './val.txt')",
-                    "\t• A float between 0 and 1 (e.g., 0.2)",
-                    "\t• A list of sample names or indices",
-                    "The provided value is neither a valid slice nor a readable file.",
-                    "Please fix your 'validation' setting in the configuration.",
-                )
-        elif isinstance(self.validation, list):
-            if isinstance(self.validation[0], int):
-                index = cast(list[int], self.validation)
-            elif isinstance(self.validation[0], str):
-                index = [i for i, n in enumerate(subset_names) if n in self.validation]
-            else:
-                raise DatasetManagerError(
-                    "Invalid list type for 'validation': elements of type "
-                    f"'{type(self.validation[0]).__name__}' are not supported.",
-                    "Supported list element types are:",
-                    "\t• int  → list of indices (e.g., [0, 1, 2])",
-                    "\t• str  → list of sample names (e.g., ['patient01', 'patient02'])",
-                    f"Received list: {self.validation}",
-                )
-        train_mapping = [m for m in mapping if m[0] not in index]
-        validate_mapping = [m for m in mapping if m[0] in index]
-
-        if len(train_mapping) == 0:
-            raise DatasetManagerError(
-                "No data left for training after applying the validation split.",
-                f"Dataset size: {len(mapping)}",
-                f"Validation setting: {self.validation}",
-                "Please reduce the validation size, increase the dataset, or disable validation.",
-            )
-
-        if self.validation is not None and len(validate_mapping) == 0:
-            raise DatasetManagerError(
-                "No data left for validation after applying the validation split.",
-                f"Dataset size: {len(mapping)}",
-                f"Validation setting: {self.validation}",
-                "Please increase the validation size, increase the dataset, or disable validation.",
-            )
-
-        validation_names = [name for i, name in enumerate(subset_names) if i in index]
-        train_names = [name for name in subset_names if name not in validation_names]
-        train_mappings = Data._split(train_mapping, world_size)
-        validate_mappings = Data._split(validate_mapping, world_size)
-
+        self.data = []
+        self.mapping = []
+        train_mappings = Data._split(self._prepared_mapping, world_size)
+        validate_mappings = Data._split(self._prepared_validation_mapping, world_size)
         for i, (train_mapping, validate_mapping) in enumerate(zip(train_mappings, validate_mappings)):
             mappings = [train_mapping]
             if len(validate_mapping):
@@ -785,7 +821,7 @@ class Data(ABC):
             self.mapping.append([])
             for mapping_tmp in mappings:
                 indexs = np.unique(np.asarray(mapping_tmp)[:, 0])
-                self.data[i].append({k: [v[it] for it in indexs] for k, v in data.items()})
+                self.data[i].append({k: [v[it] for it in indexs] for k, v in self._prepared_data.items()})
                 mapping_tmp_array = np.asarray(mapping_tmp)
                 for a, b in enumerate(indexs):
                     mapping_tmp_array[np.where(np.asarray(mapping_tmp_array)[:, 0] == b), 0] = a
@@ -794,12 +830,12 @@ class Data(ABC):
         data_loaders: list[list[DataLoader]] = []
         for i, (datas, mappings) in enumerate(zip(self.data, self.mapping)):
             data_loaders.append([])
-            for data, mapping in zip(datas, mappings):
+            for dataset_items, mapping in zip(datas, mappings):
                 data_loaders[i].append(
                     DataLoader(
                         dataset=self.datasetIter(
                             rank=i,
-                            data=data,
+                            data=dataset_items,
                             mapping=mapping,
                         ),
                         sampler=CustomSampler(len(mapping), self.subset.shuffle),
@@ -807,7 +843,7 @@ class Data(ABC):
                         **self.dataLoader_args,
                     )
                 )
-        return data_loaders, train_names, validation_names
+        return data_loaders, self._prepared_train_names, self._prepared_validation_names
 
     def __str__(self) -> str:
         params = {

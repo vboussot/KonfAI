@@ -1,0 +1,10 @@
+.sy-head-brand img {
+    height: 44px;
+    width: auto;
+}
+
+@media (max-width: 768px) {
+    .sy-head-brand img {
+        height: 36px;
+    }
+}

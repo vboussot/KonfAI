@@ -3,14 +3,7 @@ Trainer:
     classpath: segmentation.UNet.UNet
     UNet:
       dim: 2
-      Patch:
-        patch_size:
-        - 256
-        - 256
-        overlap: None
-        patch_combine: None
-        pad_value: 0
-        extend_slice: 0
+      Patch: None
       channels:
       - 1
       - 32
@@ -23,7 +16,7 @@ Trainer:
           targets_criterions:
             SEG:
               criterions_loader:
-                torch:nn:CrossEntropyLoss:
+                CrossEntropyLoss:
                   is_loss: true
                   schedulers:
                     Constant:
@@ -33,10 +26,22 @@ Trainer:
                   start: 0
                   stop: None
                   accumulation: false
+                  weight: None
+                  reduction: mean
       optimizer:
         name: AdamW
         lr: 0.001
         weight_decay: 0.0001
+        betas:
+        - 0.9
+        - 0.999
+        eps: 1e-08
+        amsgrad: false
+        maximize: false
+        foreach: None
+        capturable: false
+        differentiable: false
+        fused: None
       schedulers:
         StepLR:
           step_size: 20
@@ -44,6 +49,18 @@ Trainer:
           last_epoch: -1
           verbose: deprecated
           nb_step: 0
+      BlockConfig:
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: true
+        activation: ReLU
+        norm_mode: NONE
+      nb_conv_per_stage: 2
+      downsample_mode: MAXPOOL
+      upsample_mode: CONV_TRANSPOSE
+      attention: false
+      block_type: Conv
   Dataset:
     groups_src:
       CT:
@@ -64,9 +81,6 @@ Trainer:
             transforms:
               TensorCast:
                 dtype: int64
-                inverse: false
-              Squeeze:
-                dim: 0
                 inverse: false
             patch_transforms: None
             is_input: false

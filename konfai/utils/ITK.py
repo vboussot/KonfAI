@@ -21,8 +21,6 @@ import SimpleITK as sitk  # noqa: N813
 import torch
 import torch.nn.functional as F  # noqa: N812
 
-from konfai.utils.utils import _resample
-
 
 def _open_transform(
     transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
@@ -270,6 +268,24 @@ def parametermap_to_transform(
     result.SetFixedParameters(fixed_parameters)
     result.SetParameters(parameters)
     return result
+
+
+def _resample(data: torch.Tensor, size: list[int]) -> torch.Tensor:
+    if data.dtype == torch.uint8:
+        mode = "nearest"
+    elif len(data.shape) < 4:
+        mode = "bilinear"
+    else:
+        mode = "trilinear"
+    return (
+        torch.nn.functional.interpolate(
+            data.type(torch.float32).unsqueeze(0),
+            size=tuple(reversed(size)),
+            mode=mode,
+        )
+        .squeeze(0)
+        .type(data.dtype)
+    )
 
 
 def resample_isotropic(image: sitk.Image, spacing: list[float] | None = None) -> sitk.Image:

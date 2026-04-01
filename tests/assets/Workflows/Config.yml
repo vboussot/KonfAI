@@ -1,0 +1,76 @@
+Trainer:
+  Model:
+    classpath: TinySynth:TinySynthNet
+    TinySynthNet:
+      outputs_criterions:
+        Head:Tanh:
+          targets_criterions:
+            CT:
+              criterions_loader:
+                MAE:
+                  is_loss: true
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
+                  reduction: mean
+      optimizer:
+        name: AdamW
+        lr: 0.001
+        weight_decay: 0.0
+      schedulers:
+        ConstantLR:
+          factor: 1.0
+          total_iters: 1
+          nb_step: 0
+  Dataset:
+    groups_src:
+      MR:
+        groups_dest:
+          MR:
+            transforms: None
+            patch_transforms: None
+            is_input: true
+      CT:
+        groups_dest:
+          CT:
+            transforms: None
+            patch_transforms: None
+            is_input: false
+      MASK:
+        groups_dest:
+          MASK:
+            transforms: None
+            patch_transforms: None
+            is_input: false
+    augmentations: None
+    Patch:
+      patch_size: [1, 16, 16]
+      overlap: None
+      mask: None
+      pad_value: 0
+      extend_slice: 0
+    subset: None
+    shuffle: true
+    filter: None
+    dataset_filenames:
+      - __DATASET_DIR__:a:mha
+    inline_augmentations: false
+    use_cache: false
+    batch_size: 16
+    validation: 0.25
+  train_name: __TRAIN_NAME__
+  manual_seed: 0
+  epochs: 2
+  it_validation: 1
+  autocast: false
+  gradient_checkpoints: None
+  gpu_checkpoints: None
+  ema_decay: 0
+  data_log: None
+  save_checkpoint_mode: BEST
+  EarlyStopping: None

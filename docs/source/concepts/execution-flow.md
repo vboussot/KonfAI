@@ -10,25 +10,26 @@ The `konfai` CLI dispatches to three public functions:
 - `konfai.predictor.predict`
 - `konfai.evaluator.evaluate`
 
-Each wrapper sets a small execution context through environment variables, then
-instantiates the corresponding configured object:
+Each wrapper prepares a small execution context, then instantiates the
+corresponding configured object:
 
 - `Trainer`
 - `Predictor`
 - `Evaluator`
 
-The key environment variables are documented in {doc}`../reference/environment`.
+The key environment variables are documented in
+{doc}`../reference/environment`.
 
 ## What happens during training
 
 At a high level, `TRAIN` does the following:
 
-1. parse the YAML into a `Trainer`
+1. parse `Config.yml` into a `Trainer`
 2. prepare the dataset and its train/validation split
-3. initialize the model graph and its losses
+3. initialize the model graph, losses, and schedulers
 4. run the training loop
-5. save checkpoints and TensorBoard logs
-6. copy the config into the statistics directory
+5. save checkpoints and logs
+6. copy the active config into the statistics directory
 
 Outputs are written to:
 
@@ -39,7 +40,7 @@ Outputs are written to:
 
 `PREDICTION`:
 
-1. parses the YAML into a `Predictor`
+1. parses `Prediction.yml` into a `Predictor`
 2. loads one or more checkpoints
 3. prepares the inference dataset
 4. runs the model in prediction mode
@@ -54,7 +55,7 @@ Outputs are written to:
 
 `EVALUATION`:
 
-1. parses the YAML into an `Evaluator`
+1. parses `Evaluation.yml` into an `Evaluator`
 2. loads the dataset pairs needed for metric computation
 3. validates that configured output and target groups exist
 4. computes per-case and aggregate metrics
@@ -66,10 +67,23 @@ Outputs are written to:
 - `Evaluations/<train_name>/Metric_TRAIN.json`
 - optionally `Evaluations/<train_name>/Metric_VALIDATION.json`
 
+## Programmatic vs CLI entrypoints
+
+The same workflows can also be built programmatically through:
+
+- `build_train(...)`
+- `build_predict(...)`
+- `build_evaluate(...)`
+
+This is useful when you want to validate a config before launching the full
+runtime.
+
 ## Distributed execution
 
-KonfAI wraps these workflows with `konfai.utils.utils.run_distributed_app()`.
-From the code, this wrapper is responsible for:
+The execution layer is handled by the distributed runtime utilities in
+`konfai.utils.runtime`.
+
+From the code, this layer is responsible for:
 
 - setting `CUDA_VISIBLE_DEVICES`
 - handling overwrite and verbosity flags
@@ -77,7 +91,8 @@ From the code, this wrapper is responsible for:
 - spawning worker processes with `torch.multiprocessing.spawn`
 - initializing `torch.distributed` with a local TCP port
 
-This means that even “local” multi-process execution uses a distributed setup.
+This means that even local multi-process execution uses the same distributed
+bootstrap logic.
 
 ## Apps
 

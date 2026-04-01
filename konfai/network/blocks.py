@@ -338,7 +338,7 @@ class Exit(torch.nn.Module):
         super().__init__()
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        exit(0)
+        raise RuntimeError("The debug Exit block was executed.")
 
 
 class Detach(torch.nn.Module):

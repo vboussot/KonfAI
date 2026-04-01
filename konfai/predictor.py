@@ -16,7 +16,6 @@
 
 """Prediction workflow classes, reductions, and export helpers for KonfAI."""
 
-import builtins
 import copy
 import importlib
 import os
@@ -40,16 +39,18 @@ from konfai.data.transform import Transform, TransformInverse, TransformLoader
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.utils import (
+from konfai.utils.errors import ConfigError, PredictorError
+from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
     NeedDevice,
-    PredictorError,
     State,
+    configure_workflow_environment,
+    confirm_overwrite_or_raise,
     description,
-    get_module,
     run_distributed_app,
 )
+from konfai.utils.utils import get_module
 
 
 class Reduction(ABC):
@@ -137,8 +138,10 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
 
-    @abstractmethod
-    def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
+    def prepare(self, name_layer: str) -> None:
+        self.before_reduction_transforms = []
+        self.after_reduction_transforms = []
+        self.final_transforms = []
         transforms_type = [
             "before_reduction_transforms",
             "after_reduction_transforms",
@@ -154,7 +157,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
                         classpath,
                         konfai_args=f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{name}",
                     )
-                    transform.set_datasets(datasets + [self])
                     transform_type.append(transform)
 
         if self._patch_combine is not None:
@@ -170,6 +172,18 @@ class OutputDataset(Dataset, NeedDevice, ABC):
             self.reduction = apply_config(
                 f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset.{self.reduction_classpath}"
             )(getattr(module, name))()
+
+    def set_datasets(self, datasets: list[Dataset]) -> None:
+        for transform in self.before_reduction_transforms:
+            transform.set_datasets(datasets + [self])
+        for transform in self.after_reduction_transforms:
+            transform.set_datasets(datasets + [self])
+        for transform in self.final_transforms:
+            transform.set_datasets(datasets + [self])
+
+    @abstractmethod
+    def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
+        self.set_datasets(datasets)
 
     def set_patch_config(
         self,
@@ -232,7 +246,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         }
         return str(params)
 
-    def __repr__(self) -> builtins.str:
+    def __repr__(self) -> str:
         return str(self)
 
 
@@ -304,8 +318,8 @@ class OutSameAsGroupDataset(OutputDataset):
                 )
         self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
-    def load(self, name_layer: str, datasets: list[Dataset], groups: dict[str, str]):
-        super().load(name_layer, datasets, groups)
+    def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
+        super().setup(datasets, groups)
 
         if self.group_src not in groups.keys():
             raise PredictorError(f"Source group '{self.group_src}' not found. Available groups: {list(groups.keys())}.")
@@ -770,7 +784,7 @@ class Predictor(DistributedObject):
         data_log: list[str] | None = None,
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
-            exit(0)
+            raise ConfigError("Predictor requires KONFAI_CONFIG_MODE='Done' before initialization.")
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
@@ -811,6 +825,71 @@ class Predictor(DistributedObject):
                     )
 
         self.gpu_checkpoints = gpu_checkpoints
+        self.dataset.prepare()
+        self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
+        self.model.init_outputs_group()
+        self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
+        self.output_modules = [name for name, _, _ in self.model.named_module_args_dict()]
+
+        for output_group in self.outputs_dataset.keys():
+            if output_group.replace(";accu;", "") not in self.output_modules:
+                raise PredictorError(
+                    f"The output group '{output_group}' defined in 'outputs_criterions' "
+                    "does not correspond to any module in the model.",
+                    f"Available modules: {self.output_modules}",
+                    "Please check that the name matches exactly a submodule or output of your model architecture.",
+                )
+
+        dataset_groups = {
+            group_src: list(groups_dest.keys()) for group_src, groups_dest in self.dataset.groups_src.items()
+        }
+
+        for name, output_dataset in self.outputs_dataset.items():
+            output_dataset.prepare(name.replace(".", ":"))
+            output_dataset.setup(
+                list(self.dataset.datasets.values()),
+                dataset_groups,
+            )
+
+        if len(self.outputs_dataset) == 0 and not any(
+            network.measure is not None for network in self.model.get_networks().values()
+        ):
+            raise PredictorError(
+                "No prediction outputs or runtime measures are configured.",
+                "Define at least one outputs_dataset entry or enable a network measure.",
+            )
+
+    def setup(self, world_size: int):
+        """
+        Set up the predictor for inference.
+
+        This method performs all necessary initialization steps before running predictions:
+        - Ensures output directories exist, and optionally prompts the user before overwriting existing predictions.
+        - Copies the current configuration file (Prediction.yml) into the output directory for reproducibility.
+        - Dynamically loads pretrained weights from local files or remote URLs.
+        - Wraps the base model into a `ModelComposite` to support ensemble inference.
+        - Initializes the prediction dataloader, with proper distribution across available GPUs.
+
+        Args:
+            world_size (int): Total number of processes or GPUs used for distributed prediction.
+
+        """
+        for dataset_filename in self.datasets_filename:
+            path = self.predict_path / dataset_filename
+            if os.path.exists(path) and len(list(Path(path).rglob("*.yml"))):
+                confirm_overwrite_or_raise(path, "prediction", PredictorError)
+
+            if not os.path.exists(path):
+                os.makedirs(path)
+
+        shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
+
+        self.model_composite = ModelComposite(self.model, len(self.path_to_models), self.combine)
+        self.model_composite.load(self._load())
+
+        self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
+
+        self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
 
     def set_models(self, path_to_models: list[Path | str]) -> None:
         self.path_to_models = path_to_models
@@ -850,80 +929,6 @@ class Predictor(DistributedObject):
             else:
                 raise ValueError(f"Invalid model path entry: {path_to_model}")
         return state_dicts
-
-    def setup(self, world_size: int):
-        """
-        Set up the predictor for inference.
-
-        This method performs all necessary initialization steps before running predictions:
-        - Ensures output directories exist, and optionally prompts the user before overwriting existing predictions.
-        - Copies the current configuration file (Prediction.yml) into the output directory for reproducibility.
-        - Initializes the model in prediction mode, including output configuration and channel tracing.
-        - Validates that the configured output groups match existing modules in the model architecture.
-        - Dynamically loads pretrained weights from local files or remote URLs.
-        - Wraps the base model into a `ModelComposite` to support ensemble inference.
-        - Initializes the prediction dataloader, with proper distribution across available GPUs.
-        - Loads and prepares each configured `OutputDataset` object for storing predictions.
-
-        Args:
-            world_size (int): Total number of processes or GPUs used for distributed prediction.
-
-        Raises:
-            PredictorError: If an output group does not match any module in the model.
-            Exception: If a specified model file or URL is invalid or inaccessible.
-        """
-        for dataset_filename in self.datasets_filename:
-            path = self.predict_path / dataset_filename
-            if os.path.exists(path) and len(list(Path(path).rglob("*.yml"))):
-                if os.environ["KONFAI_OVERWRITE"] != "True":
-                    accept = builtins.input(
-                        f"The prediction {path} already exists ! Do you want to overwrite it (yes,no) : "
-                    )
-                    if accept != "yes":
-                        exit(0)
-
-            if not os.path.exists(path):
-                os.makedirs(path)
-
-        shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
-
-        self.model.init(self.autocast, State.PREDICTION, self.dataset.get_groups_dest())
-        self.model.init_outputs_group()
-        self.model._compute_channels_trace(self.model, self.model.in_channels, None, self.gpu_checkpoints)
-
-        modules = []
-        for i, _, _ in self.model.named_module_args_dict():
-            modules.append(i)
-        for output_group in self.outputs_dataset.keys():
-            if output_group.replace(";accu;", "") not in modules:
-                raise PredictorError(
-                    f"The output group '{output_group}' defined in 'outputs_criterions' "
-                    "does not correspond to any module in the model.",
-                    f"Available modules: {modules}",
-                    "Please check that the name matches exactly a submodule or" "output of your model architecture.",
-                )
-
-        self.model_composite = ModelComposite(self.model, len(self.path_to_models), self.combine)
-        self.model_composite.load(self._load())
-
-        if (
-            len(list(self.outputs_dataset.keys())) == 0
-            and len(
-                [network for network in self.model_composite.get_networks().values() if network.measure is not None]
-            )
-            == 0
-        ):
-            exit(0)
-
-        self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
-
-        self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
-        for name, output_dataset in self.outputs_dataset.items():
-            output_dataset.load(
-                name.replace(".", ":"),
-                list(self.dataset.datasets.values()),
-                {src: dest for src, inner in self.dataset.groups_src.items() for dest in inner},
-            )
 
     def run_process(
         self,
@@ -984,6 +989,40 @@ class Predictor(DistributedObject):
         return str(self)
 
 
+def build_predict(
+    models: list[Path],
+    prediction_file: Path | str = Path("./Prediction.yml").resolve(),
+    predictions_dir: Path | str = Path("./Predictions").resolve(),
+) -> DistributedObject:
+    """
+    Build and return the configured prediction workflow without executing it.
+
+    Parameters
+    ----------
+    models : list[Path]
+        One or more checkpoint files to load for prediction.
+    prediction_file : Path | str, optional
+        Prediction configuration file.
+    predictions_dir : Path | str, optional
+        Directory where prediction outputs are written.
+
+    Returns
+    -------
+    DistributedObject
+        Configured predictor object ready to be executed by the runtime wrapper.
+    """
+    configure_workflow_environment(
+        config_path=prediction_file,
+        root="Predictor",
+        state=State.PREDICTION,
+        path_env={"KONFAI_PREDICTIONS_DIRECTORY": predictions_dir},
+    )
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    predictor = apply_config()(Predictor)()
+    predictor.set_models(models)
+    return predictor
+
+
 @run_distributed_app
 def predict(
     models: list[Path],
@@ -996,36 +1035,14 @@ def predict(
     predictions_dir: Path | str = Path("./Predictions").resolve(),
 ) -> DistributedObject:
     """
-    Build and return the configured prediction workflow.
+    Build and execute the configured prediction workflow.
 
-    Parameters
-    ----------
-    models : list[Path]
-        One or more checkpoint files to load for prediction.
-    overwrite : bool, optional
-        Whether existing prediction outputs may be overwritten.
-    gpu : list[int] | None, optional
-        GPU ids to expose to the prediction process.
-    cpu : int, optional
-        Number of CPU workers when running without GPUs.
-    quiet : bool, optional
-        Whether to reduce console output.
-    tb : bool, optional
-        Whether to start TensorBoard through the runtime wrapper.
-    prediction_file : Path | str, optional
-        Prediction configuration file.
-    predictions_dir : Path | str, optional
-        Directory where prediction outputs are written.
-
-    Returns
-    -------
-    DistributedObject
-        Configured predictor object ready to be executed by the runtime wrapper.
+    This compatibility wrapper preserves the historical CLI-facing API while
+    delegating the pure build step to :func:`build_predict`.
     """
-    os.environ["KONFAI_config_file"] = str(Path(prediction_file).resolve())
-    os.environ["KONFAI_ROOT"] = "Predictor"
-    os.environ["KONFAI_STATE"] = str(State.PREDICTION)
-    os.environ["KONFAI_PREDICTIONS_DIRECTORY"] = str(Path(predictions_dir).resolve())
-    predictor = apply_config()(Predictor)()
-    predictor.set_models(models)
-    return predictor
+    del overwrite, gpu, cpu, quiet, tb
+    return build_predict(
+        models=models,
+        prediction_file=prediction_file,
+        predictions_dir=predictions_dir,
+    )

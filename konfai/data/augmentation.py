@@ -27,7 +27,9 @@ import torch.nn.functional as F  # noqa: N812
 from konfai import konfai_root
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image
-from konfai.utils.utils import AugmentationError, NeedDevice, get_module
+from konfai.utils.errors import AugmentationError
+from konfai.utils.runtime import NeedDevice
+from konfai.utils.utils import get_module
 
 
 def _translate_2d_matrix(t: torch.Tensor) -> torch.Tensor:
@@ -148,15 +150,19 @@ class DataAugmentationsList:
         self.data_augmentations: list[DataAugmentation] = []
         self.data_augmentationsLoader = data_augmentations
 
-    def load(self, key: str, datasets: list[Dataset]):
+    def prepare(self, key: str) -> None:
+        self.data_augmentations = []
         for augmentation, prob in self.data_augmentationsLoader.items():
             module, name = get_module(augmentation, "konfai.data.augmentation")
             data_augmentation: DataAugmentation = apply_config(
                 f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{augmentation}"
             )(getattr(module, name))()
             data_augmentation.load(prob.prob)
-            data_augmentation.set_datasets(datasets)
             self.data_augmentations.append(data_augmentation)
+
+    def set_datasets(self, datasets: list[Dataset]) -> None:
+        for data_augmentation in self.data_augmentations:
+            data_augmentation.set_datasets(datasets)
 
 
 class DataAugmentation(NeedDevice, ABC):

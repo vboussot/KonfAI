@@ -60,6 +60,8 @@ This usually means one of these:
 - the YAML points to a local module, but the command is launched from the wrong directory
 
 KonfAI examples assume you run commands from the example directory itself.
+When in doubt, `cd` into the directory that contains the YAML before launching
+`konfai`.
 
 ### A metric or output path is rejected
 
@@ -67,7 +69,11 @@ Keys used in `outputs_criterions` and similar sections must match real module
 paths in the model graph. The runtime validates these names against the actual
 submodules and raises an error if they do not exist.
 
-When in doubt, start from a working example and rename paths gradually.
+When in doubt:
+
+- start from a working example
+- rename output paths gradually
+- keep training, prediction, and evaluation aligned on the same output names
 
 ### Validation split behaves unexpectedly
 
@@ -117,6 +123,7 @@ Check:
   folder
 - that `Evaluation.yml` points to the same `train_name`
 - that masks, predictions, and references use compatible group names
+- that the evaluation dataset uses the same case names as the prediction folder
 
 ## KonfAI Apps and remote server
 

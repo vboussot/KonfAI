@@ -19,6 +19,18 @@ Predictor:
       - 256
       nb_class: 41
       outputs_criterions: None
+      BlockConfig:
+        kernel_size: 3
+        stride: 1
+        padding: 1
+        bias: true
+        activation: ReLU
+        norm_mode: NONE
+      nb_conv_per_stage: 2
+      downsample_mode: MAXPOOL
+      upsample_mode: CONV_TRANSPOSE
+      attention: false
+      block_type: Conv
   Dataset:
     groups_src:
       CT:

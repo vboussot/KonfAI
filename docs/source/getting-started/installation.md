@@ -76,6 +76,8 @@ konfai-apps-server --help
 konfai-cluster --help
 ```
 
+For a first real run after installation, go to :doc:`../quickstart`.
+
 ## Common installation issues
 
 ### `ModuleNotFoundError` after installation

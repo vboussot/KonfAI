@@ -73,32 +73,17 @@ The public Hugging Face demo dataset is available at:
 
 If you want the easiest first run, use `Segmentation_demo.ipynb`.
 
-If you prefer to fetch the demo subset manually, the most robust approach is:
+If you prefer to fetch the demo subset manually, use the Hugging Face CLI:
 
-```python
-from pathlib import Path
-import shutil
-from huggingface_hub import snapshot_download
-
-dataset_dir = Path("Dataset")
-snapshot_download(
-    repo_id="VBoussot/konfai-demo",
-    repo_type="dataset",
-    local_dir=str(dataset_dir),
-    allow_patterns=["Segmentation/**"],
-)
-
-nested = dataset_dir / "Segmentation"
-if nested.exists():
-    for item in nested.iterdir():
-        target = dataset_dir / item.name
-        if target.exists():
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        shutil.move(str(item), str(target))
-    shutil.rmtree(nested)
+```bash
+python -m pip install -U "huggingface_hub[cli]"
+hf download VBoussot/konfai-demo \
+  --repo-type dataset \
+  --include "Segmentation/**" \
+  --local-dir Dataset
+mv Dataset/Segmentation/* Dataset/
+rmdir Dataset/Segmentation
+rm -rf Dataset/.cache
 ```
 
 After that, your local `Dataset/` folder should already match the structure expected by this example.

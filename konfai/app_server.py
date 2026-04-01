@@ -26,6 +26,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -36,7 +37,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import konfai
-from konfai.utils.utils import AppRepositoryError, get_app_repository_info
+from konfai.utils.app_repository import get_app_repository_info
+from konfai.utils.errors import AppRepositoryError
 
 MAX_ACTIVE_JOBS = 32
 
@@ -45,8 +47,6 @@ if "KONFAI_APPS_CONFIG" in os.environ:
     _APPS_CONFIG = json.loads(os.environ["KONFAI_APPS_CONFIG"])
 
 _APPS: dict[str, list] = _APPS_CONFIG.get("apps", [])
-
-app = FastAPI()
 
 security = HTTPBearer(auto_error=False)
 
@@ -78,15 +78,34 @@ def require_token(credentials: HTTPAuthorizationCredentials | None = Depends(sec
 
 protected = APIRouter(dependencies=[Depends(require_token)])
 
-GPU_SEM: dict[int, asyncio.Semaphore] = {}
 
-
-@app.on_event("startup")
-async def init_gpu_semaphores():
-    """Initialize one scheduling semaphore per visible GPU at server startup."""
+def initialize_gpu_semaphores() -> None:
+    """Refresh the GPU semaphore registry from the currently visible devices."""
+    SERVER_STATE.gpu_semaphores.clear()
     devices_index, _ = konfai.get_available_devices()
     for i in devices_index:
-        GPU_SEM[int(i)] = asyncio.Semaphore(1)
+        SERVER_STATE.gpu_semaphores[int(i)] = asyncio.Semaphore(1)
+
+
+def reset_sse_state() -> None:
+    """Reset in-memory SSE accounting used for log streaming admission control."""
+    SERVER_STATE.active_sse_global = 0
+    SERVER_STATE.active_sse_jobs.clear()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialize and clear process-wide server state across FastAPI lifecycles."""
+    initialize_gpu_semaphores()
+    reset_sse_state()
+    try:
+        yield
+    finally:
+        SERVER_STATE.gpu_semaphores.clear()
+        reset_sse_state()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2GB
@@ -124,29 +143,38 @@ def save_uploads(
     out: list[Path] = []
     total = 0
 
-    for f in files:
-        if not f.filename:
-            continue
+    try:
+        for f in files:
+            if not f.filename:
+                continue
 
-        p = dst / Path(f.filename).name
-        written = 0
+            p = dst / Path(f.filename).name
+            written = 0
 
-        with p.open("wb") as w:
-            while True:
-                chunk = f.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                total += len(chunk)
+            try:
+                with p.open("wb") as w:
+                    while True:
+                        chunk = f.file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        total += len(chunk)
 
-                if written > max_file_bytes:
-                    raise HTTPException(413, f"File too large: {f.filename}")
-                if total > max_total_bytes:
-                    raise HTTPException(413, "Total upload too large")
+                        if written > max_file_bytes:
+                            raise HTTPException(413, f"File too large: {f.filename}")
+                        if total > max_total_bytes:
+                            raise HTTPException(413, "Total upload too large")
 
-                w.write(chunk)
+                        w.write(chunk)
+            except Exception:
+                p.unlink(missing_ok=True)
+                raise
 
-        out.append(p.resolve())
+            out.append(p.resolve())
+    except Exception:
+        for path in out:
+            path.unlink(missing_ok=True)
+        raise
 
     return out
 
@@ -190,7 +218,39 @@ class Job:
     finished_at: float | None = None
 
 
-JOBS: dict[str, Job] = {}
+@dataclass
+class AppServerState:
+    """In-memory state container for the KonfAI app server runtime."""
+
+    jobs: dict[str, Job] = field(default_factory=dict)
+    gpu_semaphores: dict[int, asyncio.Semaphore] = field(default_factory=dict)
+    active_sse_global: int = 0
+    active_sse_jobs: set[str] = field(default_factory=set)
+    active_sse_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+SERVER_STATE = AppServerState()
+JOBS = SERVER_STATE.jobs
+GPU_SEM = SERVER_STATE.gpu_semaphores
+
+
+def active_job_count() -> int:
+    """Return the number of jobs currently consuming scheduling capacity."""
+    return sum(1 for job in SERVER_STATE.jobs.values() if job.status in {"queued", "waiting", "running"})
+
+
+def get_job_or_404(job_id: str) -> Job:
+    """Return a job from the registry or raise an HTTP 404."""
+    job = SERVER_STATE.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Unknown job_id")
+    return job
+
+
+def cleanup_pending_job(job: Job) -> None:
+    """Remove a job registry entry and its workspace before background execution starts."""
+    SERVER_STATE.jobs.pop(job.job_id, None)
+    shutil.rmtree(job.run_dir, ignore_errors=True)
 
 
 async def acquire_gpus(job: Job, requested: list[int]) -> list[int]:
@@ -229,8 +289,8 @@ async def acquire_gpus(job: Job, requested: list[int]) -> list[int]:
     if len(requested) == 0:
         job.status = "waiting"
         while True:
-            for gid, sem in GPU_SEM.items():
-                if sem.locked() is False and sem._value > 0:
+            for gid, sem in SERVER_STATE.gpu_semaphores.items():
+                if sem.locked() is False:
                     await sem.acquire()
                     return [gid]
             await asyncio.sleep(0.1)
@@ -238,17 +298,17 @@ async def acquire_gpus(job: Job, requested: list[int]) -> list[int]:
     gpus = sorted({int(x) for x in requested})
     job.status = "waiting"
     for gid in gpus:
-        if gid not in GPU_SEM:
+        if gid not in SERVER_STATE.gpu_semaphores:
             raise HTTPException(400, f"Unknown GPU id: {gid}")
     for gid in gpus:
-        await GPU_SEM[gid].acquire()
+        await SERVER_STATE.gpu_semaphores[gid].acquire()
     return gpus
 
 
 def release_gpus(gpus: list[int]) -> None:
     """Release previously acquired GPU semaphores for a finished job."""
     for gid in gpus:
-        sem = GPU_SEM.get(gid)
+        sem = SERVER_STATE.gpu_semaphores.get(gid)
         if sem:
             try:
                 sem.release()
@@ -256,12 +316,8 @@ def release_gpus(gpus: list[int]) -> None:
                 pass
 
 
-MAX_SSE_GLOBAL = 200  # ajuste
-SSE_TTL_S = 600  # 10 minutes
-
-_active_sse_global = 0
-_active_sse_jobs: set[str] = set()
-_active_sse_lock = asyncio.Lock()
+MAX_SSE_GLOBAL = 200
+SSE_TTL_S = 600
 
 
 async def sse_log_stream(job: Job):
@@ -291,16 +347,14 @@ async def sse_log_stream(job: Job):
     job : Job
         The job whose logs are streamed.
     """
-    global _active_sse_global
-
     # ---- admission control ----
-    async with _active_sse_lock:
-        if _active_sse_global >= MAX_SSE_GLOBAL:
+    async with SERVER_STATE.active_sse_lock:
+        if SERVER_STATE.active_sse_global >= MAX_SSE_GLOBAL:
             raise HTTPException(429, "Too many log streams")
-        if job.job_id in _active_sse_jobs:
+        if job.job_id in SERVER_STATE.active_sse_jobs:
             raise HTTPException(429, "Log stream already open for this job")
-        _active_sse_global += 1
-        _active_sse_jobs.add(job.job_id)
+        SERVER_STATE.active_sse_global += 1
+        SERVER_STATE.active_sse_jobs.add(job.job_id)
 
     start = time.time()
     try:
@@ -324,9 +378,9 @@ async def sse_log_stream(job: Job):
 
     finally:
         # ---- release admission ----
-        async with _active_sse_lock:
-            _active_sse_jobs.discard(job.job_id)
-            _active_sse_global -= 1
+        async with SERVER_STATE.active_sse_lock:
+            SERVER_STATE.active_sse_jobs.discard(job.job_id)
+            SERVER_STATE.active_sse_global -= 1
 
 
 @protected.get("/health")
@@ -584,7 +638,7 @@ async def start_job(job: Job, cmd: list[str], requested_gpus: list[int] | None):
 
         shutil.rmtree(job.run_dir, ignore_errors=True)
 
-        JOBS.pop(job.job_id, None)
+        SERVER_STATE.jobs.pop(job.job_id, None)
 
 
 def submit_job():
@@ -608,8 +662,7 @@ def submit_job():
     def deco(fn: Callable[..., Awaitable[list[str]]]):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
-            active = sum(1 for j in JOBS.values() if j.status in {"queued", "waiting", "running"})
-            if active >= MAX_ACTIVE_JOBS:
+            if active_job_count() >= MAX_ACTIVE_JOBS:
                 raise HTTPException(429, "Server busy: too many active jobs")
 
             app_name = kwargs.get("app_name")
@@ -629,46 +682,50 @@ def submit_job():
                 output_dir=output_dir,
                 zip_path=run_dir / "result.zip",
             )
-            JOBS[job_id] = job
+            SERVER_STATE.jobs[job_id] = job
 
-            inputs_upload_files = kwargs.get("inputs")
-            inputs = None
-            if inputs_upload_files:
-                inputs = save_uploads(inputs_upload_files, job.input_dir)
+            try:
+                inputs_upload_files = kwargs.get("inputs")
+                inputs = None
+                if inputs_upload_files:
+                    inputs = save_uploads(inputs_upload_files, job.input_dir)
 
-            gt_upload_files = kwargs.get("gt")
-            gt = None
-            if gt_upload_files:
-                gt = save_uploads(gt_upload_files, job.input_dir)
+                gt_upload_files = kwargs.get("gt")
+                gt = None
+                if gt_upload_files:
+                    gt = save_uploads(gt_upload_files, job.input_dir)
 
-            mask_upload_files = kwargs.get("mask")
-            mask = None
-            if mask_upload_files:
-                mask = save_uploads(mask_upload_files, job.input_dir)
+                mask_upload_files = kwargs.get("mask")
+                mask = None
+                if mask_upload_files:
+                    mask = save_uploads(mask_upload_files, job.input_dir)
 
-            gpu = kwargs.get("gpu")
-            cpu = kwargs.get("cpu")
-            quiet = kwargs.get("quiet")
+                gpu = kwargs.get("gpu")
+                cpu = kwargs.get("cpu")
+                quiet = kwargs.get("quiet")
 
-            cmd = await fn(*args, **kwargs)
-            cmd += ["--output", str(job.output_dir)]
-            if gpu is None:
-                gpu_list = None
-                cmd += ["--cpu", str(cpu)]
-            else:
-                gpu_list = [int(x.strip()) for x in gpu.split(",") if x.strip()]
+                cmd = await fn(*args, **kwargs)
+                cmd += ["--output", str(job.output_dir)]
+                if gpu is None:
+                    gpu_list = None
+                    cmd += ["--cpu", str(cpu)]
+                else:
+                    gpu_list = [int(x.strip()) for x in gpu.split(",") if x.strip()]
 
-            if inputs:
-                cmd += ["--inputs"] + [str(p) for p in inputs]
+                if inputs:
+                    cmd += ["--inputs"] + [str(p) for p in inputs]
 
-            if gt:
-                cmd += ["--gt"] + [str(p) for p in gt]
+                if gt:
+                    cmd += ["--gt"] + [str(p) for p in gt]
 
-            if mask:
-                cmd += ["--mask"] + [str(p) for p in mask]
+                if mask:
+                    cmd += ["--mask"] + [str(p) for p in mask]
 
-            if quiet:
-                cmd += ["--quiet"]
+                if quiet:
+                    cmd += ["--quiet"]
+            except Exception:
+                cleanup_pending_job(job)
+                raise
 
             asyncio.create_task(start_job(job, cmd, gpu_list))
 
@@ -1034,9 +1091,7 @@ def job_status(job_id: str):
     HTTPException
         If the job_id is unknown.
     """
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Unknown job_id")
+    job = get_job_or_404(job_id)
     return {"job_id": job.job_id, "status": job.status, "error": job.error}
 
 
@@ -1075,9 +1130,7 @@ async def job_logs(job_id: str):
     HTTPException
         If the job does not exist or stream limits are exceeded.
     """
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Unknown job_id")
+    job = get_job_or_404(job_id)
     return StreamingResponse(sse_log_stream(job), media_type="text/event-stream")
 
 
@@ -1107,9 +1160,7 @@ def job_result(job_id: str):
     HTTPException
         If the job_id is unknown.
     """
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Unknown job_id")
+    job = get_job_or_404(job_id)
 
     if job.status == "error":
         return JSONResponse(status_code=500, content={"job_id": job.job_id, "status": job.status, "error": job.error})
@@ -1145,9 +1196,7 @@ def kill_job(job_id: str):
     job_id : str
         Identifier of the job to terminate.
     """
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Unknown job_id")
+    job = get_job_or_404(job_id)
 
     proc = job.proc
     if proc is None or proc.poll() is not None:

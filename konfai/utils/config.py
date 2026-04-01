@@ -20,6 +20,8 @@ import collections
 import inspect
 import os
 import types
+import typing
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
@@ -28,14 +30,15 @@ import ruamel.yaml
 import torch
 
 from konfai import config_file
-from konfai.utils.utils import ConfigError
+from konfai.utils.errors import ConfigError
 
 yaml = ruamel.yaml.YAML()
 
 
 class Config:
     """
-    Context manager for reading and updating a subtree of the active YAML config.
+    Context manager for reading and updating a subtree of the active YAML
+    config.
 
     Parameters
     ----------
@@ -50,14 +53,17 @@ class Config:
 
     def __enter__(self):
         if not self.filename.exists():
-            result = input("Create a new config file ? [no,yes,interactive] : ")
-            if result in ["yes", "interactive"]:
-                os.environ["KONFAI_CONFIG_MODE"] = "interactive" if result == "interactive" else "default"
-                open(self.filename, "w").close()
+            mode = os.environ.get("KONFAI_CONFIG_MODE", "Done")
+            if mode in {"default", "interactive", "Import"}:
+                self.filename.parent.mkdir(parents=True, exist_ok=True)
+                self.filename.touch()
             else:
-                exit(0)
+                raise ConfigError(
+                    f"Config file '{self.filename}' does not exist.",
+                    ("Create it first or enable a creation mode with " "KONFAI_CONFIG_MODE=default."),
+                )
 
-        self.yml = open(self.filename)
+        self.yml = open(self.filename, encoding="utf-8")
         self.data = yaml.load(self.yml)
         if self.data is None:
             self.data = {}
@@ -107,7 +113,11 @@ class Config:
             yaml.dump(
                 self.merge(
                     data,
-                    self.create_dictionary(self.config, self.keys, len(self.keys) - 1),
+                    self.create_dictionary(
+                        self.config,
+                        self.keys,
+                        len(self.keys) - 1,
+                    ),
                 ),
                 yml,
             )
@@ -115,18 +125,20 @@ class Config:
     @staticmethod
     def _get_input(name: str, default: str) -> str:
         try:
-            return input(f"{name} [{','.join(default.split(':')[1:]) if ':' in default else ''}]: ")
-        except Exception:
-            result = input("\nKeep a default configuration file ? (yes,no) : ")
-            if result == "yes":
-                os.environ["KONFAI_CONFIG_MODE"] = "default"
-            else:
-                os.environ["KONFAI_CONFIG_MODE"] = "remove"
-                exit(0)
+            options = ",".join(default.split(":")[1:]) if ":" in default else ""
+            return input(f"{name} [{options}]: ")
+        except (EOFError, KeyboardInterrupt):
+            # Interactive editing is optional; when stdin is unavailable we
+            # degrade to default materialization instead of aborting the run.
+            os.environ["KONFAI_CONFIG_MODE"] = "default"
         return default.split("|")[1] if len(default.split("|")) > 1 else default
 
     @staticmethod
-    def _get_input_default(name: str, default: str | None, is_list: bool = False) -> list[str | None] | str | None:
+    def _get_input_default(
+        name: str,
+        default: str | None,
+        is_list: bool = False,
+    ) -> list[str | None] | str | None:
         # ``default|value`` is KonfAI's marker for "materialize this default if
         # the user/config did not provide a concrete value".
         if isinstance(default, str) and (
@@ -136,7 +148,7 @@ class Config:
                 if is_list:
                     list_tmp: list[str | None] = []
                     key_tmp = "OK"
-                    while (key_tmp != "!" and key_tmp != " ") and os.environ["KONFAI_CONFIG_MODE"] == "interactive":
+                    while key_tmp != "!" and key_tmp != " " and os.environ["KONFAI_CONFIG_MODE"] == "interactive":
                         key_tmp = Config._get_input(name, default)
                         if key_tmp != "!" and key_tmp != " ":
                             if key_tmp == "":
@@ -160,7 +172,10 @@ class Config:
                 value = default
             value_config = value
         else:
-            value = Config._get_input_default(name, default if default != inspect._empty else None)
+            value = Config._get_input_default(
+                name,
+                default if default != inspect._empty else None,
+            )
 
             value_config = value
             if isinstance(value_config, tuple):
@@ -232,6 +247,98 @@ def config(key: str | None = None):
     return decorator
 
 
+_CONFIG_PRIMITIVE_TYPES = {
+    int,
+    str,
+    bool,
+    float,
+    torch.Tensor,
+}
+_CONFIG_SUPPORTED_TYPES_MESSAGE = (
+    "Config: The config only supports types : config(Object), int, str, "
+    "bool, float, list[int], list[str], list[bool], list[float], "
+    "dict[str, Object]"
+)
+
+
+def _resolve_annotation(function, annotation):
+    if annotation in {"int", "float", "bool", "str"}:
+        return {"int": int, "float": float, "bool": bool, "str": str}[annotation]
+
+    if not isinstance(annotation, str):
+        return annotation
+
+    try:
+        return eval(  # nosec B307
+            annotation,
+            {
+                **getattr(function, "__globals__", {}),
+                "Any": Any,
+                "Literal": Literal,
+                "Sequence": Sequence,
+                "Union": Union,
+                "bool": bool,
+                "dict": dict,
+                "float": float,
+                "int": int,
+                "list": list,
+                "str": str,
+                "torch": torch,
+                "tuple": tuple,
+                "typing": typing,
+            },
+        )
+    except Exception:
+        return annotation
+
+
+def _unwrap_optional(annotation):
+    origin = get_origin(annotation)
+    if origin not in {Union, types.UnionType}:
+        return annotation
+
+    args = [arg for arg in get_args(annotation) if arg not in {type(None), types.NoneType}]
+    if len(args) == 1:
+        return args[0]
+    if len(args) > 1:
+        return args[0]
+    return annotation
+
+
+def _convert_union_sequence_value(
+    value: object,
+    valid_types: tuple[type | object, ...],
+    param_name: str,
+) -> object:
+    converted = None
+    last_error: Exception | None = None
+    for candidate_type in valid_types:
+        try:
+            if candidate_type is Any:
+                return value
+            if candidate_type in {type(None), types.NoneType}:
+                if value in (None, "None"):
+                    return None
+                continue
+            if not isinstance(candidate_type, type):
+                continue
+            current_value = (
+                torch.tensor(value) if candidate_type == torch.Tensor and not isinstance(value, torch.Tensor) else value
+            )
+            converted = current_value if candidate_type == torch.Tensor else candidate_type(current_value)
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if converted is None and value not in (None, "None"):
+        raise ConfigError(
+            f"Invalid value '{value}' for parameter '{param_name}'.",
+            f"Expected one of: {valid_types}.",
+            f"Last conversion error: {last_error}" if last_error else "",
+        )
+    return converted
+
+
 def apply_config(konfai_args: str | None = None):
     """
     Recursively instantiate callables from the active KonfAI configuration.
@@ -257,125 +364,127 @@ def apply_config(konfai_args: str | None = None):
                 and os.environ["KONFAI_CONFIG_MODE"] != "Import"
                 and key_tmp is not None
             ):
+                previous_path = os.environ.get("KONFAI_CONFIG_PATH")
+                previous_variable = os.environ.get("KONFAI_CONFIG_VARIABLE")
                 os.environ["KONFAI_CONFIG_PATH"] = key_tmp
                 without = kwargs["konfai_without"] if "konfai_without" in kwargs else []
-                with Config(key_tmp) as config:
-                    os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
-                    kwargs = {}
-                    for param in list(inspect.signature(function).parameters.values())[len(args) :]:
-                        if param.name in without:
-                            continue
+                try:
+                    with Config(key_tmp) as config:
+                        os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
+                        kwargs = {}
+                        params = list(inspect.signature(function).parameters.values())
+                        for param in params[len(args) :]:
+                            if param.name in without:
+                                continue
 
-                        annotation = param.annotation
-                        if annotation == "int":
-                            annotation = int
-                        if annotation == "float":
-                            annotation = float
-                        if annotation == "bool":
-                            annotation = bool
-                        # --- support Literal ---
-                        if get_origin(annotation) is Literal:
-                            allowed_values = get_args(annotation)
-                            default_value = param.default if param.default != inspect._empty else allowed_values[0]
-                            value = config.get_value(param.name, f"default|{default_value}")
-                            if value not in allowed_values:
-                                raise ConfigError(
-                                    f"Invalid value '{value}' for parameter '{param.name} "
-                                    f"expected one of: {allowed_values}."
+                            annotation = _resolve_annotation(function, param.annotation)
+                            if get_origin(annotation) is Literal:
+                                allowed_values = get_args(annotation)
+                                default_value = param.default if param.default != inspect._empty else allowed_values[0]
+                                value = config.get_value(
+                                    param.name,
+                                    f"default|{default_value}",
                                 )
-                            kwargs[param.name] = value
-                            continue
-                        if (
-                            str(annotation).startswith("typing.Union")
-                            or str(annotation).startswith("typing.Optional")
-                            or get_origin(annotation) is types.UnionType
-                        ):
-                            for i in annotation.__args__:
-                                annotation = i
-                                break
+                                if value not in allowed_values:
+                                    raise ConfigError(
+                                        f"Invalid value '{value}' for "
+                                        f"parameter '{param.name}' expected "
+                                        f"one of: {allowed_values}."
+                                    )
+                                kwargs[param.name] = value
+                                continue
+                            annotation = _unwrap_optional(annotation)
 
-                        if not annotation == inspect._empty:
-                            if annotation not in [int, str, bool, float, torch.Tensor]:
-                                if (
-                                    str(annotation).startswith("list")
-                                    or str(annotation).startswith("tuple")
-                                    or str(annotation).startswith("typing.Tuple")
-                                    or str(annotation).startswith("typing.List")
-                                    or str(annotation).startswith("typing.Sequence")
-                                ):
-                                    elem_type = annotation.__args__[0]
-                                    values = config.get_value(param.name, param.default)
-                                    if getattr(elem_type, "__origin__", None) is Union:
-                                        valid_types = elem_type.__args__
-                                        result = []
-                                        for v in values:
-                                            for t in valid_types:
-                                                try:
-                                                    if t == torch.Tensor and not isinstance(v, torch.Tensor):
-                                                        v = torch.tensor(v)
-                                                    result.append(t(v) if t != torch.Tensor else v)
-                                                    break
-                                                except Exception:
-                                                    raise ValueError("Merde")
-                                        kwargs[param.name] = result
+                            if annotation == inspect._empty:
+                                if param.name != "self":
+                                    kwargs[param.name] = config.get_value(
+                                        param.name,
+                                        param.default,
+                                    )
+                                continue
 
-                                    elif annotation.__args__[0] in [
-                                        int,
-                                        str,
-                                        bool,
-                                        float,
-                                    ]:
-                                        values = config.get_value(param.name, param.default)
-                                        kwargs[param.name] = values
-                                    else:
-                                        raise ConfigError(
-                                            "Config: The config only supports types : config(Object), int, str, bool,"
-                                            " float, list[int], list[str], list[bool], list[float], dict[str, Object]"
-                                        )
-                                elif str(annotation).startswith("dict"):
-                                    if annotation.__args__[0] is str:
-                                        values = config.get_value(param.name, param.default)
-                                        if values is not None and annotation.__args__[1] not in [
-                                            int,
-                                            str,
-                                            bool,
-                                            float,
-                                            Any,
-                                        ]:
-                                            try:
-                                                kwargs[param.name] = {
-                                                    value: apply_config(str(key_tmp) + "." + param.name + "." + value)(
-                                                        annotation.__args__[1]
-                                                    )()
-                                                    for value in values
-                                                }
-                                            except ValueError as e:
-                                                raise ValueError(e)
-                                            except Exception as e:
-                                                raise ConfigError(f"{values} {e}")
-                                        else:
+                            if annotation in _CONFIG_PRIMITIVE_TYPES or annotation is Any:
+                                kwargs[param.name] = config.get_value(
+                                    param.name,
+                                    param.default,
+                                )
+                                continue
 
-                                            kwargs[param.name] = values
-                                    else:
-                                        raise ConfigError(
-                                            "Config: The config only supports types : config(Object), int, str, bool,"
-                                            " float, list[int], list[str], list[bool], list[float], dict[str, Object]"
-                                        )
+                            origin = get_origin(annotation)
+                            if origin in {list, tuple, Sequence, collections.abc.Sequence}:
+                                values = config.get_value(
+                                    param.name,
+                                    param.default,
+                                )
+                                if values is None:
+                                    kwargs[param.name] = None
+                                    continue
+
+                                args_annotation = get_args(annotation)
+                                elem_type = args_annotation[0] if args_annotation else Any
+                                elem_origin = get_origin(elem_type)
+                                if elem_origin in {Union, types.UnionType}:
+                                    valid_types = get_args(elem_type)
+                                    kwargs[param.name] = [
+                                        _convert_union_sequence_value(value, valid_types, param.name)
+                                        for value in values
+                                    ]
+                                elif elem_type in {int, str, bool, float, torch.Tensor, Any}:
+                                    kwargs[param.name] = values
                                 else:
-                                    try:
-                                        kwargs[param.name] = apply_config(key_tmp)(annotation)()
-                                    except Exception as e:
-                                        raise ConfigError(
-                                            f"Failed to instantiate {param.name} with type {annotation}, error {e} "
-                                        )
+                                    raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
+                                continue
 
-                                    if os.environ["KONFAI_CONFIG_VARIABLE"] == "True":
-                                        os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
-                                        kwargs[param.name] = None
-                            else:
-                                kwargs[param.name] = config.get_value(param.name, param.default)
-                        elif param.name != "self":
-                            kwargs[param.name] = config.get_value(param.name, param.default)
+                            if origin is dict:
+                                key_type, value_type = get_args(annotation)
+                                if key_type is not str:
+                                    raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
+
+                                values = config.get_value(
+                                    param.name,
+                                    param.default,
+                                )
+                                if values is None or value_type in {
+                                    int,
+                                    str,
+                                    bool,
+                                    float,
+                                    Any,
+                                }:
+                                    kwargs[param.name] = values
+                                    continue
+
+                                try:
+                                    kwargs[param.name] = {
+                                        value: apply_config(f"{key_tmp}.{param.name}.{value}")(value_type)()
+                                        for value in values
+                                    }
+                                except Exception as exc:
+                                    raise ConfigError(f"{values} {exc}") from exc
+                                continue
+
+                            try:
+                                kwargs[param.name] = apply_config(key_tmp)(annotation)()
+                            except Exception as exc:
+                                raise ConfigError(
+                                    "Failed to instantiate " f"{param.name} with type " f"{annotation}, error {exc}"
+                                ) from exc
+
+                            if os.environ["KONFAI_CONFIG_VARIABLE"] == "True":
+                                os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
+                                kwargs[param.name] = None
+                finally:
+                    if previous_path is None:
+                        os.environ.pop("KONFAI_CONFIG_PATH", None)
+                    else:
+                        os.environ["KONFAI_CONFIG_PATH"] = previous_path
+
+                    current_variable = os.environ.get("KONFAI_CONFIG_VARIABLE")
+                    if current_variable != "True":
+                        if previous_variable is None:
+                            os.environ.pop("KONFAI_CONFIG_VARIABLE", None)
+                        else:
+                            os.environ["KONFAI_CONFIG_VARIABLE"] = previous_variable
             result = function(*args, **kwargs)
             return result
 

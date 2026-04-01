@@ -97,8 +97,8 @@ for advanced users.
 
 ## Distributed runtime
 
-Training, prediction, and evaluation are launched through a distributed runtime
-wrapper in `konfai.utils.utils`.
+Training, prediction, and evaluation are launched through the distributed
+runtime utilities in `konfai.utils.runtime`.
 
 This is an internal detail that matters operationally:
 

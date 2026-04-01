@@ -2,7 +2,11 @@
 *.egg-info/
 __pycache__/
 dist
-examples/Synthesis/Dataset
+examples/*/Dataset
+examples/*/Checkpoints
+examples/*/Statistics
+examples/*/Predictions
+examples/*/Evaluations
 examples/Synthesis/Task_1
 .coverage
 .pytest_cache
@@ -10,3 +14,4 @@ examples/Synthesis/Task_1
 .mypy_cache
 apps/impact_reg
 docs/build/
+.codex

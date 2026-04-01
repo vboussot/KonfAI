@@ -16,7 +16,6 @@
 
 """Evaluation workflow classes and helpers for KonfAI."""
 
-import builtins
 import json
 import os
 import shutil
@@ -30,13 +29,15 @@ from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchSample, DataMetric
+from konfai.network.network import build_configured_criterions
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Dataset
-from konfai.utils.utils import (
+from konfai.utils.errors import ConfigError, EvaluatorError
+from konfai.utils.runtime import (
     DistributedObject,
-    EvaluatorError,
     State,
-    get_module,
+    configure_workflow_environment,
+    confirm_overwrite_or_raise,
     run_distributed_app,
     synchronize_data,
 )
@@ -79,16 +80,10 @@ class CriterionsLoader:
         self.criterions_loader = criterions_loader
 
     def get_criterions(self, output_group: str, target_group: str) -> dict[torch.nn.Module, CriterionsAttr]:
-        criterions = {}
-        for module_classpath, criterions_attr in self.criterions_loader.items():
-            module, name = get_module(module_classpath, "konfai.metric.measure")
-            criterions[
-                apply_config(
-                    f"{konfai_root()}.metrics.{output_group}.targets_criterions.{target_group}"
-                    f".criterions_loader.{module_classpath}"
-                )(getattr(module, name))()
-            ] = criterions_attr
-        return criterions
+        return build_configured_criterions(
+            self.criterions_loader,
+            f"{konfai_root()}.metrics.{output_group}.targets_criterions.{target_group}",
+        )
 
 
 class TargetCriterionsLoader:
@@ -276,7 +271,7 @@ class Evaluator(DistributedObject):
         dataset: DataMetric = DataMetric(),
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
-            exit(0)
+            raise ConfigError("Evaluator requires KONFAI_CONFIG_MODE='Done' before initialization.")
         super().__init__(train_name)
         self.metric_path = evaluations_directory() / self.name
         self.metricsLoader = metrics if metrics else {}
@@ -284,6 +279,54 @@ class Evaluator(DistributedObject):
         self.metrics = {k: v.get_targets_criterions(k) for k, v in self.metricsLoader.items()}
         self.statistics_train = Statistics(self.metric_path / "Metric_TRAIN.json")
         self.statistics_validation = Statistics(self.metric_path / "Metric_VALIDATION.json")
+        self.dataset.prepare()
+        self._validate_metric_groups()
+
+    def _validate_metric_groups(self) -> None:
+        groups_dest = self.dataset.get_groups_dest()
+        missing_outputs = set(self.metrics.keys()) - set(groups_dest)
+        if missing_outputs:
+            raise EvaluatorError(
+                f"The following metric output groups are missing from 'groups_dest': {sorted(missing_outputs)}. ",
+                f"Available groups: {sorted(groups_dest)}",
+            )
+
+        target_groups = []
+        for targets in self.metrics.values():
+            for target_group in targets:
+                target_groups.extend(target_group.split(";"))
+        missing_targets = set(target_groups) - (set(groups_dest + ["None"]))
+        if missing_targets:
+            raise EvaluatorError(
+                f"The following metric target groups are missing from 'groups_dest': {sorted(missing_targets)}. ",
+                f"Available groups: {sorted(groups_dest)}",
+            )
+
+    def setup(self, world_size: int):
+        """
+        Prepare the evaluator for distributed metric computation.
+
+        This method performs the following steps:
+        - Checks whether previous evaluation results exist and optionally overwrites them.
+        - Creates the output directory and copies the current configuration file for reproducibility.
+        - Loads the evaluation dataset according to the world size.
+
+        Args:
+            world_size (int): Number of processes in the distributed evaluation setup.
+
+        """
+        if self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
+            confirm_overwrite_or_raise(self.metric_path, "metric", EvaluatorError)
+            if self.metric_path.exists():
+                shutil.rmtree(self.metric_path)
+
+        os.makedirs(self.metric_path, exist_ok=True)
+        shutil.copyfile(
+            config_file(),
+            self.metric_path / config_file().name,
+        )
+
+        self.dataloader, _, _ = self.dataset.get_data(world_size)
 
     def update(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
         """
@@ -371,61 +414,6 @@ class Evaluator(DistributedObject):
             statistics.add(result, name)
         return result
 
-    def setup(self, world_size: int):
-        """
-        Prepare the evaluator for distributed metric computation.
-
-        This method performs the following steps:
-        - Checks whether previous evaluation results exist and optionally overwrites them.
-        - Creates the output directory and copies the current configuration file for reproducibility.
-        - Loads the evaluation dataset according to the world size.
-        - Validates that all specified output and target groups used in metric definitions
-        are present in the dataset group configuration.
-
-        Args:
-            world_size (int): Number of processes in the distributed evaluation setup.
-
-        Raises:
-            EvaluatorError: If any metric output or target group is missing in the dataset's group mapping.
-        """
-        if self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
-            if os.environ["KONFAI_OVERWRITE"] != "True":
-                accept = builtins.input(
-                    f"The metric {self.name} already exists ! Do you want to overwrite it (yes,no) : "
-                )
-                if accept != "yes":
-                    exit(0)
-
-                shutil.rmtree(self.metric_path)
-
-        if not self.metric_path.exists():
-            os.makedirs(self.metric_path)
-        shutil.copyfile(
-            config_file(),
-            self.metric_path / config_file().name,
-        )
-
-        self.dataloader, _, _ = self.dataset.get_data(world_size)
-
-        groups_dest = [group for groups in self.dataset.groups_src.values() for group in groups]
-        missing_outputs = set(self.metrics.keys()) - set(groups_dest)
-        if missing_outputs:
-            raise EvaluatorError(
-                f"The following metric output groups are missing from 'groups_dest': {sorted(missing_outputs)}. ",
-                f"Available groups: {sorted(groups_dest)}",
-            )
-
-        target_groups = []
-        for i in {target for targets in self.metrics.values() for target in targets}:
-            for u in i.split(";"):
-                target_groups.append(u)
-        missing_targets = set(target_groups) - (set(groups_dest + ["None"]))
-        if missing_targets:
-            raise EvaluatorError(
-                f"The following metric target groups are missing from 'groups_dest': {sorted(missing_targets)}. ",
-                f"Available groups: {sorted(groups_dest)}",
-            )
-
     def run_process(self, world_size: int, global_rank: int, gpu: int, dataloaders: list[DataLoader]):
         """
         Execute the distributed evaluation loop over the training and validation datasets.
@@ -505,6 +493,35 @@ class Evaluator(DistributedObject):
                 self.statistics_validation.write(outputs)
 
 
+def build_evaluate(
+    evaluations_file: Path | str = Path("./Evaluation.yml").resolve(),
+    evaluations_dir: Path | str = Path("./Evaluations").resolve(),
+) -> DistributedObject:
+    """
+    Build and return the configured evaluation workflow without executing it.
+
+    Parameters
+    ----------
+    evaluations_file : Path | str, optional
+        Evaluation configuration file.
+    evaluations_dir : Path | str, optional
+        Directory where metrics and JSON reports are written.
+
+    Returns
+    -------
+    DistributedObject
+        Configured evaluator object ready to be executed by the runtime wrapper.
+    """
+    configure_workflow_environment(
+        config_path=evaluations_file,
+        root="Evaluator",
+        state=State.EVALUATION,
+        path_env={"KONFAI_EVALUATIONS_DIRECTORY": evaluations_dir},
+    )
+    os.environ["KONFAI_CONFIG_MODE"] = "Done"
+    return apply_config()(Evaluator)()
+
+
 @run_distributed_app
 def evaluate(
     overwrite: bool = False,
@@ -516,32 +533,13 @@ def evaluate(
     evaluations_dir: Path | str = Path("./Evaluations").resolve(),
 ) -> DistributedObject:
     """
-    Build and return the configured evaluation workflow.
+    Build and execute the configured evaluation workflow.
 
-    Parameters
-    ----------
-    overwrite : bool, optional
-        Whether existing evaluation outputs may be overwritten.
-    gpu : list[int] | None, optional
-        GPU ids to expose to the evaluation process.
-    cpu : int | None, optional
-        Number of CPU workers when running without GPUs.
-    quiet : bool, optional
-        Whether to reduce console output.
-    tensorboard : bool, optional
-        Whether to start TensorBoard through the runtime wrapper.
-    evaluations_file : Path | str, optional
-        Evaluation configuration file.
-    evaluations_dir : Path | str, optional
-        Directory where metrics and JSON reports are written.
-
-    Returns
-    -------
-    DistributedObject
-        Configured evaluator object ready to be executed by the runtime wrapper.
+    This compatibility wrapper preserves the historical CLI-facing API while
+    delegating the pure build step to :func:`build_evaluate`.
     """
-    os.environ["KONFAI_config_file"] = str(Path(evaluations_file).resolve())
-    os.environ["KONFAI_ROOT"] = "Evaluator"
-    os.environ["KONFAI_STATE"] = str(State.EVALUATION)
-    os.environ["KONFAI_EVALUATIONS_DIRECTORY"] = str(Path(evaluations_dir).resolve())
-    return apply_config()(Evaluator)()
+    del overwrite, gpu, cpu, quiet, tb
+    return build_evaluate(
+        evaluations_file=evaluations_file,
+        evaluations_dir=evaluations_dir,
+    )

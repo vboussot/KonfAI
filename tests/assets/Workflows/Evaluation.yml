@@ -1,0 +1,36 @@
+Evaluator:
+  metrics:
+    sCT:
+      targets_criterions:
+        CT:
+          criterions_loader:
+            MAE:
+              reduction: mean
+  Dataset:
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              TensorCast:
+                dtype: float32
+                inverse: true
+            patch_transforms: None
+            is_input: true
+      sCT:
+        groups_dest:
+          sCT:
+            transforms:
+              TensorCast:
+                dtype: float32
+                inverse: true
+            patch_transforms: None
+            is_input: true
+    subset: None
+    validation: None
+    dataset_filenames:
+      - __DATASET_DIR__:a:mha
+      - __PREDICTIONS_DATASET_DIR__:i:mha
+    batch_size: 4
+    use_cache: false
+  train_name: __TRAIN_NAME__

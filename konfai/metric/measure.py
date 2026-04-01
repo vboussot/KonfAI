@@ -742,6 +742,16 @@ class MutualInformationLoss(torch.nn.Module):
         return torch.mean(mi).neg()  # average over the batch and channel ndims
 
 
+class CrossEntropyLoss(Criterion):
+
+    def __init__(self, weight: list[float] | None = None, reduction: str = "mean") -> None:
+        super().__init__()
+        self.loss = torch.nn.CrossEntropyLoss(weight=torch.tensor(weight) if weight else None, reduction=reduction)
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        return self.loss(output, targets[0].squeeze(1))
+
+
 class IMPACTReg(CriterionWithAttribute):
 
     class Weights:
