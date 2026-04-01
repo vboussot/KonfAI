@@ -15,10 +15,11 @@ import torch
 
 from konfai import RemoteServer, check_server
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
+KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 APP_ASSETS_DIR = ASSETS_DIR / "AppClientRemote" / "TinySynthesisApp"
-WORKFLOW_ASSETS_DIR = ASSETS_DIR / "Workflows"
+WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"
 SimpleITK = pytest.importorskip("SimpleITK")
 
 
@@ -52,6 +53,13 @@ def _resolve_entrypoint(bin_dir: Path, name: str) -> Path:
     raise AssertionError(f"Missing CLI entrypoint in test bin dir: {name}")
 
 
+def _entrypoint_command(bin_dir: Path, name: str) -> list[str]:
+    script = bin_dir / name
+    if not script.exists():
+        raise AssertionError(f"Missing CLI script in test bin dir: {name}")
+    return [sys.executable, str(script)]
+
+
 def _write_cli_entrypoints(bin_dir: Path) -> None:
     def write_script(name: str, target: str) -> None:
         script = bin_dir / name
@@ -59,7 +67,8 @@ def _write_cli_entrypoints(bin_dir: Path) -> None:
             f"#!{sys.executable}\n"
             "import runpy, sys\n"
             f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
-            f"from konfai.main import {target} as _entry\n"
+            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r})\n"
+            f"from konfai_apps.cli import {target} as _entry\n"
             "if __name__ == '__main__':\n"
             "    _entry()\n",
             encoding="utf-8",
@@ -93,7 +102,8 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
 def _subprocess_env(bin_dir: Path, token: str) -> dict[str, str]:
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(REPO_ROOT) if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
+    package_paths = f"{KONFAI_APPS_ROOT}{os.pathsep}{REPO_ROOT}"
+    env["PYTHONPATH"] = package_paths if not pythonpath else f"{package_paths}{os.pathsep}{pythonpath}"
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["KONFAI_API_TOKEN"] = token
     return env
@@ -115,7 +125,7 @@ def running_app_server(tmp_path: Path) -> Generator[RunningAppServer]:
 
     env = _subprocess_env(bin_dir, token)
     server_command = [
-        str(_resolve_entrypoint(bin_dir, "konfai-apps-server")),
+        *_entrypoint_command(bin_dir, "konfai-apps-server"),
         "--host",
         "127.0.0.1",
         "--port",
@@ -176,7 +186,7 @@ def test_main_apps_remote_infer_roundtrip_against_main_apps_server(
     output_dir = tmp_path / "output"
 
     command = [
-        str(_resolve_entrypoint(Path(running_app_server.env["PATH"].split(os.pathsep)[0]), "konfai-apps")),
+        *_entrypoint_command(Path(running_app_server.env["PATH"].split(os.pathsep)[0]), "konfai-apps"),
         "infer",
         running_app_server.app_id,
         "--host",

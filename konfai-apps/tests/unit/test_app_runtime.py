@@ -1,10 +1,9 @@
-import tempfile
+import os
 from contextlib import nullcontext
 from pathlib import Path
 
+import konfai_apps.app as app_module
 import pytest
-
-import konfai.app as app_module
 
 
 def test_run_distributed_app_uses_requested_workspace_and_restores_cwd(
@@ -37,11 +36,14 @@ def test_run_distributed_app_cleans_auto_created_temporary_workspace(
     tmp_path: Path,
 ) -> None:
     user_dir = tmp_path / "user"
-    auto_dir = Path(tempfile.gettempdir()) / "konfai_test_auto_workspace"
+    auto_root = tmp_path / "temp_root"
+    auto_dir = auto_root / "konfai_test_auto_workspace"
+    auto_root.mkdir()
     auto_dir.mkdir(exist_ok=True)
     user_dir.mkdir()
     monkeypatch.chdir(user_dir)
     monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
+    monkeypatch.setattr(app_module.tempfile, "gettempdir", lambda: str(auto_root))
     monkeypatch.setattr(app_module.tempfile, "mkdtemp", lambda prefix: str(auto_dir))
 
     visited: dict[str, Path] = {}
@@ -53,7 +55,7 @@ def test_run_distributed_app_cleans_auto_created_temporary_workspace(
 
     wrapped()
 
-    assert visited["cwd"] == auto_dir
+    assert os.path.normcase(os.path.realpath(visited["cwd"])) == os.path.normcase(os.path.realpath(auto_dir))
     assert Path.cwd() == user_dir
     assert auto_dir.exists() is False
 

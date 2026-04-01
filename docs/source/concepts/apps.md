@@ -7,7 +7,7 @@ local Python modules, a KonfAI App bundles those assets into a reusable package
 that can run through:
 
 - `konfai-apps` on the command line
-- Python via `konfai.app.KonfAIApp`
+- Python via `konfai_apps.KonfAIApp`
 - a remote FastAPI server via `konfai-apps-server`
 - clients such as 3D Slicer integrations
 

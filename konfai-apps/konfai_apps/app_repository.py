@@ -39,6 +39,7 @@ from ruamel.yaml import YAML
 
 from konfai import RemoteServer
 from konfai.utils.errors import AppMetadataError, AppRepositoryError, ConfigError
+from konfai.utils.utils import is_windows_absolute_path
 
 
 def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str]:
@@ -868,6 +869,12 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     - ``host:port:app_name`` -> remote KonfAI app server
     - ``host:port:app_name|token`` -> remote KonfAI app server with bearer token
     """
+    local_path = _resolve_local_app_path(app_id)
+    if local_path is not None:
+        if local_path.exists():
+            return LocalAppRepositoryFromDirectory(local_path.parent, local_path.name)
+        raise AppRepositoryError(f"Local app directory not found: {app_id!r}")
+
     if app_id.count(":") >= 2:
         host, port_str, name_and_token = app_id.split(":", 2)
         name_and_token_split = name_and_token.split("|")
@@ -882,11 +889,6 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     if app_id.count(":") == 1:
         repo_id, name = app_id.split(":", 1)
         return LocalAppRepositoryFromHF(repo_id, name, force_update)
-
-    path = Path(app_id)
-    if path.exists():
-        return LocalAppRepositoryFromDirectory(path.parent, path.name)
-
     raise AppRepositoryError(
         "Invalid app_id format. Expected one of:\n"
         "  - repo_id:app_name\n"
@@ -895,3 +897,13 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
         "  - host:port:app_name|token\n"
         f"Got: {app_id!r}"
     )
+
+
+def _resolve_local_app_path(app_id: str) -> Path | None:
+    """Resolve *app_id* as a local path when it clearly targets the filesystem."""
+    path = Path(app_id).expanduser()
+    if path.exists():
+        return path
+    if is_windows_absolute_path(app_id):
+        return path
+    return None

@@ -7,7 +7,7 @@ KonfAI Apps package stable workflows behind a simpler interface than the raw
 Local and remote app runners
 ----------------------------
 
-.. currentmodule:: konfai.app
+.. currentmodule:: konfai_apps
 
 .. autoclass:: KonfAIApp
    :members:

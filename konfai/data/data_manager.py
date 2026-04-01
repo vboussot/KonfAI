@@ -43,7 +43,7 @@ from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.runtime import State, get_cpu_info, get_memory, get_memory_info, memory_forecast
-from konfai.utils.utils import SUPPORTED_EXTENSIONS
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, split_path_spec
 
 
 class GroupTransform:
@@ -538,16 +538,13 @@ class Data(ABC):
                     "'./Dataset/:a:mha', './Dataset/:i:mha').",
                     "Please check your 'dataset_filenames' list for missing or null entries.",
                 )
-            if len(dataset_filename.split(":")) == 1:
-                filename = dataset_filename
-                file_format = "mha"
-                append = True
-            elif len(dataset_filename.split(":")) == 2:
-                filename, file_format = dataset_filename.split(":")
-                append = True
-            else:
-                filename, flag, file_format = dataset_filename.split(":")
-                append = flag == "a"
+            filename, flag, file_format = split_path_spec(
+                dataset_filename,
+                default_format="mha",
+                allowed_flags={"a", "i"},
+                supported_extensions=SUPPORTED_EXTENSIONS,
+            )
+            append = flag != "i"
 
             if file_format not in SUPPORTED_EXTENSIONS:
                 raise DatasetManagerError(

@@ -4,11 +4,10 @@ import io
 from pathlib import Path
 from types import SimpleNamespace
 
+import konfai_apps.app_server as app_server
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-
-import konfai.app_server as app_server
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("fastapi") is None,

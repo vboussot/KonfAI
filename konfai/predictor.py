@@ -50,7 +50,7 @@ from konfai.utils.runtime import (
     description,
     run_distributed_app,
 )
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, split_path_spec
 
 
 class Reduction(ABC):
@@ -118,7 +118,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         patch_combine: str | None,
         reduction: str,
     ) -> None:
-        filename, file_format = filename.split(":")
+        filename, _, file_format = split_path_spec(filename)
         super().__init__(filename, file_format)
         self.group = group
         self._before_reduction_transforms = before_reduction_transforms

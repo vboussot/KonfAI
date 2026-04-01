@@ -18,9 +18,9 @@
 
 import argparse
 
-from konfai.app import KonfAIApp
-from konfai.main import add_common_konfai_apps
-from konfai.utils.app_repository import get_available_apps_on_hf_repo
+from konfai_apps import KonfAIApp
+from konfai_apps.app_repository import get_available_apps_on_hf_repo
+from konfai_apps.cli import add_common_konfai_apps
 
 TOTAL_SEGMENTATOR_KONFAI_REPO = "VBoussot/TotalSegmentator-KonfAI"
 

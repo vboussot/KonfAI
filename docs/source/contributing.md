@@ -31,7 +31,7 @@ Run the full test suite with:
 pytest -q
 ```
 
-The GitHub Actions workflow in `.github/workflows/KonfAI_ci.yml` runs `pytest`
+The GitHub Actions workflow in `.github/workflows/konfai_ci.yml` runs `pytest`
 across Python `3.10` to `3.13` on Linux, macOS, and Windows.
 
 ## Running pre-commit

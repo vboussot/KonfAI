@@ -27,18 +27,19 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import requests
 import SimpleITK as sitk  # noqa: N813
 
 from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
-from konfai.utils.app_repository import LocalAppRepository, get_app_repository_info
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State
 from konfai.utils.utils import SUPPORTED_EXTENSIONS
+
+from .app_repository import LocalAppRepository, get_app_repository_info
 
 
 class CancelProcess(RuntimeError):
@@ -147,15 +148,18 @@ def run_distributed_app(
         bound.apply_defaults()
 
         tmp_dir = bound.arguments.get("tmp_dir")
-        if tmp_dir is None:
-            tmp_dir = Path(tempfile.mkdtemp(prefix="konfai_app_"))
-        tmp_dir = tmp_dir.resolve()
+        auto_created = tmp_dir is None
+        if auto_created:
+            workspace_dir = Path(tempfile.mkdtemp(prefix="konfai_app_"))
+        else:
+            workspace_dir = Path(cast(str | os.PathLike[str], tmp_dir))
+        workspace_dir = workspace_dir.resolve()
         user_dir = os.getcwd()
+        added_to_syspath = False
         try:
-            os.makedirs(tmp_dir, exist_ok=True)
-            os.chdir(str(tmp_dir))
+            os.makedirs(workspace_dir, exist_ok=True)
+            os.chdir(str(workspace_dir))
             cwd = os.getcwd()
-            added_to_syspath = False
             if cwd not in sys.path:
                 sys.path.insert(0, cwd)
                 added_to_syspath = True
@@ -165,13 +169,12 @@ def run_distributed_app(
             print("\n[KonfAI-Apps] Manual interruption (Ctrl+C)")
             return
         finally:
+            if added_to_syspath and str(workspace_dir) in sys.path:
+                sys.path.remove(str(workspace_dir))
             if Path(os.getcwd()).resolve() != Path(user_dir).resolve():
-                tmp_dir = Path(os.getcwd()).resolve()
-                if added_to_syspath and str(tmp_dir) in sys.path:
-                    sys.path.remove(str(tmp_dir))
                 os.chdir(user_dir)
-                if tmp_dir.parent == Path(tempfile.gettempdir()):
-                    shutil.rmtree(str(tmp_dir), ignore_errors=True)
+            if auto_created:
+                shutil.rmtree(str(workspace_dir), ignore_errors=True)
 
     return wrapper
 
@@ -1070,3 +1073,6 @@ class KonfAIApp(AbstractKonfAIApp):
 
     def __str__(self) -> str:
         return str(self.app_repository)
+
+
+run_remote_job = KonfAIAppClient.run_remote_job

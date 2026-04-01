@@ -19,6 +19,7 @@
 import importlib
 import itertools
 import os
+import re
 from types import ModuleType
 
 import numpy as np
@@ -155,3 +156,55 @@ SUPPORTED_EXTENSIONS = [
     "vtk",
     "npy",
 ]
+
+
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def is_windows_absolute_path(path: str) -> bool:
+    """Return whether *path* looks like a Windows absolute path."""
+    return bool(_WINDOWS_ABSOLUTE_PATH_RE.match(path))
+
+
+def split_path_spec(
+    value: str,
+    *,
+    default_format: str = "mha",
+    allowed_flags: set[str] | None = None,
+    supported_extensions: list[str] | None = None,
+) -> tuple[str, str | None, str]:
+    """Split a KonfAI ``path[:flag]:format`` spec without breaking Windows paths.
+
+    KonfAI accepts dataset-like strings such as:
+
+    - ``./Dataset``
+    - ``./Dataset:mha``
+    - ``./Dataset:a:mha``
+    - ``C:\\Data\\Dataset:mha``
+    - ``C:\\Data\\Dataset:a:mha``
+
+    Parsing is performed from the right so the drive separator in Windows paths
+    is preserved.
+    """
+
+    extensions = SUPPORTED_EXTENSIONS if supported_extensions is None else supported_extensions
+    parts = value.rsplit(":", 2)
+
+    if len(parts) == 1:
+        return value, None, default_format
+
+    if len(parts) == 2:
+        path, maybe_format = parts
+        if maybe_format in extensions:
+            return path, None, maybe_format
+        if is_windows_absolute_path(value):
+            return value, None, default_format
+        return path, None, maybe_format
+
+    path, middle, file_format = parts
+    if file_format in extensions:
+        if allowed_flags is not None and middle in allowed_flags:
+            return path, middle, file_format
+        return f"{path}:{middle}", None, file_format
+
+    return path, middle, file_format

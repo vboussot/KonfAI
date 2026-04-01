@@ -37,8 +37,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 import konfai
-from konfai.utils.app_repository import get_app_repository_info
 from konfai.utils.errors import AppRepositoryError
+
+from .app_repository import get_app_repository_info
 
 MAX_ACTIVE_JOBS = 32
 

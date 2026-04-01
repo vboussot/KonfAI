@@ -12,11 +12,11 @@ pytest -q
 ```
 
 At the time of writing, the repository includes an integration test for the
-`konfai-apps pipeline` flow in `tests/integration/test_konfai_apps.py`.
+`konfai-apps pipeline` flow in `konfai-apps/tests/integration/test_konfai_apps.py`.
 
 ## What CI runs
 
-The GitHub workflow `KonfAI_ci.yml` runs:
+The GitHub workflow `konfai_ci.yml` runs:
 
 - editable installation of the package
 - `pytest -q`

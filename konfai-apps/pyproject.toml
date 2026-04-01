@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "konfai-apps"
+dynamic = ["version"]
+description = "Standalone KonfAI Apps package with local and remote app execution"
+readme = "README.md"
+license = { file = "../LICENSE" }
+requires-python = ">=3.10"
+
+authors = [
+  { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
+]
+
+dependencies = [
+  "konfai",
+  "fastapi",
+  "uvicorn",
+  "python-multipart"
+]
+
+[project.urls]
+Homepage = "https://github.com/vboussot/KonfAI"
+Repository = "https://github.com/vboussot/KonfAI"
+Issues = "https://github.com/vboussot/KonfAI/issues"
+License = "https://www.apache.org/licenses/LICENSE-2.0"
+
+[project.scripts]
+konfai-apps = "konfai_apps:main_apps"
+konfai-apps-server = "konfai_apps:main_apps_server"
+
+[tool.setuptools_scm]
+root = ".."
+tag_regex = "^v(?P<version>.*)$"
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+include = ["konfai_apps*"]

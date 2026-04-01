@@ -1,15 +1,26 @@
 import json
 import math
+import os
 import subprocess
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
+ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    pythonpath = env.get("PYTHONPATH")
+    package_paths = f"{KONFAI_APPS_ROOT}{os.pathsep}{REPO_ROOT}"
+    env["PYTHONPATH"] = package_paths if not pythonpath else f"{package_paths}{os.pathsep}{pythonpath}"
     return subprocess.run(
         cmd,
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
 
@@ -94,9 +105,9 @@ def assert_metrics_close(
 
 
 def test_konfai_apps_infer(tmp_path: Path):
-    dataset_dir = Path("tests/assets/Dataset/P001")
-    eval_base_path = Path("tests/assets/Baselines/Evaluation.json")
-    unc_base_path = Path("tests/assets/Baselines/Uncertainties.json")
+    dataset_dir = ASSETS_DIR / "Dataset" / "P001"
+    eval_base_path = ASSETS_DIR / "Baselines" / "Evaluation.json"
+    unc_base_path = ASSETS_DIR / "Baselines" / "Uncertainties.json"
     predictions_dir = tmp_path / "Predictions"
     evaluations_dir = tmp_path / "Evaluations"
     uncertainties_dir = tmp_path / "Uncertainties"
@@ -109,7 +120,13 @@ def test_konfai_apps_infer(tmp_path: Path):
 
     # --- Run pipeline
     cmd = [
-        "konfai-apps",
+        sys.executable,
+        "-c",
+        (
+            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
+            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
+            "from konfai_apps.cli import main_apps; main_apps()"
+        ),
         "pipeline",
         "VBoussot/ImpactSynth:CBCT",
         "-i",

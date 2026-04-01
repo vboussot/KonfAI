@@ -60,7 +60,7 @@ Pipeline:
 ## Grouped inputs
 
 The CLI accepts grouped inputs by repeating `--inputs` / `-i`. This matches the
-grouping behavior documented in `konfai.main.add_common_konfai_apps()`.
+grouping behavior documented in `konfai_apps.cli.add_common_konfai_apps()`.
 
 Use this when an app expects:
 

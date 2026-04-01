@@ -1,10 +1,9 @@
 import importlib.util
 from pathlib import Path
 
+import konfai_apps.app_server as app_server
 import pytest
 from fastapi.testclient import TestClient
-
-import konfai.app_server as app_server
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("fastapi") is None,

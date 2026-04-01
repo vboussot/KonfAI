@@ -1,0 +1,46 @@
+name: konfai_apps_ci
+
+on:
+  push:
+    paths:
+      - ".github/workflows/konfai_apps_ci.yml"
+      - "konfai-apps/**"
+      - "apps/**"
+      - "konfai/**"
+      - "tests/assets/Workflows/**"
+      - "pyproject.toml"
+      - "README.md"
+  pull_request:
+    paths:
+      - ".github/workflows/konfai_apps_ci.yml"
+      - "konfai-apps/**"
+      - "apps/**"
+      - "konfai/**"
+      - "tests/assets/Workflows/**"
+      - "pyproject.toml"
+      - "README.md"
+
+jobs:
+  konfai_apps_ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install core package
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+
+      - name: Install standalone apps package
+        run: |
+          pip install -e ./konfai-apps
+
+      - name: Run apps tests
+        run: |
+          pytest -q konfai-apps/tests

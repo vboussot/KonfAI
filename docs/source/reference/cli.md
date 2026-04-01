@@ -1,9 +1,9 @@
 # CLI reference
 
-This page lists the package entrypoints exposed by `pyproject.toml`. Use it as
-the quick map of "which command should I run?".
+This page lists the main command-line entrypoints used in the repository. Use
+it as the quick map of "which command should I run?".
 
-KonfAI ships four main command-line entrypoints:
+KonfAI uses four main command-line entrypoints:
 
 - `konfai`
 - `konfai-apps`
@@ -65,6 +65,8 @@ Higher-level packaged workflow runner.
 Use `konfai-apps` when a workflow is already packaged as a KonfAI App and you
 want a simpler interface than the low-level YAML CLI.
 
+This command is provided by the standalone `konfai-apps` package.
+
 ### Commands
 
 | Command | Purpose |
@@ -125,6 +127,7 @@ want a simpler interface than the low-level YAML CLI.
 FastAPI server exposing packaged apps remotely.
 
 This command is the server-side counterpart of `konfai-apps --host ...`.
+It is also provided by the standalone `konfai-apps` package.
 
 Important options:
 

@@ -118,7 +118,7 @@ def _prepare_experiment_dir(experiment_dir: Path, train_name: str) -> dict[str, 
 def _subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(REPO_ROOT) if not pythonpath else f"{REPO_ROOT}:{pythonpath}"
+    env["PYTHONPATH"] = str(REPO_ROOT) if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
     return env
 
 

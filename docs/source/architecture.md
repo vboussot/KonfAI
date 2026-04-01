@@ -7,7 +7,7 @@ users. It focuses on the structure that is clearly visible in the codebase.
 
 | Package | Responsibility |
 | --- | --- |
-| `konfai.main` | CLI entrypoints for low-level workflows, apps, app server, and cluster mode |
+| `konfai.main` | CLI entrypoints for low-level workflows and cluster mode |
 | `konfai.trainer` | Training workflow and training loop |
 | `konfai.predictor` | Prediction workflow and export logic |
 | `konfai.evaluator` | Evaluation workflow and metric export |
@@ -15,8 +15,7 @@ users. It focuses on the structure that is clearly visible in the codebase.
 | `konfai.network` | Model graph composition, optimizer/scheduler loaders, criterion routing |
 | `konfai.metric` | Metrics, losses, and schedulers |
 | `konfai.utils` | Config system, dataset helpers, distributed runtime utilities |
-| `konfai.app` | Local and remote KonfAI App execution |
-| `konfai.app_server` | FastAPI server for remote app execution |
+| `konfai_apps` | Standalone package for local/remote app execution and app server |
 
 ## Two user-facing layers
 
@@ -41,7 +40,7 @@ This is the `konfai-apps` CLI and the remote server around it.
 Apps package a stable workflow behind a simpler interface for:
 
 - local CLI usage
-- Python usage through `konfai.app.KonfAIApp`
+- Python usage through `konfai_apps.KonfAIApp`
 - remote execution through `konfai-apps-server`
 - external clients such as Slicer integrations
 
@@ -112,7 +111,7 @@ distributed launcher.
 
 ## KonfAI Apps server architecture
 
-The remote app server in `konfai.app_server` adds:
+The remote app server in `konfai_apps.app_server` adds:
 
 - upload handling
 - async job management

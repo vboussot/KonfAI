@@ -31,22 +31,6 @@ konfai.main module
    :show-inheritance:
    :undoc-members:
 
-konfai.app module
------------------
-
-.. automodule:: konfai.app
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
-konfai.app\_server module
--------------------------
-
-.. automodule:: konfai.app_server
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
 konfai.predictor module
 -----------------------
 

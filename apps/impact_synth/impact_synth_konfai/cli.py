@@ -18,9 +18,9 @@
 
 import argparse
 
-from konfai.app import KonfAIApp
-from konfai.main import add_common_konfai_apps
-from konfai.utils.app_repository import get_available_apps_on_hf_repo
+from konfai_apps import KonfAIApp
+from konfai_apps.app_repository import get_available_apps_on_hf_repo
+from konfai_apps.cli import add_common_konfai_apps
 
 IMPACT_SYNTH_KONFAI_REPO = "VBoussot/ImpactSynth"
 

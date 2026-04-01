@@ -9,16 +9,16 @@ The server requires a JSON file listing the available apps:
 
 .. code-block:: bash
 
-   konfai-apps-server --host 0.0.0.0 --port 8000 --apps tests/assets/apps.json
+   konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json
 
 Bearer-token authentication is enabled by default:
 
 .. code-block:: bash
 
    export KONFAI_API_TOKEN="my-secret-token"
-   konfai-apps-server --apps tests/assets/apps.json
+   konfai-apps-server --apps konfai-apps/tests/assets/apps.json
 
-Important server options from `konfai.main.main_apps_server()`:
+Important server options from `konfai_apps.cli.main_apps_server()`:
 
 - `--host`
 - `--port`
@@ -48,7 +48,7 @@ The client then:
 
 ## Scheduling model
 
-From `konfai.app_server`, jobs are:
+From `konfai_apps.app_server`, jobs are:
 
 - queued
 - optionally assigned GPUs

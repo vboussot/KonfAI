@@ -135,7 +135,7 @@ docker run --rm -it -p 8000:8000 \
   -v "$(pwd):/workspace" \
   -w /workspace \
   -e KONFAI_API_TOKEN=my-token \
-  vboussot/konfai konfai-apps-server --host 0.0.0.0 --port 8000 --apps tests/assets/apps.json
+  vboussot/konfai konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json
 ```
 
 ## Notes

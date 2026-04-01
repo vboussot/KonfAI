@@ -1,7 +1,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/vboussot/KonfAI/blob/main/LICENSE)
 [![PyPI version](https://img.shields.io/pypi/v/konfai)](https://pypi.org/project/konfai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/vboussot/KonfAI/actions/workflows/KonfAI_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/KonfAI_ci.yml)
+[![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
 [![Documentation Status](https://readthedocs.org/projects/konfai/badge/?version=latest)](https://konfai.readthedocs.io/en/latest/?badge=latest)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)
 
@@ -148,7 +148,7 @@ can be used through:
 | Interface | Entry point |
 | --- | --- |
 | 🖥️ CLI | `konfai-apps` |
-| 🐍 Python API | `konfai.app.KonfAIApp` |
+| 🐍 Python API | `konfai_apps.KonfAIApp` |
 | 🌐 Remote server | `konfai-apps-server` + `konfai-apps --host ...` |
 | 🧠 3D Slicer | [SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) |
 

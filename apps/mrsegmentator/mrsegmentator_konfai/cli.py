@@ -18,8 +18,8 @@
 
 import argparse
 
-from konfai.app import KonfAIApp
-from konfai.main import add_common_konfai_apps
+from konfai_apps import KonfAIApp
+from konfai_apps.cli import add_common_konfai_apps
 
 MR_SEGMENTATOR_KONFAI_REPO = "VBoussot/MRSegmentator-KonfAI"
 

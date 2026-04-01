@@ -33,7 +33,7 @@ from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_dat
 from konfai.utils.errors import TransformError
 from konfai.utils.ITK import box_with_mask, crop_with_mask
 from konfai.utils.runtime import NeedDevice
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, split_path_spec
 
 
 class Transform(NeedDevice, ABC):
@@ -859,7 +859,13 @@ class KonfAIInference(Transform):
         self.per_channel = per_channel
 
     def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
-        from konfai.app import KonfAIApp
+        try:
+            from konfai_apps import KonfAIApp
+        except ImportError as exc:  # pragma: no cover - depends on optional install
+            raise RuntimeError(
+                "KonfAIInference requires the standalone 'konfai-apps' package. "
+                "Install it from the repository with 'pip install -e ./konfai-apps'."
+            ) from exc
 
         konfai_app = KonfAIApp(f"{self.repo_id}:{self.model_name}", False, False)
         konfai_app.infer(
@@ -911,11 +917,7 @@ class InferenceStack(Transform):
     def __init__(self, dataset: str, name: str, mode: str = "mean"):
         self.dataset = None
         if dataset:
-            if len(dataset.split(":")) > 1:
-                filename, file_format = dataset.split(":")
-            else:
-                filename = dataset
-                file_format = "mha"
+            filename, _, file_format = split_path_spec(dataset)
             self.dataset = Dataset(filename, file_format)
         self.name = name
         self.mode = mode

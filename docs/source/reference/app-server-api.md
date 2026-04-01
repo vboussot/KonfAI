@@ -1,6 +1,6 @@
 # App server HTTP API
 
-This page summarizes the FastAPI endpoints implemented in `konfai.app_server`.
+This page summarizes the FastAPI endpoints implemented in `konfai_apps.app_server`.
 
 Authentication is enforced through bearer tokens when the server runs with the
 default `--auth bearer` mode.

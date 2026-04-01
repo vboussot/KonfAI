@@ -18,12 +18,14 @@ python -m pip install -e .
 
 ### `konfai-apps-server` or `konfai-cluster` is missing
 
-Those commands are optional extras declared in `pyproject.toml`.
+`konfai-cluster` comes from the optional `cluster` extra on the core package.
+`konfai-apps` and `konfai-apps-server` come from the standalone `konfai-apps`
+package.
 
-Install the relevant extra:
+Install the relevant package or extra:
 
 ```bash
-python -m pip install "konfai[server]"
+python -m pip install konfai-apps
 python -m pip install "konfai[cluster]"
 ```
 

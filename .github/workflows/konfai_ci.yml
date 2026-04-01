@@ -1,11 +1,23 @@
-name: tests
+name: konfai_ci
 
 on:
   push:
+    paths:
+      - ".github/workflows/konfai_ci.yml"
+      - "konfai/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "README.md"
   pull_request:
+    paths:
+      - ".github/workflows/konfai_ci.yml"
+      - "konfai/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "README.md"
 
 jobs:
-  pytest:
+  konfai_ci:
     runs-on: ${{ matrix.os }}
     env:
       HF_HOME: ${{ github.workspace }}/.cache/huggingface
@@ -47,4 +59,4 @@ jobs:
       
       - name: Run pytest
         run: |
-          pytest -q
+          pytest -q tests

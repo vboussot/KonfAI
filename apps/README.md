@@ -314,7 +314,7 @@ Apps can be executed programmatically:
 
 ``` python
 from pathlib import Path
-from konfai.app import KonfAIApp
+from konfai_apps import KonfAIApp
 
 app = KonfAIApp("my_app")
 app.infer([[Path("input.mha")]], output=Path("./Predictions"))
@@ -324,7 +324,7 @@ Or remotely:
 
 ``` python
 from pathlib import Path
-from konfai.app import KonfAIAppClient
+from konfai_apps import KonfAIAppClient
 from konfai import RemoteServer
 
 client = KonfAIAppClient("my_app", RemoteServer("host", 8000, "TOKEN"))

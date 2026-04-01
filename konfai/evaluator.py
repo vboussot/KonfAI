@@ -41,6 +41,7 @@ from konfai.utils.runtime import (
     run_distributed_app,
     synchronize_data,
 )
+from konfai.utils.utils import split_path_spec
 
 
 class CriterionsAttr:
@@ -378,11 +379,7 @@ class Evaluator(DistributedObject):
                         true_loss = loss[1]
                         if len(loss) == 3:
                             if metric.dataset:
-                                if len(metric.dataset.split(":")) > 1:
-                                    filename, file_format = metric.dataset.split(":")
-                                else:
-                                    filename = metric.dataset
-                                    file_format = "mha"
+                                filename, _, file_format = split_path_spec(metric.dataset)
                                 map_dataset = Dataset(filename, file_format)
                                 group = metric.group if metric.group else output_group
                                 for dataset in self.dataset.datasets.values():

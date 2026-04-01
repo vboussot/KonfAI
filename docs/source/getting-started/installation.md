@@ -12,12 +12,11 @@ python -m pip install konfai
 This installs the core CLI entrypoints:
 
 - `konfai`
-- `konfai-apps`
+- `konfai-cluster` with the `cluster` extra
 
 Optional extras exposed by the package metadata:
 
 ```bash
-python -m pip install "konfai[server]"
 python -m pip install "konfai[cluster]"
 python -m pip install "konfai[vtk]"
 python -m pip install "konfai[lpips]"
@@ -25,10 +24,22 @@ python -m pip install "konfai[lpips]"
 
 These extras enable optional entrypoints or integrations:
 
-- `konfai-apps-server` with `server`
 - `konfai-cluster` with `cluster`
 - VTK-dependent features with `vtk`
 - LPIPS-based metrics with `lpips`
+
+Install the standalone apps package separately when you need packaged app
+execution:
+
+```bash
+python -m pip install konfai-apps
+```
+
+This provides:
+
+- `konfai-apps`
+- `konfai-apps-server`
+- the Python API under `konfai_apps`
 
 ## Install from source
 
@@ -66,12 +77,12 @@ Check that the main CLIs are available:
 
 ```bash
 konfai --help
-konfai-apps --help
 ```
 
-If you installed the `server` or `cluster` extras:
+If you installed the standalone apps package or the `cluster` extra:
 
 ```bash
+konfai-apps --help
 konfai-apps-server --help
 konfai-cluster --help
 ```
@@ -101,10 +112,10 @@ echo "$CUDA_VISIBLE_DEVICES"
 
 ### `konfai-apps-server` is missing
 
-Install the `server` extra:
+Install the standalone apps package:
 
 ```bash
-python -m pip install "konfai[server]"
+python -m pip install konfai-apps
 ```
 
 ### `konfai-cluster` is missing
