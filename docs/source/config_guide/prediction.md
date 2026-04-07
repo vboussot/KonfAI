@@ -36,8 +36,7 @@ Prediction uses the same `classpath` convention as training:
 ```yaml
 Model:
   classpath: Model:UNetpp5
-  UNetpp5:
-    outputs_criterions: {}
+  outputs_criterions: {}
 ```
 
 In most prediction configs:

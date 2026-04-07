@@ -22,20 +22,45 @@ on:
 
 jobs:
   konfai_apps_ci:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+      HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/.cache/huggingface/hub
+      TRANSFORMERS_CACHE: ${{ github.workspace }}/.cache/huggingface/transformers
+
+      HF_HUB_DOWNLOAD_TIMEOUT: "300"
+      HF_HUB_ETAG_TIMEOUT: "60"
+
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install core package
         run: |
           python -m pip install -U pip
           pip install -e .
+          pip install pytest
+
+      - name: Restore Hugging Face cache
+        uses: actions/cache@v5
+        with:
+          path: .cache/huggingface
+          key: hf-apps-${{ runner.os }}
 
       - name: Install standalone apps package
         run: |
@@ -43,4 +68,4 @@ jobs:
 
       - name: Run apps tests
         run: |
-          pytest -q konfai-apps/tests
+          python -m pytest -q konfai-apps/tests

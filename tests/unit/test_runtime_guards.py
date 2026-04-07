@@ -65,6 +65,26 @@ def test_apply_config_restores_config_env(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert os.environ["KONFAI_CONFIG_VARIABLE"] == "before.variable"
 
 
+def test_apply_config_keeps_config_path_during_constructor_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Root:\n  Child:\n    value: 7\n", encoding="utf-8")
+    monkeypatch.setenv("KONFAI_config_file", str(config_path))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+
+    @config("Child")
+    class Child:
+        def __init__(self, value: int = 0) -> None:
+            self.value = value
+            self.config_path = os.environ["KONFAI_CONFIG_PATH"]
+
+    child = apply_config("Root")(Child)()
+
+    assert child.value == 7
+    assert child.config_path == "Root.Child"
+
+
 def test_confirm_overwrite_or_raise_requires_flag_in_non_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KONFAI_OVERWRITE", raising=False)
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))

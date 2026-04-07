@@ -26,7 +26,7 @@ This behavior is implemented by `konfai.utils.config.Config`, `config()`, and
 
 In practice, the mapping is straightforward:
 
-1. a class or function is annotated with `@config("...")`
+1. a class or function is optionally annotated with `@config("...")`
 2. `apply_config()` inspects the constructor signature
 3. YAML fields are matched against constructor parameter names
 4. nested objects are recursively instantiated from nested mappings
@@ -36,6 +36,11 @@ This is why KonfAI configuration keys should generally:
 - use **snake_case**
 - match the actual Python constructor arguments
 - stay close to the shipped examples when you introduce a custom class
+
+One important detail in the current codebase: `@config()` defaults to the class
+name. For local custom classes, this usually adds an unnecessary extra subtree.
+Without any decorator, a custom class `UNetpp5` loaded through
+`classpath: Model:UNetpp5` reads its parameters directly from `Trainer.Model`.
 
 ## `classpath`
 
@@ -100,7 +105,8 @@ constructor trees that the framework accepts.
 When a config does not behave as expected, check these rules first:
 
 - the YAML root must match the workflow you are launching
-- nested section names must match constructor parameters or `@config(...)` keys
+- nested section names must match constructor parameters or any explicit
+  `@config("...")` keys you chose
 - local `classpath` modules must be importable from the current working directory
 - the YAML shape should mirror the Python object graph, not just the names you
   want conceptually

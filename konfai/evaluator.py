@@ -241,7 +241,7 @@ class Statistics:
         return result
 
 
-@config("Evaluator")
+@config()
 class Evaluator(DistributedObject):
     """
     Distributed evaluation engine for computing metrics on model predictions.

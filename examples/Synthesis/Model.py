@@ -15,7 +15,7 @@ class Head(network.ModuleArgsDict):
         self.add_module("Tanh", torch.nn.Tanh())
 
 
-@config("UNetpp5")
+@config()
 class UNetpp5(network.Network):
 
     def __init__(
@@ -43,7 +43,7 @@ class UNetpp5(network.Network):
         self.add_module("Head", Head())
 
 
-@config("Discriminator")
+@config()
 class Discriminator(network.Network):
 
     class DiscriminatorNLayers(network.ModuleArgsDict):
@@ -104,7 +104,7 @@ class Discriminator(network.Network):
         self.add_module("Head", Discriminator.DiscriminatorHead(channels[-1], dim))
 
 
-@config("Gan")
+@config()
 class Gan(network.Network):
 
     def __init__(

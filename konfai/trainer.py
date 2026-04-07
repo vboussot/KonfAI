@@ -68,7 +68,7 @@ class EarlyStoppingBase:
         return False
 
 
-@config("EarlyStopping")
+@config()
 class EarlyStopping(EarlyStoppingBase):
     """
     Implements early stopping logic with configurable patience and monitored metrics.
@@ -303,7 +303,8 @@ class _Trainer:
 
                 batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}")
         self.dataloader_validation.dataset.reset_augmentation("Validation")
-        dist.barrier()
+        if dist.is_initialized():
+            dist.barrier()
         self.model.train()
         self.model.module.set_state(NetState.TRAIN)
         if self.model_ema is not None:
@@ -426,23 +427,23 @@ class _Trainer:
                     if network.measure is not None:
                         self.tb.add_scalars(
                             f"{type_log}/{name}/Loss/{label}",
-                            {k: v[1] for k, v in measures[f"{name}{label}"][0].items()},
+                            {k.replace(":", "."): v[1] for k, v in measures[f"{name}{label}"][0].items()},
                             self.it,
                         )
                         self.tb.add_scalars(
                             f"{type_log}/{name}/Loss_weight/{label}",
-                            {k: v[0] for k, v in measures[f"{name}{label}"][0].items()},
+                            {k.replace(":", "."): v[0] for k, v in measures[f"{name}{label}"][0].items()},
                             self.it,
                         )
 
                         self.tb.add_scalars(
                             f"{type_log}/{name}/Metric/{label}",
-                            {k: v[1] for k, v in measures[f"{name}{label}"][1].items()},
+                            {k.replace(":", "."): v[1] for k, v in measures[f"{name}{label}"][1].items()},
                             self.it,
                         )
                         self.tb.add_scalars(
                             f"{type_log}/{name}/Metric_weight/{label}",
-                            {k: v[0] for k, v in measures[f"{name}{label}"][1].items()},
+                            {k.replace(":", "."): v[0] for k, v in measures[f"{name}{label}"][1].items()},
                             self.it,
                         )
 
@@ -487,7 +488,7 @@ class _Trainer:
         return self._log("Validation", batch_sample)
 
 
-@config("Trainer")
+@config()
 class Trainer(DistributedObject):
     """
     Public API for training a model using the KonfAI framework.

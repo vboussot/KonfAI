@@ -312,7 +312,7 @@ class DatasetPatch(Patch):
         pass
 
 
-@config("Patch")
+@config()
 class ModelPatch(Patch):
     """Patch definition applied inside model graphs during prediction or training."""
 

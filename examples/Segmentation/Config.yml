@@ -3,7 +3,6 @@ Trainer:
     classpath: segmentation.UNet.UNet
     UNet:
       dim: 2
-      Patch: None
       channels:
       - 1
       - 32
@@ -61,6 +60,7 @@ Trainer:
       upsample_mode: CONV_TRANSPOSE
       attention: false
       block_type: Conv
+      ModelPatch: None
   Dataset:
     groups_src:
       CT:

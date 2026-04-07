@@ -632,12 +632,12 @@ class _Predictor:
                 if network.measure is not None:
                     self.tb.add_scalars(
                         f"Prediction/{name}/Loss",
-                        {k: v[1] for k, v in measures[name][0].items()},
+                        {k.replace(":", "."): v[1] for k, v in measures[name][0].items()},
                         self.it,
                     )
                     self.tb.add_scalars(
                         f"Prediction/{name}/Metric",
-                        {k: v[1] for k, v in measures[name][1].items()},
+                        {k.replace(":", "."): v[1] for k, v in measures[name][1].items()},
                         self.it,
                     )
                 if len(images_log):
@@ -750,7 +750,7 @@ class ModelComposite(Network):
         return final_outputs
 
 
-@config("Predictor")
+@config()
 class Predictor(DistributedObject):
     """
     KonfAI's main prediction controller.

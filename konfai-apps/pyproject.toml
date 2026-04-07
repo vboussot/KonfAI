@@ -7,7 +7,7 @@ name = "konfai-apps"
 dynamic = ["version"]
 description = "Standalone KonfAI Apps package with local and remote app execution"
 readme = "README.md"
-license = { file = "../LICENSE" }
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 
 authors = [

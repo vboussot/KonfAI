@@ -42,6 +42,19 @@ Trainer:
                       size_average: None
                       reduce: None
                       reduction: mean
+                torch:nn:L1Loss:
+                  size_average: None
+                  reduce: None
+                  reduction: mean
+                  schedulers:
+                    Constant:
+                      nb_step: 0
+                      value: 1
+                  is_loss: true
+                  group: 0
+                  start: 0
+                  stop: None
+                  accumulation: false
             CT;MASK: # Masked MAE metric (evaluation only, not optimized)
               criterions_loader:
                 MAE: # Masked MAE metric between prediction and CT (used for monitoring, not optimized)
@@ -55,19 +68,6 @@ Trainer:
                   stop: None
                   accumulation: false
                   reduction: mean
-        default:
-          targets_criterions:
-            Labels:
-              criterions_loader:
-                torch:nn:CrossEntropyLoss:
-                  schedulers:
-                    Constant:
-                      nb_step: 0
-                  is_loss: true
-                  group: 0
-                  start: 0
-                  stop: None
-                  accumulation: false
       optimizer:  # Optimizer used to update model weights during training
         name: AdamW
         lr: 0.001
@@ -89,18 +89,8 @@ Trainer:
           last_epoch: -1
           verbose: deprecated
           nb_step: 0
-        default:ReduceLROnPlateau:
-          nb_step: 0
-      Patch:
-        patch_size:
-        - 128
-        - 128
-        - 128
-        overlap: None
-        patch_combine: None
-        pad_value: 0
-        extend_slice: 0
       dim: 2
+      ModelPatch: None
   Dataset:
     groups_src: # Mapping between dataset modalities and how they are used by the model
       MASK:
@@ -173,7 +163,7 @@ Trainer:
     - ./Dataset/:a:mha
     inline_augmentations: true # Apply new augmentations at each epoch
     use_cache: true # Cache processed data in memory for faster training
-    batch_size: 32 # Number of samples per training batch
+    batch_size: 1 # Number of samples per training batch
     validation: None  # Path to a file defining validation cases (each line = patient name)
   train_name: TRAIN_01  # Training name used to create the output folder structure
   manual_seed: 32 # Fixed seed for reproducibility

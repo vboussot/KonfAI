@@ -51,7 +51,7 @@ constructor signatures and type annotations.
 
 The main pieces are:
 
-- `@config(...)` to bind a class to a configuration key
+- `@config("...")` to bind a class to an explicit configuration key when needed
 - `apply_config(...)` to instantiate objects recursively
 - `classpath` values to import custom implementations dynamically
 

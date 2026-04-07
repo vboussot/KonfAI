@@ -308,6 +308,7 @@ class Measure:
                     f"Available modules: {modules}",
                     "Please check that the name matches exactly a submodule or output of your model architecture.",
                 )
+
             for target_group in self.outputs_criterions[output_group]:
                 for target_group_tmp in target_group.split(";"):
                     if target_group_tmp not in group_dest:
@@ -1415,14 +1416,17 @@ class ModelLoader:
 
         if not konfai_args:
             konfai_args = f"{konfai_root()}.Model"
-        konfai_args += "." + name
+        cls = getattr(module, name)
+        if not hasattr(cls, "_key"):
+            konfai_args += "." + name
 
-        model = apply_config(konfai_args)(getattr(module, name))(konfai_without=konfai_without if not train else [])
+        model = apply_config(konfai_args)(cls)(konfai_without=konfai_without if not train else [])
         if not isinstance(model, Network):
             model = apply_config(konfai_args)(partial(MinimalModel, model))(
                 konfai_without=konfai_without + ["model"] if not train else []
             )
             model.set_name(name)
+
         return model
 
 

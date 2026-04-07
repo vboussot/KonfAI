@@ -39,6 +39,17 @@ Why it exists:
 - it lets `apply_config(...)` instantiate the object from the right YAML branch
 - it keeps the YAML structure aligned with constructor signatures
 
+For local custom classes next to YAML files, do not use `@config()` by default.
+Without any decorator, the class reads its constructor parameters directly from
+the current YAML branch, which is usually the most readable layout.
+
+In the current codebase, when you do use a decorator:
+
+- `@config("SomeKey")` binds the object to `SomeKey`
+- `@config()` defaults to the class name
+
+Use `@config("SomeKey")` only when you intentionally want that extra nesting.
+
 ## `classpath`
 
 Use `classpath` when a YAML branch must resolve to a concrete implementation at
@@ -67,6 +78,12 @@ Relevant modules:
 Use this path when you need custom preprocessing, postprocessing, or data
 augmentation behavior.
 
+Runtime contracts:
+
+- transforms should inherit `konfai.data.transform.Transform` or
+  `TransformInverse`
+- augmentations should inherit `konfai.data.augmentation.DataAugmentation`
+
 ## Criteria and schedulers
 
 KonfAI lets you attach multiple losses and metrics to multiple outputs and
@@ -78,6 +95,26 @@ targets. The relevant extension points live in:
 
 This is the mechanism used by the examples to define reconstruction losses,
 Dice-based evaluation, adversarial losses, and scheduled weights.
+
+Runtime contracts:
+
+- simple criteria should inherit `konfai.metric.measure.Criterion`
+- criteria that need model graph initialization should inherit
+  `CriterionWithInit`
+- criteria that need per-sample metadata should inherit
+  `CriterionWithAttribute`
+
+## Quick contract table
+
+| Extension point | Recommended base class | Typical YAML entry point |
+| --- | --- | --- |
+| Custom model | `konfai.network.network.Network` | `Trainer.Model.classpath` |
+| Custom transform | `konfai.data.transform.Transform` or `TransformInverse` | `groups_dest.<group>.transforms` |
+| Custom augmentation | `konfai.data.augmentation.DataAugmentation` | `Dataset.augmentations.*.data_augmentations` |
+| Custom loss / metric | `konfai.metric.measure.Criterion` family | `outputs_criterions.*.targets_criterions.*.criterions_loader` |
+
+For a practical, contract-oriented guide with code snippets, see
+{doc}`../../usage/custom-models`.
 
 ## KonfAI Apps
 

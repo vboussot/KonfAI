@@ -166,6 +166,9 @@ class Config:
         return [default] if is_list else default
 
     def get_value(self, name, default) -> object:
+        if not isinstance(self.config, collections.abc.MutableMapping):
+            return None
+
         if name in self.config and self.config[name] is not None:
             value = self.config[name]
             if value is None:
@@ -213,12 +216,6 @@ class Config:
                     value_config[key] = None
                     dict_value[key] = value_tmp
                 value = dict_value
-        if isinstance(self.config, str):
-            # Scalar config branches are tracked through the environment so
-            # nested ``apply_config`` calls can detect variable-only contexts.
-            os.environ["KONFAI_CONFIG_VARIABLE"] = "True"
-            return None
-
         self.config[name] = value_config if value_config is not None else "None"
         if value == "None":
             value = None
@@ -241,7 +238,7 @@ def config(key: str | None = None):
     """
 
     def decorator(function):
-        function._key = key
+        function._key = key if key is not None else function.__name__
         return function
 
     return decorator
@@ -365,12 +362,13 @@ def apply_config(konfai_args: str | None = None):
                 and key_tmp is not None
             ):
                 previous_path = os.environ.get("KONFAI_CONFIG_PATH")
-                previous_variable = os.environ.get("KONFAI_CONFIG_VARIABLE")
                 os.environ["KONFAI_CONFIG_PATH"] = key_tmp
                 without = kwargs["konfai_without"] if "konfai_without" in kwargs else []
                 try:
                     with Config(key_tmp) as config:
-                        os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
+                        if not isinstance(config.config, collections.abc.Mapping):
+                            return None
+
                         kwargs = {}
                         params = list(inspect.signature(function).parameters.values())
                         for param in params[len(args) :]:
@@ -469,24 +467,13 @@ def apply_config(konfai_args: str | None = None):
                                 raise ConfigError(
                                     "Failed to instantiate " f"{param.name} with type " f"{annotation}, error {exc}"
                                 ) from exc
-
-                            if os.environ["KONFAI_CONFIG_VARIABLE"] == "True":
-                                os.environ["KONFAI_CONFIG_VARIABLE"] = "False"
-                                kwargs[param.name] = None
+                        return function(*args, **kwargs)
                 finally:
                     if previous_path is None:
                         os.environ.pop("KONFAI_CONFIG_PATH", None)
                     else:
                         os.environ["KONFAI_CONFIG_PATH"] = previous_path
-
-                    current_variable = os.environ.get("KONFAI_CONFIG_VARIABLE")
-                    if current_variable != "True":
-                        if previous_variable is None:
-                            os.environ.pop("KONFAI_CONFIG_VARIABLE", None)
-                        else:
-                            os.environ["KONFAI_CONFIG_VARIABLE"] = previous_variable
-            result = function(*args, **kwargs)
-            return result
+            return function(*args, **kwargs)
 
         return new_function
 

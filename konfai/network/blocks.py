@@ -76,7 +76,7 @@ def get_torch_module(name_fonction: str, dim: int | None = None) -> torch.nn.Mod
     )
 
 
-@config("BlockConfig")
+@config()
 class BlockConfig:
     """Configuration object describing one convolutional block stage."""
 

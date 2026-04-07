@@ -47,6 +47,7 @@ repos:
     rev: 1.8.6
     hooks:
       - id: bandit
-        args: ["-r", "konfai"]
-        exclude: ^tests/
-
+        args: ["-r", "konfai", "konfai-apps/konfai_apps"]
+        files: ^(konfai/|konfai-apps/konfai_apps/)
+        exclude: ^(tests/|konfai-apps/tests/)
+        pass_filenames: false
