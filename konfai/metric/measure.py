@@ -21,6 +21,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import partial
+from typing import cast
 
 import numpy as np
 import torch
@@ -89,41 +90,71 @@ class MaskedLoss(Criterion):
 
     @staticmethod
     def get_mask(targets: list[torch.Tensor]) -> torch.Tensor | None:
-        result = None
-        if len(targets) > 0:
-            result = targets[0]
-            for mask in targets[1:]:
-                result = result * mask
-        return result
+        if len(targets) == 0:
+            return None
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
-        loss = torch.tensor(0, dtype=torch.float32).to(output.device)
-        true_loss = 0
+        mask = targets[0]
+        for target in targets[1:]:
+            mask = mask * target
+
+        return mask
+
+    def forward(
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, float]:
+
+        if len(targets) == 0:
+            raise ValueError("MaskedLoss expects at least one target tensor.")
+
+        target = targets[0]
+        mask = self.get_mask(list(targets[1:]))
+
+        loss = output.new_tensor(0.0)
         true_nb = 0
-        mask = MaskedLoss.get_mask(list(targets[1:]))
-        if mask is not None:
-            for batch in range(output.shape[0]):
-                if torch.any(mask[batch] == 1):
-                    if self.mode_image_masked:
-                        loss_b = self.loss(
-                            output[batch, ...].float() * torch.where(mask == 1, 1, 0),
-                            targets[0][batch, ...].float() * torch.where(mask == 1, 1, 0),
-                        )
-                    else:
-                        index = mask[batch, ...] == 1
-                        loss_b = self.loss(
-                            torch.masked_select(output[batch, ...], index).float(),
-                            torch.masked_select(targets[0][batch, ...], index).float(),
-                        )
-                    loss += loss_b
-                    true_loss += loss_b.item()
-                    true_nb += 1
-        else:
-            loss_tmp = self.loss(output.float(), targets[0].float())
-            loss += loss_tmp
-            true_loss += loss_tmp.item()
+
+        if mask is None:
+            loss_b = self.loss(
+                output.float(),
+                target.to(device=output.device).float(),
+            )
+            return loss_b, loss_b.detach().item()
+
+        target = target.to(device=output.device)
+        mask = mask.to(device=output.device)
+
+        for batch in range(output.shape[0]):
+            mask_b = mask[batch, ...] == 1
+
+            if not torch.any(mask_b):
+                continue
+
+            output_b = output[batch, ...].float()
+            target_b = target[batch, ...].float()
+
+            if self.mode_image_masked:
+                mask_b = mask_b.to(dtype=output_b.dtype)
+
+                loss_b = self.loss(
+                    output_b * mask_b,
+                    target_b * mask_b,
+                )
+
+            else:
+                loss_b = self.loss(
+                    torch.masked_select(output_b, mask_b),
+                    torch.masked_select(target_b, mask_b),
+                )
+
+            loss = loss + loss_b
             true_nb += 1
-        return loss / output.shape[0], np.nan if true_nb == 0 else true_loss / true_nb
+
+        if true_nb == 0:
+            return loss, np.nan
+
+        loss = loss / true_nb
+        return loss, loss.detach().item()
 
 
 class MSE(MaskedLoss):
@@ -144,6 +175,16 @@ class MAE(MaskedLoss):
 
     def __init__(self, reduction: str = "mean") -> None:
         super().__init__(partial(MAE._loss, reduction), False)
+
+
+class ME(MaskedLoss):
+
+    @staticmethod
+    def _loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return (x - y).mean()
+
+    def __init__(self) -> None:
+        super().__init__(ME._loss, False)
 
 
 class MAESaveMap(MAE):
@@ -216,7 +257,7 @@ class LPIPS(MaskedLoss):
 
     @staticmethod
     def _loss(loss_fn_alex, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        dataset_patch = ModelPatch([1, 64, 64])
+        dataset_patch = ModelPatch([1, 320, 320])
         dataset_patch.load(x.shape[2:])
 
         patch_iterator = dataset_patch.disassemble(LPIPS.normalize(x), LPIPS.normalize(y))
@@ -228,7 +269,7 @@ class LPIPS(MaskedLoss):
         ) as batch_iter:
             for _, patch_input in batch_iter:
                 real, fake = LPIPS.preprocessing(patch_input[0]), LPIPS.preprocessing(patch_input[1])
-                loss += loss_fn_alex(real, fake).item()
+                loss += loss_fn_alex(real, fake).flatten()[0]
         return loss / dataset_patch.get_size(0)
 
     def __init__(self, model: str = "alex") -> None:
@@ -761,7 +802,8 @@ class IMPACTReg(CriterionWithAttribute):
 
     def __init__(
         self,
-        model_name: str = "SAM2.1/SAM2.1_Small.pt",
+        name: str = "Reg",
+        model_name: str = "TS/M291.pt",
         shape: list[int] = [0, 0],
         in_channels: int = 3,
         loss: str = "torch:nn:L1Loss",
@@ -770,20 +812,20 @@ class IMPACTReg(CriterionWithAttribute):
         super().__init__()
         if model_name is None:
             return
+        self.name = name
         self.in_channels = in_channels
         self.nb_layer = len(weights)
         module, name = get_module(loss, "konfai.metric.measure")
         self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(getattr(module, name))()
+
         self.weights = weights
         self.model_path = hf_hub_download(
             repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
         )  # nosec B615
-
         self.model: torch.nn.Module = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
         self.dim = len(shape)
         self.shape = shape if all(s > 0 for s in shape) else None
         self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
-        self.mode = "bilinear" if len(shape) == 2 else "trilinear"
 
         dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
         try:
@@ -805,52 +847,139 @@ class IMPACTReg(CriterionWithAttribute):
             raise RuntimeError(msg) from e
         self.model = None
 
-    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> torch.Tensor:
-        if self.shape is not None and not all(
-            tensor.shape[-i - 1] == size for i, size in enumerate(reversed(self.shape))
-        ):
-            tensor = torch.nn.functional.interpolate(
-                tensor.float(), mode=self.mode, size=tuple(self.shape), align_corners=False
-            ).type(torch.float32)
+    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> list[torch.Tensor]:
         if tensor.shape[1] != self.in_channels:
             tensor = tensor.repeat(tuple([1, 3] + [1 for _ in range(self.dim)]))
-
-        def mean_attr(key):
-            return sum(float(attr[key]) for attr in attribute) / len(attribute)
 
         return [
             tensor,
             torch.tensor([self.nb_layer]),
-            torch.tensor([mean_attr("ImageMin"), mean_attr("ImageMax"), mean_attr("ImageMean"), mean_attr("ImageStd")]),
+            torch.tensor(
+                [
+                    [
+                        float(attr["ImageMin"]),
+                        float(attr["ImageMean"]),
+                        float(attr["ImageMax"]),
+                        float(attr["ImageStd"]),
+                    ]
+                    for attr in attribute
+                ]
+            ),
         ]
 
+    def get_name(self):
+        return self.name
+
     def _compute(
-        self, output: torch.Tensor, targets: list[torch.Tensor], attributes: list[list[Attribute]]
+        self,
+        output: torch.Tensor,
+        output_attributes: list[Attribute],
+        target: torch.Tensor,
+        target_attributes: list[Attribute],
+        mask: torch.Tensor | None,
     ) -> torch.Tensor:
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
-        self.model.to(output.device)
-        self.model.eval()
-        output = self.preprocessing(output, attributes[0])
-        target = self.preprocessing(targets[0], attributes[1])
-        for i, zipped_output in enumerate(zip(self.model(*output), self.model(*target))):
-            output_feature = zipped_output[0]
-            target_feature = zipped_output[1]
-            loss += self.weights[i] * self.loss(output_feature, target_feature)
-        return loss
+
+        output = self.preprocessing(output, output_attributes)
+        target = self.preprocessing(target, target_attributes)
+
+        true_nb = 0
+
+        if self.shape is not None:
+            model_patch = ModelPatch(self.shape)
+            model_patch.load(output[0].shape[2:])
+            for index in range(model_patch.get_size(0)):
+                mask_patch = model_patch.get_data(mask, index, 0, True) if mask is not None else None
+
+                if mask is None or (mask_patch is not None and torch.any(mask_patch == 1)):
+                    for i, zipped_output in enumerate(
+                        zip(
+                            self.model(model_patch.get_data(output[0], index, 0, True), output[1], output[2]),
+                            self.model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
+                        )
+                    ):
+                        if self.weights[i] == 0:
+                            continue
+                        output_feature = zipped_output[0]
+                        target_feature = zipped_output[1]
+                        if mask is not None:
+                            if mask_patch is None:
+                                raise RuntimeError("LPIPS mask patch is unexpectedly missing.")
+                            mask_patch_tensor = cast(torch.Tensor, mask_patch)
+                            mask_index_resampled = (
+                                torch.nn.functional.interpolate(
+                                    mask_patch_tensor.float(), mode="nearest", size=tuple(output_feature.shape[2:])
+                                ).repeat((1, output_feature.shape[1], *([1] * self.dim)))
+                                == 1
+                            )
+                            if torch.any(mask_index_resampled):
+                                loss_value = self.weights[i] * self.loss(
+                                    torch.masked_select(output_feature, mask_index_resampled).float(),
+                                    torch.masked_select(target_feature, mask_index_resampled).float(),
+                                )
+                                if loss_value.isnan():
+                                    continue
+                                loss += loss_value
+                            else:
+                                continue
+                        else:
+                            loss_value = self.weights[i] * self.loss(output_feature.float(), target_feature.float())
+                            if loss_value.isnan():
+                                continue
+                            loss += loss_value
+                    true_nb += 1
+        else:
+            if mask is None or torch.any(mask == 1):
+                for i, zipped_output in enumerate(zip(self.model(*output), self.model(*target))):
+                    if self.weights[i] == 0:
+                        continue
+                    output_feature = zipped_output[0]
+                    target_feature = zipped_output[1]
+                    if mask is not None:
+                        mask_index_resampled = (
+                            torch.nn.functional.interpolate(
+                                mask.float(), mode="nearest", size=tuple(output_feature.shape[2:])
+                            ).repeat((1, output_feature.shape[1], *([1] * self.dim)))
+                            == 1
+                        )
+                        if torch.any(mask_index_resampled):
+                            loss += self.weights[i] * self.loss(
+                                torch.masked_select(output_feature, mask_index_resampled).float(),
+                                torch.masked_select(target_feature, mask_index_resampled).float(),
+                            )
+                        else:
+                            true_nb -= 1
+                    else:
+                        loss += self.weights[i] * self.loss(output_feature.float(), target_feature.float())
+                true_nb += 1
+        return loss, true_nb
 
     def forward(  # type: ignore[override]
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, float]:
+        mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
+
         if self.model is None:
             self.model = torch.jit.load(self.model_path)  # nosec B614
+        self.model.to(output.device)
+        self.model.eval()
+
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and self.dim == 2:
+            true_nb = 0
             for i in range(output.shape[2]):
-                loss += self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets], attributes)
-            loss /= output.shape[2]
+                loss_tmp, true_nb_tmp = self._compute(
+                    output[:, :, i, ...],
+                    attributes[0],
+                    targets[0][:, :, i, ...],
+                    attributes[1],
+                    mask[:, :, i, ...] if mask is not None else None,
+                )
+                loss += loss_tmp
+                true_nb += true_nb_tmp
         else:
-            loss = self._compute(output, list(targets), attributes)
-        return loss.to(output.device)
+            loss, true_nb = self._compute(output, attributes[0], targets[0], attributes[1], mask)
+        return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
 
 
 class IMPACTSynth(CriterionWithAttribute):
@@ -860,51 +989,20 @@ class IMPACTSynth(CriterionWithAttribute):
         def __init__(self, weights: list[float] = [0, 1]) -> None:
             self.weights = weights
 
-    def __init__(
-        self,
-        model_name: str,
-        shape: list[int] = [0, 0],
-        in_channels: int = 1,
-        losses: dict[str, Weights] = {"torch:nn:L1Loss": Weights([0, 1]), "Gram": Weights([0, 1])},
-    ) -> None:
-        super().__init__()
-        if model_name is None:
-            return
-        self.in_channels = in_channels
-        lengths = {len(w.weights) for w in losses.values()}
-        if len(lengths) != 1:
-            raise ValueError(f"Inconsistent number of weights across losses: {lengths}")
-        self.nb_layer = lengths.pop()
-        self.weighted_losses = {}
-        for loss, weights in losses.items():
-            module, name = get_module(loss, "konfai.metric.measure")
-            self.weighted_losses[
-                apply_config(".".join(os.environ["KONFAI_CONFIG_PATH"].split(".")[0:-1]) + "." + loss)(
-                    getattr(module, name)
-                )()
-            ] = weights.weights
-        self.model_path = hf_hub_download(
-            repo_id="VBoussot/impact-torchscript-models", filename=model_name, repo_type="model", revision=None
-        )  # nosec B615
+    def _test_model(self, model_path_content: str, in_channels: int, shape: list[int], weights: list[float]):
+        model: torch.nn.Module = torch.jit.load(model_path_content, map_location=torch.device("cpu"))  # nosec B614
 
-        self.model: torch.nn.Module = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
-        self.dim = len(shape)
-        self.shape = shape if all(s > 0 for s in shape) else None
-        self.modules_loss: dict[str, dict[torch.nn.Module, float]] = {}
-        self.mode = "bilinear" if len(shape) == 2 else "trilinear"
-
-        dummy_input = torch.zeros((1, self.in_channels, *(self.shape if self.shape else [224] * self.dim))).to(0)
+        dummy_input = torch.zeros((1, in_channels, *shape)).to(0)
         try:
-            out = self.model.to(0)(dummy_input, torch.tensor([self.nb_layer]))
+            out = model.to(0)(dummy_input, torch.tensor([len(weights)]))
             if not isinstance(out, (list, tuple)):
                 raise TypeError(f"Expected model output to be a list or tuple, but got {type(out)}.")
-            for name, weights in losses.items():
-                if len(weights.weights) != len(out):
-                    raise ValueError(
-                        f"Loss '{name}': mismatch between the number of weights "
-                        f"({len(weights.weights)}) and the number of model outputs "
-                        f"({len(out)}). Each output must have a corresponding weight."
-                    )
+            if len(weights) != len(out):
+                raise ValueError(
+                    f"Loss '{model_path_content}': mismatch between the number of weights "
+                    f"({len(weights)}) and the number of model outputs "
+                    f"({len(out)}). Each output must have a corresponding weight."
+                )
         except Exception as e:
             msg = (
                 f"[Model Sanity Check Failed]\n"
@@ -912,20 +1010,61 @@ class IMPACTSynth(CriterionWithAttribute):
                 f"Error: {type(e).__name__}: {e}"
             )
             raise RuntimeError(msg) from e
-        self.model = None
 
-    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> torch.Tensor:
-        if self.shape is not None and not all(
-            tensor.shape[-i - 1] == size for i, size in enumerate(reversed(self.shape[2:]))
-        ):
-            tensor = torch.nn.functional.interpolate(
-                tensor, mode=self.mode, size=tuple(self.shape), align_corners=False
-            ).type(torch.float32)
-        if tensor.shape[1] != self.in_channels:
-            tensor = tensor.repeat(tuple([1, 3] + [1 for _ in range(self.dim)]))
+    def __init__(
+        self,
+        model_content_name: str,
+        model_style_name: str,
+        shape_content: list[int] = [0, 0],
+        shape_style: list[int] = [0, 0],
+        in_channels_content: int = 1,
+        in_channels_style: int = 1,
+        weights_criterion_content: list[float] = [0, 0, 1],
+        weights_criterion_style: list[float] = [1, 1, 1],
+    ) -> None:
+        super().__init__()
+        if model_content_name is None:
+            return
+        self.in_channels_content = in_channels_content
+        self.in_channels_style = in_channels_style
 
-        def mean_attr(key):
-            return sum(float(attr[key]) for attr in attribute) / len(attribute)
+        self.weights_criterion_content = weights_criterion_content
+        self.weights_criterion_style = weights_criterion_style
+
+        self.loss_content_function = torch.nn.MSELoss()
+        self.loss_style_function = Gram()
+
+        self.model_path_content = hf_hub_download(
+            repo_id="VBoussot/impact-torchscript-models", filename=model_content_name, repo_type="model", revision=None
+        )  # nosec B615
+
+        self.model_path_style = hf_hub_download(
+            repo_id="VBoussot/impact-torchscript-models", filename=model_style_name, repo_type="model", revision=None
+        )  # nosec B615
+
+        self.shape_content = shape_content if all(s > 0 for s in shape_content) else None
+        self.shape_style = shape_style if all(s > 0 for s in shape_style) else None
+
+        self._test_model(
+            self.model_path_content,
+            self.in_channels_content,
+            self.shape_content if self.shape_content else [224] * len(shape_content),
+            weights_criterion_content,
+        )
+        self._test_model(
+            self.model_path_style,
+            self.in_channels_style,
+            self.shape_style if self.shape_style else [224] * len(shape_style),
+            weights_criterion_style,
+        )
+        self.model_content: torch.nn.Module | None = None
+        self.model_style: torch.nn.Module | None = None
+
+    def _preprocessing(
+        self, tensor: torch.Tensor, in_channels: int, nb_layer: int, attribute: list[Attribute]
+    ) -> list[torch.Tensor]:
+        if tensor.shape[1] != in_channels:
+            tensor = tensor.repeat(tuple([1, in_channels] + [1 for _ in range(tensor.dim() - 2)]))
 
         if "Mean" in attribute[0] and "Std" in attribute[0]:
             mean_value = torch.tensor([float(a["Mean"]) for a in attribute], device=tensor.device).view(
@@ -943,45 +1082,291 @@ class IMPACTSynth(CriterionWithAttribute):
                 -1, *([1] * (tensor.dim() - 1))
             )
             tensor = (tensor + 1) / 2 * (max_value - min_value) + min_value
+
         return [
             tensor,
-            torch.tensor([self.nb_layer]),
-            torch.tensor([mean_attr("ImageMin"), mean_attr("ImageMax"), mean_attr("ImageMean"), mean_attr("ImageStd")]),
+            torch.tensor([nb_layer]),
+            torch.tensor(
+                [
+                    [
+                        float(attr["ImageMin"]),
+                        float(attr["ImageMean"]),
+                        float(attr["ImageMax"]),
+                        float(attr["ImageStd"]),
+                    ]
+                    for attr in attribute
+                ]
+            ),
         ]
 
-    def _compute(
-        self, output: torch.Tensor, targets: list[torch.Tensor], attributes: list[list[Attribute]]
-    ) -> torch.Tensor:
-        loss = torch.zeros(1, device=output.device, dtype=torch.float32)
+    def _loss_compute(
+        self,
+        tensor: list[torch.Tensor],
+        target: list[torch.Tensor],
+        weights: list[float],
+        shape: list[int] | None,
+        mask: torch.Tensor | None,
+        model: torch.nn.Module,
+        loss_function: torch.nn.Module,
+    ) -> tuple[torch.Tensor, int]:
+        loss = torch.zeros((1), requires_grad=True).to(tensor[0].device, non_blocking=False).type(torch.float32)
+        true_nb = 0
+        if shape is not None:
+            model_patch = ModelPatch(shape)
+            model_patch.load(tensor[0].shape[2:])
+            for index in range(model_patch.get_size(0)):
+                mask_patch = model_patch.get_data(mask, index, 0, True) if mask is not None else None
 
-        output = self.preprocessing(output, attributes[-1])
-        targets = [self.preprocessing(target, attribute) for target, attribute in zip(targets, attributes)]
-        for i, zipped_output in enumerate(zip(self.model(*output), *[self.model(*target) for target in targets])):
-            output_feature = zipped_output[0]
-
-            targets_features = zipped_output[1:]
-            for target_feature, (sub_loss, weights) in zip(targets_features, self.weighted_losses.items()):
-                loss = loss + weights[i] * sub_loss(output_feature, target_feature)
-        return loss
+                if mask is None or (mask_patch is not None and torch.any(mask_patch == 1)):
+                    for output_feature, target_feature, weight in zip(
+                        model(model_patch.get_data(tensor[0], index, 0, True), tensor[1], tensor[2]),
+                        model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
+                        weights,
+                    ):
+                        if weight == 0:
+                            continue
+                        if mask is not None:
+                            if mask_patch is None:
+                                raise RuntimeError("IMPACTSynth mask patch is unexpectedly missing.")
+                            mask_patch_tensor = cast(torch.Tensor, mask_patch)
+                            mask_index_resampled = (
+                                torch.nn.functional.interpolate(
+                                    mask_patch_tensor.float(), mode="nearest", size=tuple(output_feature.shape[2:])
+                                ).repeat((1, output_feature.shape[1], *([1] * (mask_patch_tensor.dim() - 2))))
+                                == 1
+                            )
+                            if torch.any(mask_index_resampled):
+                                loss += weight * loss_function(
+                                    torch.masked_select(output_feature, mask_index_resampled).float(),
+                                    torch.masked_select(target_feature, mask_index_resampled).float(),
+                                )
+                            else:
+                                true_nb -= 1
+                        else:
+                            loss += weight * loss_function(output_feature.float(), target_feature.float())
+                    true_nb += 1
+        else:
+            if mask is None or torch.any(mask == 1):
+                for output_feature, target_feature, weight in zip(model(*tensor), model(*target), weights):
+                    if weight == 0:
+                        continue
+                    if mask is not None:
+                        mask_index_resampled = (
+                            torch.nn.functional.interpolate(
+                                mask.float(), mode="nearest", size=tuple(output_feature.shape[2:])
+                            ).repeat((1, output_feature.shape[1], *([1] * (mask.dim() - 2))))
+                            == 1
+                        )
+                        if torch.any(mask_index_resampled):
+                            loss += weight * loss_function(
+                                torch.masked_select(output_feature, mask_index_resampled).float(),
+                                torch.masked_select(target_feature, mask_index_resampled).float(),
+                            )
+                        else:
+                            true_nb -= 1
+                    else:
+                        loss += weight * loss_function(output_feature.float(), target_feature.float())
+                true_nb += 1
+        return loss, true_nb
 
     def forward(  # type: ignore[override]
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    ) -> tuple[torch.Tensor, float]:
+        if len(targets) < 2:
+            raise ValueError("At least two target tensors are required.")
+
+        if self.model_content is None:
+            self.model_content = torch.jit.load(self.model_path_content, map_location=torch.device("cpu"))  # nosec B614
+            self.model_content.eval()
+        if self.model_style is None:
+            self.model_style = torch.jit.load(self.model_path_style, map_location=torch.device("cpu"))  # nosec B614
+            self.model_style.eval()
+        model_content = self.model_content
+        model_style = self.model_style
+        if model_content is None or model_style is None:
+            raise RuntimeError("IMPACTSynth models were not initialized correctly.")
+        model_content.to(output.device)
+        model_style.to(output.device)
+
+        output_content = self._preprocessing(
+            output, self.in_channels_content, len(self.weights_criterion_content), attributes[0]
+        )
+        output_style = self._preprocessing(
+            output, self.in_channels_style, len(self.weights_criterion_style), attributes[2]
+        )
+
+        target_content = self._preprocessing(
+            targets[0], self.in_channels_content, len(self.weights_criterion_content), attributes[1]
+        )
+        target_style = self._preprocessing(
+            targets[1], self.in_channels_style, len(self.weights_criterion_style), attributes[2]
+        )
+
+        mask = targets[2] if len(targets) == 3 and targets[2].dtype == torch.uint8 else None
+
+        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
+        if len(output.shape) == 5 and len(self.weights_criterion_content) == 2:
+            true_nb = 0
+            for i in range(output.shape[2]):
+                loss_content, true_nb_content = self._loss_compute(
+                    self._preprocessing(
+                        output[:, :, i, ...],
+                        self.in_channels_content,
+                        len(self.weights_criterion_content),
+                        attributes[0],
+                    ),
+                    target_content,
+                    self.weights_criterion_content,
+                    self.shape_content,
+                    mask[:, :, i, ...] if mask is not None else None,
+                    model=model_content,
+                    loss_function=self.loss_content_function,
+                )
+                loss += loss_content
+                true_nb += true_nb_content
+        else:
+            loss_content, true_nb_content = self._loss_compute(
+                output_content,
+                target_content,
+                self.weights_criterion_content,
+                self.shape_content,
+                mask if mask is not None else None,
+                model=model_content,
+                loss_function=self.loss_content_function,
+            )
+            loss = loss_content
+            true_nb = true_nb_content
+
+        if len(output.shape) == 5 and len(self.weights_criterion_style) == 2:
+            true_nb = 0
+            for i in range(output.shape[2]):
+                loss_style, true_nb_style = self._loss_compute(
+                    self._preprocessing(
+                        output[:, :, i, ...], self.in_channels_style, len(self.weights_criterion_style), attributes[2]
+                    ),
+                    target_style,
+                    self.weights_criterion_style,
+                    self.shape_style,
+                    mask[:, :, i, ...] if mask is not None else None,
+                    model=model_style,
+                    loss_function=self.loss_style_function,
+                )
+                loss += loss_style
+                true_nb += true_nb_style
+        else:
+            loss_style, true_nb_style = self._loss_compute(
+                output_style,
+                target_style,
+                self.weights_criterion_style,
+                self.shape_style,
+                mask if mask is not None else None,
+                model=model_style,
+                loss_function=self.loss_style_function,
+            )
+            loss += loss_style
+            true_nb += true_nb_style
+        return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
+
+
+class SAM_Perceptual(CriterionWithAttribute):  # noqa: N801
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model: torch.nn.Module | None = None
+        self.loss = torch.nn.L1Loss()
+        self.model_path = hf_hub_download(
+            repo_id="VBoussot/ImpactSynth", filename="SAM2.1_Small.pt", repo_type="model", revision=None
+        )  # nosec B615
+
+    def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> list[torch.Tensor]:
+        tensor = tensor.repeat(1, 3, 1, 1)
+        return [
+            tensor,
+            torch.tensor([4]),
+            torch.tensor(
+                [
+                    [
+                        float(attr["ImageMin"]),
+                        float(attr["ImageMean"]),
+                        float(attr["ImageMax"]),
+                        float(attr["ImageStd"]),
+                    ]
+                    for attr in attribute
+                ]
+            ),
+        ]
+
+    def _compute(
+        self, output: torch.Tensor, target: torch.Tensor, target_attributes: list[Attribute], mask: torch.Tensor | None
     ) -> torch.Tensor:
+        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
+        model = self.model
+        if model is None:
+            raise RuntimeError("SAM perceptual model is not initialized.")
+
+        output = self.preprocessing(output, target_attributes)
+        target = self.preprocessing(target, target_attributes)
+        true_nb = 0
+        model_patch = ModelPatch([512, 512])
+        model_patch.load(output[0].shape[2:])
+        for index in range(model_patch.get_size(0)):
+            mask_patch = model_patch.get_data(mask, index, 0, True) if mask is not None else None
+
+            if mask is None or (mask_patch is not None and torch.any(mask_patch == 1)):
+                for zipped_output in zip(
+                    model(model_patch.get_data(output[0], index, 0, True), output[1], output[2]),
+                    model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
+                ):
+                    output_feature = zipped_output[0]
+                    target_feature = zipped_output[1]
+                    if mask_patch is not None:
+                        mask_patch_tensor = cast(torch.Tensor, mask_patch)
+                        mask_index_resampled = (
+                            torch.nn.functional.interpolate(
+                                mask_patch_tensor.float(), mode="nearest", size=tuple(output_feature.shape[2:])
+                            ).repeat((1, output_feature.shape[1], 1, 1))
+                            == 1
+                        )
+                        if torch.any(mask_index_resampled):
+                            loss += self.loss(
+                                torch.masked_select(output_feature, mask_index_resampled).float(),
+                                torch.masked_select(target_feature, mask_index_resampled).float(),
+                            )
+                        else:
+                            continue
+                    else:
+                        loss += self.loss(output_feature.float(), target_feature.float())
+                true_nb += 1
+        return loss, true_nb
+
+    def forward(  # type: ignore[override]
+        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    ) -> tuple[torch.Tensor, float]:
+        mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
+
         if self.model is None:
             self.model = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
-        print(output.device)
+        model = self.model
+        if model is None:
+            raise RuntimeError("SAM perceptual model failed to load.")
+        model.eval()
+        model.to(output.device)
 
-        self.model = self.model.to(output.device)
-        self.model = self.model.eval()
-        loss = torch.zeros(1, device=output.device, dtype=torch.float32)
-
-        if len(output.shape) == 5 and self.dim == 2:
+        loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
+        if len(output.shape) == 5:
+            true_nb = 0
             for i in range(output.shape[2]):
-                loss = loss + self._compute(output[:, :, i, ...], [t[:, :, i, ...] for t in targets], attributes)
-            loss = loss / output.shape[2]
+                loss_tmp, true_nb_tmp = self._compute(
+                    output[:, :, i, ...],
+                    targets[0][:, :, i, ...],
+                    attributes[1],
+                    mask[:, :, i, ...] if mask is not None else None,
+                )
+                loss += loss_tmp
+                true_nb += true_nb_tmp
         else:
-            loss = self._compute(output, list(targets), attributes)
-        return loss.to(output.device)
+            loss, true_nb = self._compute(output, targets[0], attributes[1], mask)
+        return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
 
 
 class Variance(Criterion):

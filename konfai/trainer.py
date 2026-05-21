@@ -164,6 +164,7 @@ class _Trainer:
         epoch: int,
         autocast: bool,
         it_validation: int | None,
+        it_lr_update: int | None,
         it: int,
         model: Model,
         model_ema: AveragedModel,
@@ -186,6 +187,7 @@ class _Trainer:
         self.early_stopping = EarlyStoppingBase() if early_stopping is None else early_stopping
 
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
+        self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
         self.it = it
         self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self.data_log: dict[str, tuple[DataLog, int]] = {}
@@ -254,17 +256,19 @@ class _Trainer:
             for _, batch_sample in batch_iter:
                 with torch.amp.autocast("cuda", enabled=self.autocast):
                     self.model(batch_sample)
-                    self.model.module.backward(self.model.module)
+                    self.model.module.backward(self.model)
                     if self.model_ema is not None:
                         self.model_ema.update_parameters(self.model)
-                        self.model_ema.module(batch_sample)
                     self.it += 1
+
+                    if (self.it) % self.it_lr_update == 0:
+                        self.model.module.update_lr()
+
                     if (self.it) % self.it_validation == 0:
                         loss = self._train_log(batch_sample)
 
                         if self.dataloader_validation is not None:
                             loss = self._validate()
-                        self.model.module.update_lr()
                         score = self.early_stopping.get_score(loss)
                         self.checkpoint_save(score)
                         if self.early_stopping(score):
@@ -449,7 +453,7 @@ class _Trainer:
 
                     if len(images_log):
                         for name, layer, _ in model.get_layers(
-                            [v.tensor.to(0) for v in batch_sample.values() if v.is_input],
+                            [v.tensor for v in batch_sample.values() if v.is_input],
                             images_log,
                         ):
                             self.data_log[name][0](
@@ -507,6 +511,7 @@ class Trainer(DistributedObject):
         manual_seed (int | None): Random seed.
         epochs (int): Number of epochs to run.
         it_validation (int | None): Validation interval.
+        it_lr_update (int | None): Learning rate update interval.
         autocast (bool): Enable AMP training.
         gradient_checkpoints (list[str] | None): Modules to use gradient checkpointing on.
         gpu_checkpoints (list[str] | None): Modules to pin on specific GPUs.
@@ -524,6 +529,7 @@ class Trainer(DistributedObject):
         manual_seed: int | None = None,
         epochs: int = 100,
         it_validation: int | None = None,
+        it_lr_update: int | None = None,
         autocast: bool = False,
         gradient_checkpoints: list[str] | None = None,
         gpu_checkpoints: list[str] | None = None,
@@ -543,6 +549,7 @@ class Trainer(DistributedObject):
         self.early_stopping = early_stopping
         self.it = 0
         self.it_validation = it_validation
+        self.it_lr_update = it_lr_update
         self.model = model.get_model(train=True)
         self.ema_decay = ema_decay
         self.model_ema: torch.optim.swa_utils.AveragedModel | None = None
@@ -687,7 +694,13 @@ class Trainer(DistributedObject):
             dataloaders (list[DataLoader]): Training and validation dataloaders.
         """
         model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
-        model = DDP(model, static_graph=True) if dist.is_initialized() else Model(model)
+        if dist.is_initialized():
+            ddp_kwargs: dict[str, object] = {"static_graph": True}
+            if len(cuda_visible_devices()) and self.size == 1:
+                ddp_kwargs.update({"device_ids": [local_rank], "output_device": local_rank})
+            model = DDP(model, **ddp_kwargs)
+        else:
+            model = Model(model)
         if self.model_ema is not None:
             self.model_ema.module = Network.to(self.model_ema.module, local_rank * self.size)
         with _Trainer(
@@ -703,6 +716,7 @@ class Trainer(DistributedObject):
             self.epoch,
             self.autocast,
             self.it_validation,
+            self.it_lr_update,
             self.it,
             model,
             self.model_ema,

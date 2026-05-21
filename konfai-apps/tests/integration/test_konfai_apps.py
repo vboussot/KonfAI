@@ -1,13 +1,19 @@
+import importlib.util
 import json
-import math
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
-ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
+WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"
+SimpleITK = pytest.importorskip("SimpleITK")
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -24,101 +30,223 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def read_json(path: Path) -> dict:
+def _write_image(path: Path, array: np.ndarray, pixel_id: int) -> None:
+    image = SimpleITK.GetImageFromArray(array)
+    image.SetSpacing((1.0, 1.0, 1.0))
+    image = SimpleITK.Cast(image, pixel_id)
+    SimpleITK.WriteImage(image, str(path))
+
+
+def _read_json(path: Path) -> dict:
     if not path.exists():
         raise AssertionError(f"Expected JSON file does not exist: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise AssertionError(f"Invalid JSON in file: {path}\n{exc}") from exc
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def assert_exists(path: Path, *, context: str) -> None:
-    if not path.exists():
-        raise AssertionError(f"{context}: expected path does not exist: {path}")
+def _single_case_metric(path: Path, *, expected_metric_suffix: str) -> float:
+    data = _read_json(path)
+    assert "case" in data and len(data["case"]) == 1, path
+    metric_name, case_values = next(iter(data["case"].items()))
+    assert metric_name.endswith(expected_metric_suffix), metric_name
+    assert case_values.keys() == {"P000"}
+    value = float(case_values["P000"])
+    assert np.isfinite(value), metric_name
+    return value
 
 
-def assert_non_empty_glob(root: Path, pattern: str, *, context: str) -> list[Path]:
-    matches = sorted(root.rglob(pattern))
-    if not matches:
-        raise AssertionError(f"{context}: no match for pattern {pattern!r} under {root}")
-    return matches
+def _write_local_synthesis_app(app_dir: Path) -> None:
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Tiny Synth",
+                "description": "Tiny local synthesis app for integration testing",
+                "short_description": "Tiny synth",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["tiny_0.pt", "tiny_1.pt"],
+                "inputs": {
+                    "Volume_0": {
+                        "display_name": "MR",
+                        "volume_type": "VOLUME",
+                        "required": True,
+                    }
+                },
+                "outputs": {
+                    "sCT": {
+                        "display_name": "sCT",
+                        "volume_type": "VOLUME",
+                        "required": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_dir / "Prediction.yml").write_text(
+        textwrap.dedent(
+            """
+            Predictor:
+              Model:
+                classpath: TinySynth:TinySynthNet
+                TinySynthNet:
+                  outputs_criterions: None
+              Dataset:
+                groups_src:
+                  Volume_0:
+                    groups_dest:
+                      MR:
+                        transforms: None
+                        patch_transforms: None
+                        is_input: true
+                augmentations: None
+                Patch:
+                  patch_size: [1, 16, 16]
+                  overlap: None
+                  mask: None
+                  pad_value: 0
+                  extend_slice: 0
+                subset: None
+                filter: None
+                dataset_filenames:
+                  - ./Dataset:a:mha
+                use_cache: false
+                batch_size: 16
+              outputs_dataset:
+                Head:Tanh:
+                  OutputDataset:
+                    name_class: OutSameAsGroupDataset
+                    before_reduction_transforms: None
+                    after_reduction_transforms:
+                      InferenceStack:
+                        dataset: Predictions/TinyApp/Output:mha
+                        name: InferenceStack
+                        mode: mean
+                    final_transforms:
+                      TensorCast:
+                        dtype: float32
+                        inverse: false
+                    dataset_filename: Dataset:mha
+                    group: sCT
+                    same_as_group: Volume_0:MR
+                    patch_combine: None
+                    inverse_transform: false
+                    reduction: Mean
+                    Mean: {}
+              train_name: TinyApp
+              manual_seed: 0
+              gpu_checkpoints: None
+              autocast: false
+              combine: Concat
+              data_log: None
+              Concat: {}
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (app_dir / "Evaluation.yml").write_text(
+        textwrap.dedent(
+            """
+            Evaluator:
+              metrics:
+                Output:
+                  targets_criterions:
+                    Reference;Mask:
+                      criterions_loader:
+                        MAE:
+                          reduction: mean
+              Dataset:
+                groups_src:
+                  Mask_0:
+                    groups_dest:
+                      Mask:
+                        transforms: None
+                  Volume_0:
+                    groups_dest:
+                      Output:
+                        transforms: None
+                  Reference_0:
+                    groups_dest:
+                      Reference:
+                        transforms: None
+                subset: None
+                dataset_filenames:
+                  - ./Dataset:a:mha
+                validation: None
+              train_name: TinyApp
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (app_dir / "Uncertainty.yml").write_text(
+        textwrap.dedent(
+            """
+            Evaluator:
+              metrics:
+                Uncertainty:
+                  targets_criterions:
+                    None:
+                      criterions_loader:
+                        Mean:
+                          name: Uncertainty
+              Dataset:
+                groups_src:
+                  Volume_0:
+                    groups_dest:
+                      Uncertainty:
+                        transforms:
+                          Variance: {}
+                          Save:
+                            dataset: ./Uncertainties/TinyApp/Output:mha
+                            group: None
+                subset: None
+                dataset_filenames:
+                  - ./Dataset:mha
+                validation: None
+              train_name: TinyApp
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (app_dir / "TinySynth.py").write_text(
+        (WORKFLOW_ASSETS_DIR / "TinySynth.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    spec = importlib.util.spec_from_file_location("TinySynth", app_dir / "TinySynth.py")
+    if spec is None or spec.loader is None:
+        raise AssertionError("Failed to load TinySynth test module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    model = module.TinySynthNet()
+    with torch.no_grad():
+        model.Projection.weight.fill_(1.0)
+        model.Projection.bias.zero_()
+
+    checkpoint = {"Model": model.state_dict()}
+    torch.save(checkpoint, app_dir / "tiny_0.pt")
+    torch.save(checkpoint, app_dir / "tiny_1.pt")
 
 
-def extract_case_metrics(data: dict, *, context: str) -> dict[str, float]:
-    """
-    Returns {metric_key: single_value} from:
-      data["case"][metric_key] == {"P000": value}  (or potentially multiple cases)
-    We enforce that each metric contains exactly 1 case value for this test.
-    """
-    if "case" not in data or not isinstance(data["case"], dict):
-        raise AssertionError(f"{context}: JSON does not contain a 'case' dict.")
+def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None:
+    app_dir = tmp_path / "TinySynthesisApp"
+    _write_local_synthesis_app(app_dir)
 
-    out: dict[str, float] = {}
-    for metric_key, case_map in data["case"].items():
-        if not isinstance(case_map, dict) or len(case_map) == 0:
-            raise AssertionError(f"{context}: metric '{metric_key}' has no case values.")
-        if len(case_map) != 1:
-            raise AssertionError(
-                f"{context}: metric '{metric_key}' has {len(case_map)} case values, " "but this test expects exactly 1."
-            )
+    input_array = np.linspace(-0.8, 0.8, 16 * 16, dtype=np.float32).reshape(1, 16, 16)
+    expected_output = np.tanh(input_array).astype(np.float32)
+    mask_array = np.ones_like(input_array, dtype=np.uint8)
 
-        value = next(iter(case_map.values()))
-        if not isinstance(value, (int, float)):
-            raise AssertionError(f"{context}: metric '{metric_key}' value is not numeric: {value!r}")
-        out[metric_key] = float(value)
+    input_path = tmp_path / "input.mha"
+    gt_path = tmp_path / "gt.mha"
+    mask_path = tmp_path / "mask.mha"
+    _write_image(input_path, input_array, SimpleITK.sitkFloat32)
+    _write_image(gt_path, expected_output, SimpleITK.sitkFloat32)
+    _write_image(mask_path, mask_array, SimpleITK.sitkUInt8)
 
-    return out
-
-
-def assert_metrics_close(
-    baseline: dict[str, float],
-    output: dict[str, float],
-    *,
-    name: str,
-    rel_tol: float = 1e-6,
-    abs_tol: float = 1e-8,
-) -> None:
-    base_keys = set(baseline.keys())
-    out_keys = set(output.keys())
-
-    missing = sorted(base_keys - out_keys)
-    extra = sorted(out_keys - base_keys)
-
-    if missing or extra:
-        msg = [f"{name}: metric keys mismatch."]
-        if missing:
-            msg.append(f"Missing keys ({len(missing)}): {missing}")
-        if extra:
-            msg.append(f"Extra keys ({len(extra)}): {extra}")
-        raise AssertionError("\n".join(msg))
-
-    diffs: list[str] = []
-    for k in sorted(base_keys):
-        b = baseline[k]
-        o = output[k]
-        if not math.isclose(o, b, rel_tol=rel_tol, abs_tol=abs_tol):
-            diffs.append(f"- {k}: baseline={b:.12g}, output={o:.12g}, diff={o-b:.12g}")
-
-    if diffs:
-        raise AssertionError(f"{name}: values differ (rel_tol={rel_tol}, abs_tol={abs_tol}).\n" + "\n".join(diffs))
-
-
-def test_konfai_apps_infer(tmp_path: Path):
-    dataset_dir = ASSETS_DIR / "Dataset" / "P001"
-    eval_base_path = ASSETS_DIR / "Baselines" / "Evaluation.json"
-    unc_base_path = ASSETS_DIR / "Baselines" / "Uncertainties.json"
-    predictions_dir = tmp_path / "Predictions"
-    evaluations_dir = tmp_path / "Evaluations"
-    uncertainties_dir = tmp_path / "Uncertainties"
-
-    eval_baseline_data = read_json(eval_base_path)
-    unc_baseline_data = read_json(unc_base_path)
-
-    eval_baseline = extract_case_metrics(eval_baseline_data, context="Baseline Evaluation")
-    unc_baseline = extract_case_metrics(unc_baseline_data, context="Baseline Uncertainties")
-
-    # --- Run pipeline
     cmd = [
         sys.executable,
         "-c",
@@ -128,15 +256,15 @@ def test_konfai_apps_infer(tmp_path: Path):
             "from konfai_apps.cli import main_apps; main_apps()"
         ),
         "pipeline",
-        "VBoussot/ImpactSynth:CBCT",
+        str(app_dir),
         "-i",
-        str(dataset_dir / "CBCT.mha"),
+        str(input_path),
         "-o",
         str(tmp_path),
         "--gt",
-        str(dataset_dir / "CT.mha"),
+        str(gt_path),
         "--mask",
-        str(dataset_dir / "MASK.mha"),
+        str(mask_path),
         "--ensemble",
         "2",
         "--tta",
@@ -144,31 +272,35 @@ def test_konfai_apps_infer(tmp_path: Path):
         "--mc",
         "0",
         "-uncertainty",
+        "--cpu",
+        "1",
     ]
 
-    p = run(cmd)
-    assert p.returncode == 0, (
-        "The 'konfai-apps pipeline' command failed.\n\n"
+    result = run(cmd)
+    assert result.returncode == 0, (
+        "The local 'konfai-apps pipeline' command failed.\n\n"
         f"CMD: {' '.join(cmd)}\n\n"
-        f"STDOUT:\n{p.stdout}\n\n"
-        f"STDERR:\n{p.stderr}"
+        f"STDOUT:\n{result.stdout}\n\n"
+        f"STDERR:\n{result.stderr}"
     )
 
-    assert_exists(predictions_dir, context="Pipeline output")
-    assert_exists(evaluations_dir, context="Pipeline output")
-    assert_exists(uncertainties_dir, context="Pipeline output")
-    assert_non_empty_glob(predictions_dir, "*.mha", context="Predictions")
-    assert_non_empty_glob(uncertainties_dir, "*.mha", context="Uncertainties")
+    predicted_path = tmp_path / "Predictions" / "TinyApp" / "Dataset" / "P000" / "sCT.mha"
+    inference_stack_path = tmp_path / "Predictions" / "TinyApp" / "Output" / "P000" / "InferenceStack.mha"
+    evaluation_path = tmp_path / "Evaluations" / "TinyApp" / "Metric_TRAIN.json"
+    uncertainty_path = tmp_path / "Uncertainties" / "TinyApp" / "Metric_TRAIN.json"
 
-    eval_out_path = evaluations_dir / "ImpactSynth" / "Metric_TRAIN.json"
-    unc_out_path = uncertainties_dir / "ImpactSynth" / "Metric_TRAIN.json"
+    assert predicted_path.exists()
+    assert inference_stack_path.exists()
+    assert evaluation_path.exists()
+    assert uncertainty_path.exists()
 
-    eval_out_data = read_json(eval_out_path)
-    unc_out_data = read_json(unc_out_path)
+    predicted = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(predicted_path)))
+    inference_stack = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(inference_stack_path)))
 
-    eval_out = extract_case_metrics(eval_out_data, context="Output Evaluation")
-    unc_out = extract_case_metrics(unc_out_data, context="Output Uncertainties")
+    np.testing.assert_allclose(predicted, expected_output, atol=3e-4)
+    assert inference_stack.shape == (1, 16, 16, 2)
+    np.testing.assert_allclose(inference_stack[0, :, :, 0], expected_output[0], atol=3e-4)
+    np.testing.assert_allclose(inference_stack[0, :, :, 1], expected_output[0], atol=3e-4)
 
-    # --- Compare
-    assert_metrics_close(eval_baseline, eval_out, name="Evaluation", rel_tol=1e-1, abs_tol=1e-1)
-    assert_metrics_close(unc_baseline, unc_out, name="Uncertainties", rel_tol=1e-1, abs_tol=1e-1)
+    assert _single_case_metric(evaluation_path, expected_metric_suffix="MAE") == pytest.approx(0.0, abs=3e-4)
+    assert _single_case_metric(uncertainty_path, expected_metric_suffix="Uncertainty") == pytest.approx(0.0, abs=1e-6)

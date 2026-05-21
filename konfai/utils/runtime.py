@@ -622,45 +622,64 @@ def execute_distributed_object(
     gpu_ids = [] if gpu is None else list(gpu)
     cpu_workers = 1 if cpu is None else cpu
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
-    os.environ["KONFAI_OVERWRITE"] = str(overwrite)
-    os.environ["KONFAI_CONFIG_MODE"] = "Done"
-    if tensorboard:
-        os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    os.environ["KONFAI_VERBOSE"] = str(not quiet)
+    managed_env = [
+        "CUDA_VISIBLE_DEVICES",
+        "KONFAI_OVERWRITE",
+        "KONFAI_CONFIG_MODE",
+        "KONFAI_TENSORBOARD_PORT",
+        "KONFAI_MASTER_PORT",
+        "KONFAI_VERBOSE",
+        "KONFAI_CLUSTER",
+    ]
+    previous_env = {key: os.environ.get(key) for key in managed_env}
 
-    cluster_config = cluster_kwargs
-    if cluster_config is not None:
-        os.environ["KONFAI_OVERWRITE"] = "True"
-        os.environ["KONFAI_CLUSTER"] = "True"
+    try:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
+        os.environ["KONFAI_OVERWRITE"] = str(overwrite)
+        os.environ["KONFAI_CONFIG_MODE"] = "Done"
+        if tensorboard:
+            os.environ["KONFAI_TENSORBOARD_PORT"] = str(find_free_port())
+        if "KONFAI_MASTER_PORT" not in os.environ:
+            os.environ["KONFAI_MASTER_PORT"] = str(find_free_port())
+        os.environ["KONFAI_VERBOSE"] = str(not quiet)
 
-    with distributed_object as configured_object:
-        with Log(configured_object.name, 0):
-            if cluster_config is not None:
-                configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
-                import submitit
+        cluster_config = cluster_kwargs
+        if cluster_config is not None:
+            os.environ["KONFAI_OVERWRITE"] = "True"
+            os.environ["KONFAI_CLUSTER"] = "True"
 
-                executor = submitit.AutoExecutor(folder="./Cluster/")
-                executor.update_parameters(
-                    name=cluster_config["name"],
-                    mem_gb=cluster_config["memory"],
-                    gpus_per_node=len(gpu_ids),
-                    tasks_per_node=len(gpu_ids) // configured_object.size,
-                    cpus_per_task=1,
-                    nodes=cluster_config["num_nodes"],
-                    timeout_min=cluster_config["time_limit"],
-                )
+        with distributed_object as configured_object:
+            with Log(configured_object.name, 0):
+                if cluster_config is not None:
+                    configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
+                    import submitit
+
+                    executor = submitit.AutoExecutor(folder="./Cluster/")
+                    executor.update_parameters(
+                        name=cluster_config["name"],
+                        mem_gb=cluster_config["memory"],
+                        gpus_per_node=len(gpu_ids),
+                        tasks_per_node=len(gpu_ids) // configured_object.size,
+                        cpus_per_task=1,
+                        nodes=cluster_config["num_nodes"],
+                        timeout_min=cluster_config["time_limit"],
+                    )
+                    with TensorBoard(configured_object.name):
+                        executor.submit(configured_object)
+                    return
+
+                world_size = len(gpu_ids)
+                if world_size == 0:
+                    world_size = cpu_workers
+                configured_object.setup(world_size)
                 with TensorBoard(configured_object.name):
-                    executor.submit(configured_object)
-                return
-
-            world_size = len(gpu_ids)
-            if world_size == 0:
-                world_size = cpu_workers
-            configured_object.setup(world_size)
-            with TensorBoard(configured_object.name):
-                mp.spawn(configured_object, nprocs=world_size)
+                    mp.spawn(configured_object, nprocs=world_size)
+    finally:
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def setup_gpu(world_size: int, rank: int | None = None) -> tuple[int | None, int | None]:
@@ -691,7 +710,10 @@ def setup_gpu(world_size: int, rank: int | None = None) -> tuple[int | None, int
     if global_rank >= world_size:
         return None, None
 
-    port = find_free_port()
+    port = os.environ.get("KONFAI_MASTER_PORT")
+    if not port:
+        port = str(find_free_port())
+        os.environ["KONFAI_MASTER_PORT"] = port
     if dist.is_nccl_available() and torch.cuda.is_available() and len(cuda_visible_devices()):
         torch.cuda.empty_cache()
         dist.init_process_group(

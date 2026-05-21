@@ -23,12 +23,11 @@ import shutil
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import tqdm
-from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 
@@ -218,6 +217,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         index_patch: int,
         layer: torch.Tensor,
         dataset: DatasetIter,
+        attribute: Attribute | None = None,
     ):
         raise NotImplementedError()
 
@@ -231,7 +231,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         raise NotImplementedError()
 
     def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
-        super().write(self.group, name, layer.numpy(), self.attributes[index][0][0])
+        super().write(self.group, name, layer.detach().cpu().numpy(), self.attributes[index][0][0])
         self.attributes.pop(index)
 
     def __str__(self) -> str:
@@ -287,12 +287,16 @@ class OutSameAsGroupDataset(OutputDataset):
         index_patch: int,
         layer: torch.Tensor,
         dataset: DatasetIter,
+        attribute: Attribute | None = None,
     ):
         if (
             index_dataset not in self.output_layer_accumulator
             or index_augmentation not in self.output_layer_accumulator[index_dataset]
         ):
             input_dataset = dataset.get_dataset_from_index(self.group_dest, index_dataset)
+            source_attribute = (
+                Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
+            )
             if index_dataset not in self.output_layer_accumulator:
                 self.output_layer_accumulator[index_dataset] = {}
                 self.attributes[index_dataset] = {}
@@ -307,7 +311,7 @@ class OutSameAsGroupDataset(OutputDataset):
             )
 
             for i in range(len(input_dataset.patch.get_patch_slices(index_augmentation))):
-                self.attributes[index_dataset][index_augmentation][i] = Attribute(input_dataset.cache_attributes[0])
+                self.attributes[index_dataset][index_augmentation][i] = Attribute(source_attribute)
 
         for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms):
             if isinstance(transform, TransformInverse) and transform.apply_inverse:
@@ -343,6 +347,9 @@ class OutSameAsGroupDataset(OutputDataset):
                         layer = data_augmentation.inverse(index, index_augmentation_tmp - i, layer)
                     break
                 i += data_augmentations.nb
+
+        if layer.device.type != "cpu":
+            layer = layer.detach().cpu()
 
         base_attr = self.attributes[index][index_augmentation][0]
         if layer.shape[0] == sum(number_of_channels_per_model):
@@ -450,7 +457,7 @@ class _Predictor:
         predict_path (str): Output directory path where predictions and metrics are saved.
         data_log (list[str] | None): List of logging targets in the format 'group/DataLogType/N'.
         outputs_dataset (dict[str, OutputDataset]): Dictionary of output datasets to store predictions.
-        model_composite (DDP): Distributed model container that wraps the prediction model(s).
+        model_composite (Model): Model container that wraps the prediction model(s).
         dataloader_prediction (DataLoader): DataLoader that provides prediction batches.
     """
 
@@ -463,7 +470,7 @@ class _Predictor:
         predict_path: Path,
         data_log: list[str] | None,
         outputs_dataset: dict[str, OutputDataset],
-        model_composite: DDP,
+        model_composite: Model,
         dataloader_prediction: DataLoader,
     ) -> None:
         self.world_size = world_size
@@ -569,8 +576,9 @@ class _Predictor:
                                     index,
                                     patch_augmentation,
                                     patch_index,
-                                    output[i].cpu(),
+                                    output[i],
                                     self.dataset,
+                                    batch_sample[group].attribute[i],
                                 )
                                 if output_dataset.is_done(index):
                                     output_dataset.write_prediction(
@@ -642,7 +650,7 @@ class _Predictor:
                     )
                 if len(images_log):
                     for name, layer, _ in self.model_composite.module.get_layers(
-                        [v.tensor.to(0) for v in batch_sample.values() if v.is_input],
+                        [v.tensor for v in batch_sample.values() if v.is_input],
                         images_log,
                     ):
                         self.data_log[name][0](
@@ -670,7 +678,7 @@ class ModelComposite(Network):
         combine (Reduction): The reduction method used during forward inference.
     """
 
-    def __init__(self, model: Network, nb_models: int, combine: Reduction):
+    def __init__(self, model: Network, combine: Reduction):
         super().__init__(
             model.in_channels,
             model.optimizer,
@@ -683,24 +691,49 @@ class ModelComposite(Network):
             model.dim,
         )
         self.combine = combine
-        for i in range(nb_models):
-            self.add_module(
-                f"Model_{i}",
-                copy.deepcopy(model),
-                in_branch=[0],
-                out_branch=[f"output_{i}"],
-            )
+        self._model_name = "Model_0"
+        self._base_model_name = model.get_name()
+        self._state_sources: list[dict[str, Any] | Path | str] = []
+        self._loaded_state_index: int | None = None
+        self.add_module(
+            self._model_name,
+            copy.deepcopy(model),
+            in_branch=[0],
+            out_branch=["output_0"],
+        )
 
-    def load(self, state_dicts: list[dict[str, dict[str, torch.Tensor]]]):
+    def _get_model(self) -> Network:
+        return cast(Network, self[self._model_name])
+
+    def _read_state_source(self, source: dict[str, Any] | Path | str) -> dict[str, Any]:
+        if isinstance(source, dict):
+            return source
+        if isinstance(source, str) and source.startswith("https://"):
+            return torch.hub.load_state_dict_from_url(url=source, map_location="cpu", check_hash=True)
+        return torch.load(str(source), map_location=torch.device("cpu"), weights_only=False)  # nosec B614
+
+    def _ensure_model_loaded(self, index: int) -> Network:
+        model = self._get_model()
+        if self._loaded_state_index != index:
+            # Checkpoints are keyed by the base model name, not by the streamed
+            # ensemble suffix added after the previous load.
+            model.set_name(self._base_model_name)
+            model.load(self._read_state_source(self._state_sources[index]), init=False)
+            model.set_name(f"{self._base_model_name}_{index}")
+            self._loaded_state_index = index
+        return model
+
+    def load(self, state_sources: list[dict[str, Any] | Path | str]):
         """
         Load weights for each sub-model in the composite from the corresponding state dictionaries.
 
         Args:
-            state_dicts (list): A list of state dictionaries, one for each model replica.
+            state_sources (list): One checkpoint source per model replica.
         """
-        for i, state_dict in enumerate(state_dicts):
-            self[f"Model_{i}"].load(state_dict, init=False)
-            self[f"Model_{i}"].set_name(f"{self[f'Model_{i}'].get_name()}_{i}")
+        self._state_sources = state_sources
+        self._loaded_state_index = None
+        if len(self._state_sources) == 1:
+            self._ensure_model_loaded(0)
 
     @torch.inference_mode()
     def forward(  # type: ignore[override]
@@ -718,13 +751,15 @@ class ModelComposite(Network):
         Returns:
             list[tuple[str, torch.Tensor]]: Aggregated output for each layer, after applying the reduction.
         """
-        final_outputs = []
+        final_outputs: list[tuple[str, list[int], torch.Tensor]] = []
+        if not self._state_sources:
+            return final_outputs
         if isinstance(self.combine, Mean):
             sum_acc: dict[str, torch.Tensor] = {}
             count: dict[str, int] = defaultdict(int)
             channels: dict[str, list[int]] = defaultdict(list)
-            for module in self.values():
-                for key, tensor in module(data_dict, output_layers):
+            for model_index in range(len(self._state_sources)):
+                for key, tensor in self._ensure_model_loaded(model_index)(data_dict, output_layers):
                     if tensor.dtype == torch.float32:
                         tensor = tensor.to(torch.float16)
                     channels[key].append(tensor.shape[1])
@@ -737,8 +772,8 @@ class ModelComposite(Network):
                 final_outputs.append((key, channels[key], (acc / count[key])))
         else:
             aggregated = defaultdict(list)
-            for module in self.values():
-                for key, tensor in module(data_dict, output_layers):
+            for model_index in range(len(self._state_sources)):
+                for key, tensor in self._ensure_model_loaded(model_index)(data_dict, output_layers):
                     if tensor.dtype == torch.float32:
                         tensor = tensor.to(torch.float16)
                     aggregated[key].append(tensor)
@@ -884,7 +919,7 @@ class Predictor(DistributedObject):
 
         shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
 
-        self.model_composite = ModelComposite(self.model, len(self.path_to_models), self.combine)
+        self.model_composite = ModelComposite(self.model, self.combine)
         self.model_composite.load(self._load())
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
@@ -894,21 +929,19 @@ class Predictor(DistributedObject):
     def set_models(self, path_to_models: list[Path | str]) -> None:
         self.path_to_models = path_to_models
 
-    def _load(self) -> list[dict[str, dict[str, torch.Tensor]]]:
+    def _load(self) -> list[dict[str, Any] | Path | str]:
         """
-        Load pretrained model weights from configured paths or URLs.
+        Resolve checkpoint sources for ensemble prediction.
 
         This method handles both remote and local model sources:
-        - If the model path is a URL (starting with "https://"), it uses `torch.hub.load_state_dict_from_url`
-        to download and load the state dict.
+        - If the model path is a URL (starting with "https://"), it eagerly downloads and loads the state dict
+          once because re-fetching it every batch would be prohibitively slow.
         - If the model path is local:
-            - It either loads the explicit file or resolves the latest model file in a default directory
-            based on the prediction name.
-        - All loaded state dicts are returned as a list of nested dictionaries mapping module names
-        to parameter tensors.
+            - it keeps only the checkpoint path and lets `ModelComposite` stream weights into a single model
+              instance during prediction to reduce memory pressure.
 
         Returns:
-            list[dict[str, dict[str, torch.Tensor]]]: A list of state dictionaries, one per model.
+            list[dict[str, dict[str, torch.Tensor]] | Path | str]: A list of checkpoint sources, one per model.
 
         Raises:
             Exception: If a model path does not exist or cannot be loaded.
@@ -923,9 +956,7 @@ class Predictor(DistributedObject):
                 except Exception:
                     raise Exception(f"Model : {path_to_model} does not exist !")
             elif Path(path_to_model).exists():
-                state_dicts.append(
-                    torch.load(str(path_to_model), map_location=torch.device("cpu"), weights_only=False)  # nosec B614
-                )  # nosec B614
+                state_dicts.append(Path(path_to_model))
             else:
                 raise ValueError(f"Invalid model path entry: {path_to_model}")
         return state_dicts
@@ -952,12 +983,7 @@ class Predictor(DistributedObject):
             if len(cuda_visible_devices())
             else self.model_composite
         )
-        has_trainable_params = any(p.requires_grad for p in model_composite.parameters())
-        model_composite = (
-            DDP(model_composite, static_graph=True)
-            if dist.is_initialized() and has_trainable_params
-            else Model(model_composite)
-        )
+        model_composite = Model(model_composite)
         with _Predictor(
             world_size,
             global_rank,

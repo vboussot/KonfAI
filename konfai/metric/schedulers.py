@@ -75,3 +75,41 @@ class Warmup(torch.optim.lr_scheduler.LambdaLR):
         verbose="deprecated",
     ):
         super().__init__(optimizer, partial(Warmup.warmup, warmup_steps), last_epoch, verbose)
+
+
+class PolyLRScheduler(torch.optim.lr_scheduler._LRScheduler):
+    def __init__(
+        self,
+        optimizer,
+        initial_lr: float,
+        max_steps: int,
+        exponent: float = 0.9,
+        current_step: int | None = None,
+    ):
+        self.initial_lr = initial_lr
+        self.max_steps = max_steps
+        self.exponent = exponent
+        self.ctr = 0 if current_step is None else current_step
+
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = initial_lr
+            param_group.setdefault("initial_lr", initial_lr)
+
+        super().__init__(optimizer, last_epoch=-1)
+
+    def step(self, current_step=None):
+        if current_step is None:
+            current_step = self.ctr
+            self.ctr += 1
+
+        current_step = min(current_step, self.max_steps)
+
+        new_lr = self.initial_lr * (1 - current_step / self.max_steps) ** self.exponent
+
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = new_lr
+
+        self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
+    def get_last_lr(self):
+        return self._last_lr

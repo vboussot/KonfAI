@@ -20,6 +20,7 @@ import copy
 import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from dataclasses import dataclass
 from functools import partial
 
 import numpy as np
@@ -28,10 +29,20 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 
 from konfai.data.augmentation import DataAugmentationsList
-from konfai.data.transform import Save, Transform
+from konfai.data.transform import Clip, Normalize, Save, Standardize, TensorCast, Transform
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.utils import get_module, get_patch_slices_from_shape
+from konfai.utils.utils import SUPPORTED_EXTENSIONS, get_module, get_patch_slices_from_shape, split_path_spec
+
+
+@dataclass(frozen=True)
+class PatchReadPlan:
+    """Precomputed slicing and padding instructions for one patch request."""
+
+    data_slices: tuple[slice, ...]
+    reflect_padding: tuple[int, ...]
+    constant_padding: tuple[int, ...]
+    concatenate_extend_slice: bool
 
 
 class PathCombine(ABC):
@@ -40,6 +51,7 @@ class PathCombine(ABC):
     def __init__(self) -> None:
         self.data: torch.Tensor
         self.overlap: int
+        self._data_per_device: dict[torch.device, torch.Tensor] = {}
 
     """
     A = slice(0, overlap)
@@ -67,6 +79,7 @@ class PathCombine(ABC):
     """
 
     def set_patch_config(self, patch_size: list[int], overlap: int):
+        self._data_per_device.clear()
         self.data = F.pad(
             torch.ones([size - overlap * 2 for size in patch_size]),
             [overlap] * 2 * len(patch_size),
@@ -98,7 +111,9 @@ class PathCombine(ABC):
         return [d / data_sum for d in patchs]
 
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
-        return self.data.repeat([tensor.shape[0]] + [1] * (len(tensor.shape) - 1)).to(tensor.device) * tensor
+        if tensor.device not in self._data_per_device:
+            self._data_per_device[tensor.device] = self.data.to(tensor.device)
+        return self._data_per_device[tensor.device] * tensor
 
     @abstractmethod
     def _set_function(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
@@ -199,7 +214,7 @@ class Patch(ABC):
         self,
         patch_size: list[int],
         overlap: int | None,
-        pad_value: float = 0,
+        pad_value: float | None = 0,
         extend_slice: int = 0,
     ) -> None:
         if extend_slice != 0 and patch_size is not None and patch_size[0] != 1:
@@ -229,10 +244,10 @@ class Patch(ABC):
     def get_patch_slices(self, a: int = 0):
         return self._patch_slices[a]
 
-    def get_data(self, data: torch.Tensor, index: int, a: int, is_input: bool) -> list[torch.Tensor]:
-        slices_pre = []
-        for max_value in data.shape[: -len(self._patch_slices[a][0])]:
-            slices_pre.append(slice(max_value))
+    def get_read_plan(
+        self, data_shape: list[int] | tuple[int, ...], index: int, a: int, is_input: bool
+    ) -> PatchReadPlan:
+        slices_pre = [slice(None) for _ in data_shape[: -len(self._patch_slices[a][0])]]
         extend_slice = self.extend_slice if is_input else 0
 
         bottom = extend_slice // 2
@@ -245,51 +260,64 @@ class Patch(ABC):
             ),
             (
                 self._patch_slices[a][index][0].stop + top
-                if self._patch_slices[a][index][0].stop + top <= data.shape[len(slices_pre)]
-                else data.shape[len(slices_pre)]
+                if self._patch_slices[a][index][0].stop + top <= data_shape[len(slices_pre)]
+                else data_shape[len(slices_pre)]
             ),
         )
         slices = [s] + list(self._patch_slices[a][index][1:])
-        data_sliced = data[tuple(slices_pre + slices)]
-        if extend_slice > 0 and data_sliced.shape[len(slices_pre)] < bottom + top + 1:
-            pad_bottom = 0
-            pad_top = 0
+        reflect_padding = [0 for _ in range((len(slices) - 1) * 2)] + [0, 0]
+        if extend_slice > 0 and (s.stop - s.start) < bottom + top + 1:
             if self._patch_slices[a][index][0].start - bottom < 0:
-                pad_bottom = bottom - self._patch_slices[a][index][0].start
-            if self._patch_slices[a][index][0].stop + top > data.shape[len(slices_pre)]:
-                pad_top = self._patch_slices[a][index][0].stop + top - data.shape[len(slices_pre)]
-            data_sliced = F.pad(
-                data_sliced,
-                [0 for _ in range((len(slices) - 1) * 2)] + [pad_bottom, pad_top],
-                "reflect",
-            )
+                reflect_padding[-2] = bottom - self._patch_slices[a][index][0].start
+            if self._patch_slices[a][index][0].stop + top > data_shape[len(slices_pre)]:
+                reflect_padding[-1] = self._patch_slices[a][index][0].stop + top - data_shape[len(slices_pre)]
 
-        padding = []
+        constant_padding = []
         if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for dim_it, _slice in enumerate(reversed(slices)):
                 p = (
                     0
-                    if _slice.start + self.patch_size[-dim_it - 1] <= data.shape[-dim_it - 1]
-                    else self.patch_size[-dim_it - 1] - (data.shape[-dim_it - 1] - _slice.start)
+                    if _slice.start + self.patch_size[-dim_it - 1] <= data_shape[-dim_it - 1]
+                    else self.patch_size[-dim_it - 1] - (data_shape[-dim_it - 1] - _slice.start)
                 )
-                padding.append(0)
-                padding.append(p)
+                constant_padding.append(0)
+                constant_padding.append(p)
 
-        data_sliced = F.pad(
-            data_sliced,
-            tuple(padding),
-            "constant",
-            (0 if data_sliced.dtype == torch.uint8 and self.pad_value < 0 else self.pad_value),
+        return PatchReadPlan(
+            data_slices=tuple(slices_pre + slices),
+            reflect_padding=tuple(reflect_padding),
+            constant_padding=tuple(constant_padding),
+            concatenate_extend_slice=extend_slice > 0,
         )
 
+    def apply_read_plan(self, data: torch.Tensor, plan: PatchReadPlan) -> torch.Tensor:
+        data_sliced = data
+        if any(plan.reflect_padding):
+            data_sliced = F.pad(data_sliced, plan.reflect_padding, "reflect")
+        if any(plan.constant_padding):
+            data_sliced = F.pad(
+                data_sliced,
+                plan.constant_padding,
+                "constant",
+                (
+                    0
+                    if data_sliced.dtype == torch.uint8
+                    else (self.pad_value if self.pad_value is not None else float(data.min().item()))
+                ),
+            )
         if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
                 data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)
         return (
             torch.cat([data_sliced[:, i, ...] for i in range(data_sliced.shape[1])], dim=0)
-            if extend_slice > 0
+            if plan.concatenate_extend_slice
             else data_sliced
         )
+
+    def get_data(self, data: torch.Tensor, index: int, a: int, is_input: bool) -> list[torch.Tensor]:
+        plan = self.get_read_plan(list(data.shape), index, a, is_input)
+        data_sliced = data[plan.data_slices]
+        return self.apply_read_plan(data_sliced, plan)
 
     def get_size(self, a: int = 0) -> int:
         return len(self._patch_slices[a])
@@ -303,7 +331,7 @@ class DatasetPatch(Patch):
         self,
         patch_size: list[int] = [128, 128, 128],
         overlap: int | None = None,
-        pad_value: float = 0,
+        pad_value: float | None = None,
         extend_slice: int = 0,
     ) -> None:
         super().__init__(patch_size, overlap, pad_value, extend_slice)
@@ -321,7 +349,7 @@ class ModelPatch(Patch):
         patch_size: list[int] = [128, 128, 128],
         overlap: int | None = None,
         patch_combine: str | None = None,
-        pad_value: float = 0,
+        pad_value: float | None = None,
         extend_slice: int = 0,
     ) -> None:
         super().__init__(patch_size, overlap, pad_value, extend_slice)
@@ -362,14 +390,18 @@ class DatasetManager:
         self.name = name
         self.index = index
         self.dataset = dataset
+        self.transforms = transforms
         self.loaded = False
         self.augmentationLoaded = False
         self.cache_attributes: list[Attribute] = []
         _shape, cache_attribute = self.dataset.get_infos(self.group_src, name)
+        self.base_shape = list(_shape)
         self.cache_attributes.append(cache_attribute)
         _shape = list(_shape[1:])
 
         self.data: list[torch.Tensor] = []
+        self.augmented_data: dict[int, torch.Tensor] = {}
+        self.total_augmentations = 0
 
         for transform_function in transforms:
             _shape = transform_function.transform_shape(self.group_src, self.name, _shape, cache_attribute)
@@ -387,11 +419,15 @@ class DatasetManager:
         self.patch.load(_shape, 0)
         self.shape = _shape
         self.data_augmentations_list = data_augmentations_list
+        self._patch_stream_source: tuple[Dataset, str, list[int], list[Transform]] | None = None
+        self._patch_stream_checked = False
         self.reset_augmentation()
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
     def reset_augmentation(self):
         self.cache_attributes[:] = self.cache_attributes[:1]
+        self.augmented_data.clear()
+        self.total_augmentations = 0
         i = 1
         for data_augmentations in self.data_augmentations_list:
             shape = []
@@ -406,15 +442,18 @@ class DatasetManager:
                 self.cache_attributes.append(caches_attribute[it])
                 self.patch.load(s, i)
                 i += 1
+            self.total_augmentations += data_augmentations.nb
+        self.augmentationLoaded = self.total_augmentations == 0
 
     def load(
         self,
         pre_transform: list[Transform],
         data_augmentations_list: list[DataAugmentationsList],
+        load_augmentations: bool = True,
     ) -> None:
         if not self.loaded:
             self._load(pre_transform)
-        if not self.augmentationLoaded:
+        if load_augmentations and not self.augmentationLoaded:
             self._load_augmentation(data_augmentations_list)
 
     def _load(self, pre_transform: list[Transform]):
@@ -471,27 +510,196 @@ class DatasetManager:
         self.loaded = True
 
     def _load_augmentation(self, data_augmentations_list: list[DataAugmentationsList]) -> None:
+        start_index = 1
         for data_augmentations in data_augmentations_list:
-            a_data = [self.data[0].clone() for _ in range(data_augmentations.nb)]
-            for data_augmentation in data_augmentations.data_augmentations:
-                if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:
-                    a_data = data_augmentation(self.name, self.index, a_data)
+            self._load_augmentation_group(start_index, data_augmentations)
+            start_index += data_augmentations.nb
+        self.augmentationLoaded = len(self.augmented_data) == self.total_augmentations
 
-            for d in a_data:
-                self.data.append(d)
-        self.augmentationLoaded = True
+    def _load_augmentation_group(self, start_index: int, data_augmentations: DataAugmentationsList) -> None:
+        if data_augmentations.nb == 0:
+            return
+
+        indices = range(start_index, start_index + data_augmentations.nb)
+        if all(index in self.augmented_data for index in indices):
+            return
+
+        a_data = [self.data[0].clone() for _ in range(data_augmentations.nb)]
+        for data_augmentation in data_augmentations.data_augmentations:
+            if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:
+                a_data = data_augmentation(self.name, self.index, a_data)
+
+        for index, data in zip(indices, a_data):
+            self.augmented_data[index] = data
+        self.augmentationLoaded = len(self.augmented_data) == self.total_augmentations
+
+    def _get_tensor(self, a: int) -> torch.Tensor:
+        if a == 0:
+            return self.data[0]
+
+        if a not in self.augmented_data:
+            start_index = 1
+            for data_augmentations in self.data_augmentations_list:
+                stop_index = start_index + data_augmentations.nb
+                if start_index <= a < stop_index:
+                    self._load_augmentation_group(start_index, data_augmentations)
+                    break
+                start_index = stop_index
+            else:
+                raise IndexError(f"Augmentation index {a} out of range for dataset '{self.name}'.")
+
+        return self.augmented_data[a]
+
+    @staticmethod
+    def _required_stream_stats(transform: Transform) -> tuple[set[str], list[int] | None] | None:
+        if isinstance(transform, Normalize):
+            return {"Min", "Max"}, transform.channels
+        if isinstance(transform, Standardize):
+            required_stats = set()
+            if transform.mean is None:
+                required_stats.add("Mean")
+            if transform.std is None:
+                required_stats.add("Std")
+            return required_stats, None
+        if isinstance(transform, Clip):
+            required_stats = set()
+            if isinstance(transform.min_value, str):
+                if transform.min_value != "min":
+                    return None
+                required_stats.add("Min")
+            if isinstance(transform.max_value, str):
+                if transform.max_value != "max":
+                    return None
+                required_stats.add("Max")
+            return required_stats, None
+        return None
+
+    def _ensure_stream_stats(
+        self,
+        source_dataset: Dataset,
+        source_group: str,
+        cache_attribute: Attribute,
+        required_stats: set[str],
+        channels: list[int] | None = None,
+    ) -> bool:
+        missing_stats = [key for key in required_stats if key not in cache_attribute]
+        if not missing_stats:
+            return True
+
+        stats = source_dataset.read_data_statistics(source_group, self.name, channels)
+        stats_mapping = {
+            "Min": stats["min"],
+            "Max": stats["max"],
+            "Mean": stats["mean"],
+            "Std": stats["std"],
+        }
+        for key in missing_stats:
+            if key in {"Mean", "Std"}:
+                cache_attribute[key] = np.asarray([stats_mapping[key]], dtype=np.float32)
+            else:
+                cache_attribute[key] = stats_mapping[key]
+        return all(key in cache_attribute for key in required_stats)
+
+    def _supports_patch_stream_transform(
+        self,
+        transform: Transform,
+        source_dataset: Dataset,
+        source_group: str,
+        cache_attribute: Attribute,
+    ) -> bool:
+        if isinstance(transform, TensorCast):
+            return True
+        if isinstance(transform, Clip) and transform.mask is not None:
+            return False
+        if isinstance(transform, Standardize) and transform.mask is not None:
+            return False
+        required_stream_stats = self._required_stream_stats(transform)
+        if required_stream_stats is None:
+            return False
+        required_stats, channels = required_stream_stats
+        return self._ensure_stream_stats(source_dataset, source_group, cache_attribute, required_stats, channels)
+
+    @staticmethod
+    def _dataset_from_spec(dataset_spec: str) -> Dataset:
+        filename, _, file_format = split_path_spec(
+            dataset_spec,
+            default_format="mha",
+            supported_extensions=SUPPORTED_EXTENSIONS,
+        )
+        return Dataset(filename, file_format)
+
+    def _resolve_patch_stream_source(self) -> tuple[Dataset, str, list[int], list[Transform]] | None:
+        if self._patch_stream_checked:
+            return self._patch_stream_source
+
+        source_dataset = self.dataset
+        source_group = self.group_src
+        source_shape = self.base_shape
+        trailing_transforms = self.transforms
+
+        for index in range(len(self.transforms) - 1, -1, -1):
+            transform = self.transforms[index]
+            if isinstance(transform, Save):
+                dataset = self._dataset_from_spec(transform.dataset) if transform.dataset else self.dataset
+                group = transform.group if transform.group else self.group_dest
+                if dataset.is_dataset_exist(group, self.name):
+                    source_dataset = dataset
+                    source_group = group
+                    source_shape, _ = dataset.get_infos(group, self.name)
+                    trailing_transforms = self.transforms[index + 1 :]
+                    break
+
+        stream_cache_attribute = Attribute(self.cache_attributes[0])
+        if len(self.data_augmentations_list) == 0 and all(
+            self._supports_patch_stream_transform(
+                transform,
+                source_dataset,
+                source_group,
+                stream_cache_attribute,
+            )
+            for transform in trailing_transforms
+        ):
+            self.cache_attributes[0] = Attribute(stream_cache_attribute)
+            self.cache_attributes_bak[0] = Attribute(stream_cache_attribute)
+            self._patch_stream_source = (source_dataset, source_group, list(source_shape), trailing_transforms)
+        else:
+            self._patch_stream_source = None
+        self._patch_stream_checked = True
+        return self._patch_stream_source
+
+    def can_stream_patch(self, a: int) -> bool:
+        return a == 0 and self._resolve_patch_stream_source() is not None
+
+    def _get_streamed_data(self, index: int, a: int, is_input: bool) -> tuple[torch.Tensor, Attribute]:
+        stream_source = self._resolve_patch_stream_source()
+        if stream_source is None:
+            raise RuntimeError("Patch streaming requested on a dataset manager without a streaming source.")
+
+        source_dataset, source_group, source_shape, transforms = stream_source
+        plan = self.patch.get_read_plan(source_shape, index, a, is_input)
+        data, attributes = source_dataset.read_data_slice(source_group, self.name, plan.data_slices)
+        tensor = self.patch.apply_read_plan(torch.from_numpy(data), plan)
+        cache_attribute = Attribute(self.cache_attributes[a])
+        cache_attribute.update(attributes)
+        for transform in transforms:
+            tensor = transform(self.name, tensor, cache_attribute)
+        return tensor, cache_attribute
 
     def unload(self) -> None:
         self.data.clear()
+        self.augmented_data.clear()
         self.loaded = False
-        self.augmentationLoaded = False
+        self.augmentationLoaded = self.total_augmentations == 0
 
     def unload_augmentation(self) -> None:
-        self.data[:] = self.data[:1]
-        self.augmentationLoaded = False
+        self.augmented_data.clear()
+        self.augmentationLoaded = self.total_augmentations == 0
 
     def get_data(self, index: int, a: int, patch_transforms: list[Transform], is_input: bool) -> torch.Tensor:
-        data = self.patch.get_data(self.data[a], index, a, is_input)
+        if not self.loaded and self.can_stream_patch(a):
+            data, _ = self._get_streamed_data(index, a, is_input)
+        else:
+            data = self.patch.get_data(self._get_tensor(a), index, a, is_input)
         for transform_function in patch_transforms:
             data = transform_function(self.name, data, self.cache_attributes[a])
         return data

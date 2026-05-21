@@ -140,19 +140,31 @@ def _working_directory(path: Path):
 
 
 def _assert_experiment_outputs(
+    dataset_dir: Path,
     checkpoints_dir: Path,
     predictions_dir: Path,
     evaluations_dir: Path,
     train_name: str,
 ) -> None:
+    expected_cases = sorted(path.name for path in dataset_dir.iterdir() if path.is_dir())
     checkpoints = sorted((checkpoints_dir / train_name).glob("*.pt"))
     assert checkpoints
     predicted = sorted((predictions_dir / train_name / "Dataset").rglob("sCT.mha"))
-    assert predicted
+    assert len(predicted) == len(expected_cases)
+    assert sorted(path.parent.name for path in predicted) == expected_cases
+    for path in predicted:
+        image = SimpleITK.ReadImage(str(path))
+        array = SimpleITK.GetArrayFromImage(image)
+        assert array.shape == (3, 16, 16)
+        assert np.isfinite(array).all()
     metrics_path = evaluations_dir / train_name / "Metric_TRAIN.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert "case" in metrics
     assert any(key.endswith("MAE") for key in metrics["case"])
+    for metric_name, case_values in metrics["case"].items():
+        assert sorted(case_values) == expected_cases
+        assert all(isinstance(value, (int, float)) for value in case_values.values()), metric_name
+        assert all(np.isfinite(value) for value in case_values.values()), metric_name
 
 
 def test_konfai_api_user_path(tmp_path: Path) -> None:
@@ -221,6 +233,7 @@ def test_konfai_api_user_path(tmp_path: Path) -> None:
         check=True,
     )
     _assert_experiment_outputs(
+        paths["dataset_dir"],
         paths["checkpoints_dir"],
         paths["predictions_dir"],
         paths["evaluations_dir"],
@@ -293,6 +306,7 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
         check=True,
     )
     _assert_experiment_outputs(
+        paths["dataset_dir"],
         paths["checkpoints_dir"],
         paths["predictions_dir"],
         paths["evaluations_dir"],

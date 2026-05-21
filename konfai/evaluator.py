@@ -343,9 +343,17 @@ class Evaluator(DistributedObject):
         """
         result = {}
         for output_group in self.metrics:
+            output_tensor = batch_sample[output_group].tensor
+            metric_device = output_tensor.device
             for target_group in self.metrics[output_group]:
                 targets = [
-                    (batch_sample[group].tensor.to(0) if torch.cuda.is_available() else batch_sample[group].tensor)
+                    (
+                        batch_sample[group].tensor.to(
+                            metric_device, non_blocking=batch_sample[group].tensor.device.type == "cpu"
+                        )
+                        if batch_sample[group].tensor.device != metric_device
+                        else batch_sample[group].tensor
+                    )
                     for group in target_group.split(";")
                     if group in batch_sample
                 ]
@@ -357,22 +365,14 @@ class Evaluator(DistributedObject):
                     if getattr(metric, "accepts_attributes", False):
                         with torch.no_grad():
                             loss = metric(
-                                (
-                                    batch_sample[output_group].tensor.to(0)
-                                    if torch.cuda.is_available()
-                                    else batch_sample[output_group].tensor
-                                ),
+                                output_tensor,
                                 *targets,
                                 attributes=target_attribute,
                             )
                     else:
                         with torch.no_grad():
                             loss = metric(
-                                (
-                                    batch_sample[output_group].tensor.to(0)
-                                    if torch.cuda.is_available()
-                                    else batch_sample[output_group].tensor
-                                ),
+                                output_tensor,
                                 *targets,
                             )
                     if isinstance(loss, tuple):

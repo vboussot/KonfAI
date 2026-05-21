@@ -6,13 +6,21 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import konfai as konfai_module
+from konfai.data.data_manager import Data
 from konfai.evaluator import Evaluator
 from konfai.network.blocks import Exit
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
 from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError
-from konfai.utils.runtime import State, configure_workflow_environment, confirm_overwrite_or_raise
+from konfai.utils.runtime import (
+    DistributedObject,
+    State,
+    configure_workflow_environment,
+    confirm_overwrite_or_raise,
+    execute_distributed_object,
+)
 
 
 @pytest.mark.parametrize("factory", [Trainer, Predictor, Evaluator])
@@ -116,3 +124,85 @@ def test_confirm_overwrite_or_raise_rejects_decline(monkeypatch: pytest.MonkeyPa
 def test_debug_exit_block_raises_runtime_error() -> None:
     with pytest.raises(RuntimeError, match="debug Exit block"):
         Exit()(torch.ones(1))
+
+
+def test_data_split_does_not_duplicate_tail_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
+
+    mapping = [(index, 0, 0) for index in range(5)]
+    shards = Data._split(mapping, 2)
+
+    flattened = [item for shard in shards for item in shard]
+
+    assert len(shards) == 2
+    assert sorted(flattened) == sorted(mapping)
+    assert len(flattened) == len(mapping)
+
+
+def test_execute_distributed_object_sets_shared_master_port_without_forcing_launch_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("KONFAI_MASTER_PORT", raising=False)
+    monkeypatch.delenv("CUDA_LAUNCH_BLOCKING", raising=False)
+
+    class DummyContext:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, value, traceback) -> None:
+            return None
+
+    class DummyDistributed(DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("dummy")
+
+        def setup(self, world_size: int):
+            self.dataloader = [[] for _ in range(world_size)]
+
+        def run_process(self, world_size: int, global_rank: int, local_rank: int, dataloaders):
+            raise AssertionError("run_process should not be called in this unit test")
+
+    spawn_calls: dict[str, object] = {}
+
+    def fake_spawn(fn, nprocs: int, *args, **kwargs) -> None:
+        spawn_calls["fn"] = fn
+        spawn_calls["nprocs"] = nprocs
+        spawn_calls["master_port"] = os.environ["KONFAI_MASTER_PORT"]
+        spawn_calls["cuda_visible_devices"] = os.environ["CUDA_VISIBLE_DEVICES"]
+
+    monkeypatch.setattr("konfai.utils.runtime.Log", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.TensorBoard", DummyContext)
+    monkeypatch.setattr("konfai.utils.runtime.mp.spawn", fake_spawn)
+
+    execute_distributed_object(DummyDistributed(), gpu=[0, 1], cpu=1, quiet=True)
+
+    assert str(spawn_calls["master_port"]).isdigit()
+    assert spawn_calls["cuda_visible_devices"] == "0,1"
+    assert "KONFAI_MASTER_PORT" not in os.environ
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ
+    assert "CUDA_LAUNCH_BLOCKING" not in os.environ
+    assert spawn_calls["nprocs"] == 2
+
+
+def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,5")
+
+    queried_indices: list[int] = []
+
+    def fake_get_device_name(index: int) -> str:
+        queried_indices.append(index)
+        return f"GPU{index}"
+
+    monkeypatch.setattr(konfai_module, "get_device_name", fake_get_device_name)
+
+    devices_index, devices_name = konfai_module.get_available_devices()
+
+    assert devices_index == [3, 5]
+    assert devices_name == ["GPU0", "GPU1"]
+    assert queried_indices == [0, 1]

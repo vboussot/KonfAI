@@ -20,6 +20,7 @@ import ast
 import copy
 import csv
 import glob
+import math
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -96,6 +97,46 @@ class Attribute(dict[str, Any]):
 
     def is_info(self, key: str, value: str) -> bool:
         return key in self and self[key] == value
+
+
+def _update_running_statistics(
+    state: dict[str, float] | None,
+    array: np.ndarray,
+) -> dict[str, float]:
+    """Update running min/max/mean/std statistics from a NumPy chunk."""
+    values = np.asarray(array, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        return state or {"count": 0.0, "mean": 0.0, "m2": 0.0, "min": np.inf, "max": -np.inf}
+
+    if state is None:
+        state = {"count": 0.0, "mean": 0.0, "m2": 0.0, "min": np.inf, "max": -np.inf}
+
+    chunk_count = float(values.size)
+    chunk_mean = float(values.mean())
+    chunk_m2 = float(np.square(values - chunk_mean).sum())
+
+    total_count = state["count"] + chunk_count
+    delta = chunk_mean - state["mean"]
+    if total_count > 0:
+        state["mean"] += delta * chunk_count / total_count
+        state["m2"] += chunk_m2 + delta * delta * state["count"] * chunk_count / total_count
+        state["count"] = total_count
+        state["min"] = min(state["min"], float(values.min()))
+        state["max"] = max(state["max"], float(values.max()))
+    return state
+
+
+def _finalize_running_statistics(state: dict[str, float] | None) -> dict[str, float]:
+    """Convert a running-statistics state into the public stats dictionary."""
+    if state is None or state["count"] == 0:
+        return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0}
+    variance = state["m2"] / (state["count"] - 1) if state["count"] > 1 else 0.0
+    return {
+        "min": state["min"],
+        "max": state["max"],
+        "mean": state["mean"],
+        "std": math.sqrt(max(variance, 0.0)),
+    }
 
 
 def is_an_image(attributes: Attribute):
@@ -215,6 +256,19 @@ class Dataset:
             pass
 
         @abstractmethod
+        def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            pass
+
+        @abstractmethod
+        def file_to_data_statistics(
+            self,
+            group: str,
+            name: str,
+            channels: list[int] | None = None,
+        ) -> dict[str, float]:
+            pass
+
+        @abstractmethod
         def data_to_file(
             self,
             name: str,
@@ -273,6 +327,37 @@ class Dataset:
             data = np.zeros(dataset.shape, dataset.dtype)
             dataset.read_direct(data)
             return data, Attribute({k: str(v) for k, v in dataset.attrs.items()})
+
+        def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            dataset = self._get_dataset(groups, name)
+            data = np.asarray(dataset[slices])
+            return data, Attribute({k: str(v) for k, v in dataset.attrs.items()})
+
+        def file_to_data_statistics(
+            self,
+            groups: str,
+            name: str,
+            channels: list[int] | None = None,
+        ) -> dict[str, float]:
+            dataset = self._get_dataset(groups, name)
+            if dataset is None:
+                raise NameError(f"Dataset '{groups}/{name}' not found in '{self.filename}'.")
+
+            axis = 1 if dataset.ndim > 1 else 0
+            trailing_size = int(np.prod(dataset.shape[axis + 1 :], dtype=np.int64)) if axis + 1 < dataset.ndim else 1
+            max_elements = 8_000_000
+            chunk_length = max(1, max_elements // max(1, trailing_size))
+            state: dict[str, float] | None = None
+
+            for start in range(0, dataset.shape[axis], chunk_length):
+                slices = [slice(None)] * dataset.ndim
+                slices[axis] = slice(start, min(dataset.shape[axis], start + chunk_length))
+                chunk = np.asarray(dataset[tuple(slices)])
+                if channels is not None:
+                    chunk = chunk[channels]
+                state = _update_running_statistics(state, chunk)
+
+            return _finalize_running_statistics(state)
 
         def data_to_file(
             self,
@@ -392,6 +477,62 @@ class Dataset:
             self.read = read
             self.file_format = file_format
 
+        @staticmethod
+        def _normalize_slices(slices: tuple[slice, ...], shape: list[int]) -> tuple[slice, ...]:
+            if len(slices) != len(shape):
+                raise ValueError(f"Expected {len(shape)} slices, got {len(slices)}.")
+
+            normalized = []
+            for item, size in zip(slices, shape):
+                start, stop, step = item.indices(size)
+                normalized.append(slice(start, stop, step))
+            return tuple(normalized)
+
+        @staticmethod
+        def _supports_direct_slice(slices: tuple[slice, ...]) -> bool:
+            return all(item.step in (None, 1) for item in slices)
+
+        def _resolve_data_path(self, name: str) -> str | None:
+            base = f"{self.filename}{name}"
+            direct = f"{base}.{self.file_format}"
+            if os.path.exists(direct):
+                return direct
+
+            for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
+                candidate = f"{base}{suffix}"
+                if os.path.exists(candidate):
+                    return candidate
+
+            matches = glob.glob(f"{base}.*")
+            return matches[0] if matches else None
+
+        def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            reader = sitk.ImageFileReader()
+            reader.SetFileName(path)
+            reader.ReadImageInformation()
+
+            spatial_size_xyz = list(reader.GetSize())
+            spatial_shape = list(reversed(spatial_size_xyz))
+            data_shape = [reader.GetNumberOfComponents()] + spatial_shape
+            normalized = self._normalize_slices(slices, data_shape)
+
+            if not self._supports_direct_slice(normalized):
+                data, attributes = self.file_to_data("", name)
+                return data[normalized], attributes
+
+            extract_index_xyz = [item.start for item in reversed(normalized[1:])]
+            extract_size_xyz = [item.stop - item.start for item in reversed(normalized[1:])]
+            reader.SetExtractIndex(extract_index_xyz)
+            reader.SetExtractSize(extract_size_xyz)
+
+            image = reader.Execute()
+            data, attributes = image_to_data(image)
+            origin = np.asarray(reader.GetOrigin(), dtype=np.float64)
+            spacing = np.asarray(reader.GetSpacing(), dtype=np.float64)
+            direction = np.asarray(reader.GetDirection(), dtype=np.float64).reshape(len(spacing), len(spacing))
+            attributes["Origin"] = origin + direction @ (np.asarray(extract_index_xyz, dtype=np.float64) * spacing)
+            return data[normalized[:1] + tuple(slice(None) for _ in normalized[1:])], attributes
+
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             attributes = Attribute()
             if os.path.exists(f"{self.filename}{name}.itk.txt"):
@@ -450,6 +591,53 @@ class Dataset:
                     data, attributes_tmp = image_to_data(image)
                     attributes.update(attributes_tmp)
             return data, attributes
+
+        def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+            path = self._resolve_data_path(name)
+            if path is None:
+                raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
+
+            if path.endswith(".npy"):
+                data = np.load(path, mmap_mode="r")[slices]
+                return np.asarray(data), Attribute()
+
+            if path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")):
+                data, attributes = self.file_to_data(group, name)
+                return data[slices], attributes
+
+            return self._file_to_image_slice(name, path, slices)
+
+        def file_to_data_statistics(
+            self,
+            group: str,
+            name: str,
+            channels: list[int] | None = None,
+        ) -> dict[str, float]:
+            path = self._resolve_data_path(name)
+            if path is None:
+                raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
+
+            if path.endswith(".npy"):
+                data = np.load(path, mmap_mode="r")
+                if channels is not None:
+                    data = data[channels]
+                return _finalize_running_statistics(_update_running_statistics(None, data))
+
+            if path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")):
+                data, _ = self.file_to_data(group, name)
+                if channels is not None:
+                    data = data[channels]
+                return _finalize_running_statistics(_update_running_statistics(None, data))
+
+            image = sitk.ReadImage(path)
+            data = sitk.GetArrayViewFromImage(image)
+            if image.GetNumberOfComponentsPerPixel() == 1:
+                data = np.expand_dims(data, 0)
+            else:
+                data = np.transpose(data, (len(data.shape) - 1, *list(range(len(data.shape) - 1))))
+            if channels is not None:
+                data = data[channels]
+            return _finalize_running_statistics(_update_running_statistics(None, data))
 
         def is_vtk_polydata(self, obj):
             try:
@@ -582,6 +770,11 @@ class Dataset:
         self.filename = str(filename)
         self.file_format = file_format
 
+    def _exists_on_disk(self) -> bool:
+        if os.path.exists(self.filename):
+            return True
+        return self.file_format == "h5" and os.path.exists(f"{self.filename}.h5")
+
     def write(
         self,
         group: str,
@@ -607,7 +800,7 @@ class Dataset:
                 file.data_to_file(f"{group}/{name}", data, attributes)
 
     def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
-        if not os.path.exists(self.filename):
+        if not self._exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
@@ -624,8 +817,52 @@ class Dataset:
                 result = file.file_to_data(groups, name)
         return result
 
+    def read_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+        if not self._exists_on_disk():
+            raise NameError(f"Dataset {self.filename} not found")
+        if self.is_directory:
+            for sub_directory in self._get_sub_directories(groups):
+                group = groups.split("/")[-1]
+                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
+                    with Dataset.File(
+                        f"{self.filename}{sub_directory}{name}",
+                        True,
+                        self.file_format,
+                    ) as file:
+                        result = file.file_to_data_slice("", group, slices)
+                        return result
+        else:
+            with Dataset.File(self.filename, True, self.file_format) as file:
+                return file.file_to_data_slice(groups, name, slices)
+
+        raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+
+    def read_data_statistics(
+        self,
+        groups: str,
+        name: str,
+        channels: list[int] | None = None,
+    ) -> dict[str, float]:
+        if not self._exists_on_disk():
+            raise NameError(f"Dataset {self.filename} not found")
+        if self.is_directory:
+            for sub_directory in self._get_sub_directories(groups):
+                group = groups.split("/")[-1]
+                if os.path.exists(f"{self.filename}{sub_directory}{name}{'.h5' if self.file_format == 'h5' else ''}"):
+                    with Dataset.File(
+                        f"{self.filename}{sub_directory}{name}",
+                        True,
+                        self.file_format,
+                    ) as file:
+                        return file.file_to_data_statistics("", group, channels)
+        else:
+            with Dataset.File(self.filename, True, self.file_format) as file:
+                return file.file_to_data_statistics(groups, name, channels)
+
+        raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+
     def read_transform(self, group: str, name: str) -> sitk.Transform:
-        if not os.path.exists(self.filename):
+        if not self._exists_on_disk():
             raise NameError(f"Dataset {self.filename} not found")
         transform_parameters, attribute = self.read_data(group, name)
         transforms_type = [v for k, v in attribute.items() if k.endswith(":Transform_0")]

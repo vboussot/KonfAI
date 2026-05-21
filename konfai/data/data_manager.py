@@ -308,19 +308,24 @@ class DatasetIter(data.Dataset):
                 finally:
                     pbar.close()
 
-    def _load_data(self, index):
-        if index not in self._index_cache:
-            self._index_cache.append(index)
+    def _load_data(self, index: int, augmentation_index: int | None = None) -> bool:
+        loaded = False
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
-                self.load_data(group_src, group_dest, index)
+                loaded |= self.load_data(group_src, group_dest, index, augmentation_index)
+        if loaded and index not in self._index_cache:
+            self._index_cache.append(index)
+        return loaded
 
-    def load_data(self, group_src: str, group_dest: str, index: int) -> None:
+    def load_data(self, group_src: str, group_dest: str, index: int, augmentation_index: int | None = None) -> bool:
         item = self.data[group_dest][index]
+        if augmentation_index is not None and item.can_stream_patch(augmentation_index):
+            return False
         try:
             item.load(
                 self.groups_src[group_src][group_dest].transforms,
                 self.data_augmentations_list,
+                load_augmentations=not self.inline_augmentations,
             )
         except Exception as e:
             raise RuntimeError(
@@ -329,6 +334,7 @@ class DatasetIter(data.Dataset):
                 f"index={index}, name={item.name}) : "
                 f"{type(e).__name__}: {e}"
             ) from e
+        return True
 
     def _unload_data(self, index: int) -> None:
         if index in self._index_cache:
@@ -346,10 +352,15 @@ class DatasetIter(data.Dataset):
     def __getitem__(self, index: int) -> Sample:
         sample: Sample = {}
         x, a, p = self.mapping[index]
-        if x not in self._index_cache:
+        needs_full_load = any(
+            not self.data[group_dest][x].can_stream_patch(a)
+            for group_src in self.groups_src
+            for group_dest in self.groups_src[group_src]
+        )
+        if x not in self._index_cache and needs_full_load:
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
                 self._unload_data(self._index_cache[0])
-            self._load_data(x)
+            self._load_data(x, a)
 
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
@@ -456,6 +467,28 @@ class PredictionSubset(Subset):
 class Data(ABC):
     """Abstract base class shared by training, prediction, and evaluation datasets."""
 
+    @staticmethod
+    def _configured_transform_requires_single_process(classpath: str) -> bool:
+        for transform_name in classpath.split("|"):
+            candidate = transform_name.split(":")[-1].split(".")[-1].split("/")[0]
+            if candidate == "KonfAIInference":
+                return True
+        return False
+
+    @classmethod
+    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric]) -> bool:
+        for group in groups_src.values():
+            for group_transform in group.values():
+                for configured_transforms in (group_transform._transforms, group_transform._patch_transforms):
+                    if configured_transforms is None:
+                        continue
+                    if any(
+                        cls._configured_transform_requires_single_process(classpath)
+                        for classpath in configured_transforms
+                    ):
+                        return True
+        return False
+
     @abstractmethod
     def __init__(
         self,
@@ -468,6 +501,10 @@ class Data(ABC):
         validation: float | str | list[int] | list[str] | None,
         inline_augmentations: bool,
         data_augmentations_list: dict[str, DataAugmentationsList],
+        num_workers: int | None,
+        pin_memory: bool,
+        prefetch_factor: int | None,
+        persistent_workers: bool | None,
     ) -> None:
         self.dataset_filenames = dataset_filenames
         self.subset = subset
@@ -478,6 +515,7 @@ class Data(ABC):
         self.batch_size = batch_size
         self.use_cache = use_cache
         self.inline_augmentations = inline_augmentations
+        self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
 
         self.datasetIter = partial(
             DatasetIter,
@@ -489,7 +527,19 @@ class Data(ABC):
             buffer_size=batch_size + 1,
             use_cache=use_cache,
         )
-        self.dataLoader_args = {"num_workers": 0, "pin_memory": False, "collate_fn": collate_konfai}
+        resolved_num_workers = num_workers
+        if self.requires_single_process_loading:
+            resolved_num_workers = 0
+        elif resolved_num_workers is None:
+            resolved_num_workers = max(1, min(os.cpu_count() or 1, 4)) if not use_cache else 0
+        self.dataLoader_args = {
+            "num_workers": resolved_num_workers,
+            "pin_memory": pin_memory,
+            "collate_fn": collate_konfai,
+        }
+        if resolved_num_workers > 0:
+            self.dataLoader_args["prefetch_factor"] = 2 if prefetch_factor is None else prefetch_factor
+            self.dataLoader_args["persistent_workers"] = True if persistent_workers is None else persistent_workers
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self.datasets: dict[str, Dataset] = {}
@@ -777,29 +827,26 @@ class Data(ABC):
         if len(mapping) == 0:
             return [[] for _ in range(world_size)]
 
-        mappings = []
+        mappings: list[list[tuple[int, int, int]]] = []
         if konfai_state() == str(State.PREDICTION) or konfai_state() == str(State.EVALUATION):
             np_mapping = np.asarray(mapping)
             unique_index = np.unique(np_mapping[:, 0])
-            offset = int(np.ceil(len(unique_index) / world_size))
-            if offset == 0:
-                offset = 1
-            for itr in range(0, len(unique_index), offset):
-                mappings.append(
-                    [
-                        tuple(v)
-                        for v in np_mapping[
-                            np.where(np.isin(np_mapping[:, 0], unique_index[itr : itr + offset]))[0],
-                            :,
+            for shard in np.array_split(unique_index, world_size):
+                if len(shard) == 0:
+                    mappings.append([])
+                else:
+                    mappings.append(
+                        [
+                            tuple(v)
+                            for v in np_mapping[
+                                np.where(np.isin(np_mapping[:, 0], shard))[0],
+                                :,
+                            ]
                         ]
-                    ]
-                )
+                    )
         else:
-            offset = int(np.ceil(len(mapping) / world_size))
-            if offset == 0:
-                offset = 1
-            for itr in range(0, len(mapping), offset):
-                mappings.append(list(mapping[-offset:]) if itr + offset > len(mapping) else mapping[itr : itr + offset])
+            for shard in np.array_split(np.arange(len(mapping)), world_size):
+                mappings.append([mapping[int(index)] for index in shard.tolist()])
         return mappings
 
     def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
@@ -875,6 +922,10 @@ class DataTrain(Data):
         subset: TrainSubset = TrainSubset(),
         batch_size: int = 1,
         validation: float | str | list[int] | list[str] = 0.2,
+        num_workers: int | None = None,
+        pin_memory: bool = False,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool | None = None,
     ) -> None:
         super().__init__(
             dataset_filenames,
@@ -886,6 +937,10 @@ class DataTrain(Data):
             validation,
             inline_augmentations,
             augmentations if augmentations else {},
+            num_workers,
+            pin_memory,
+            prefetch_factor,
+            persistent_workers,
         )
 
 
@@ -901,6 +956,10 @@ class DataPrediction(Data):
         patch: DatasetPatch | None = DatasetPatch(),
         subset: PredictionSubset = PredictionSubset(),
         batch_size: int = 1,
+        num_workers: int | None = None,
+        pin_memory: bool = False,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool | None = None,
     ) -> None:
 
         super().__init__(
@@ -913,6 +972,10 @@ class DataPrediction(Data):
             validation=None,
             inline_augmentations=False,
             data_augmentations_list=augmentations if augmentations else {},
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=False if persistent_workers is None else persistent_workers,
         )
 
 
@@ -926,6 +989,10 @@ class DataMetric(Data):
         groups_src: dict[str, GroupMetric] = {"default": GroupMetric()},
         subset: PredictionSubset = PredictionSubset(),
         validation: str | None = None,
+        num_workers: int | None = None,
+        pin_memory: bool = False,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool | None = None,
     ) -> None:
 
         super().__init__(
@@ -938,4 +1005,8 @@ class DataMetric(Data):
             validation=validation,
             data_augmentations_list={},
             inline_augmentations=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
         )

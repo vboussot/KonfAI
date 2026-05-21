@@ -137,7 +137,10 @@ def get_available_devices(
         return data["devices_index"], data["devices_name"]
     else:
         devices_index = cuda_visible_devices()
-        return devices_index, [get_device_name(device_index) for device_index in devices_index]
+        # Torch reindexes devices after CUDA_VISIBLE_DEVICES masking, so the
+        # visible names must be resolved through local ordinals (0..N-1) while
+        # we keep returning the original user-facing device ids.
+        return devices_index, [get_device_name(local_index) for local_index in range(len(devices_index))]
 
 
 def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -> tuple[float, float]:

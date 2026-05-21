@@ -22,6 +22,7 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import nullcontext
 from enum import Enum
 from functools import partial
 from typing import Any
@@ -672,15 +673,15 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     requires_grad = self._modulesArgs[name].requires_grad
                     if requires_grad is not None and module:
                         module.requires_grad_(requires_grad)
+                    target_gpu = self._modulesArgs[name].gpu
                     for ib in self._modulesArgs[name].in_branch:
                         if ib not in branchs:
                             branchs[ib] = inputs[0]
-                    for branchs_key in branchs.keys():
-                        if (
-                            str(self._modulesArgs[name].gpu) != "cpu"
-                            and str(branchs[branchs_key].device) != "cuda:" + self._modulesArgs[name].gpu
-                        ):
-                            branchs[branchs_key] = branchs[branchs_key].to(int(self._modulesArgs[name].gpu))
+                        if target_gpu != "cpu" and str(branchs[ib].device) != f"cuda:{target_gpu}":
+                            branchs[ib] = branchs[ib].to(
+                                int(target_gpu),
+                                non_blocking=branchs[ib].device.type == "cpu",
+                            )
 
                     if self._modulesArgs[name].isCheckpoint:
                         out = checkpoint(
@@ -1297,17 +1298,24 @@ class Network(ModuleArgsDict, ABC):
             self.measure.reset_loss()
 
     @_function_network()
-    def backward(self, model: Self):
+    def backward(self, model: Any):
         if self.measure:
             if self.scaler and self.optimizer:
-                model._requires_grad(list(self.measure.outputs_criterions.keys()))
-                for loss in self.measure.get_loss():
-                    self.scaler.scale(loss / self.nb_batch_per_step).backward()
+                self._requires_grad(list(self.measure.outputs_criterions.keys()))
+                should_step = (self._it + 1) % self.nb_batch_per_step == 0
+                sync_context = (
+                    model.no_sync()
+                    if hasattr(model, "no_sync") and callable(model.no_sync) and not should_step
+                    else nullcontext()
+                )
+                with sync_context:
+                    for loss in self.measure.get_loss():
+                        self.scaler.scale(loss / self.nb_batch_per_step).backward()
 
-                    if self._it % self.nb_batch_per_step == 0:
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.optimizer.zero_grad(set_to_none=True)
+                if should_step:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
                 self._it += 1
 
     @_function_network()
@@ -1446,5 +1454,5 @@ class Model:
         self,
         batch_sample: BatchSample,
         output_layers: list[str] = [],
-    ) -> list[tuple[str, torch.Tensor]]:
+    ) -> Any:
         return self.module(batch_sample, output_layers)

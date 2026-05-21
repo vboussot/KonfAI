@@ -16,9 +16,10 @@
 
 """Tensor and image transforms used in KonfAI preprocessing and postprocessing."""
 
+import os
 import tempfile
 from abc import ABC, abstractmethod
-from multiprocessing import get_context
+from multiprocessing import current_process, get_context
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,8 @@ from konfai.utils.utils import get_module, split_path_spec
 
 class Transform(NeedDevice, ABC):
     """Base class for transforms operating on tensors and cached attributes."""
+
+    supports_dataloader_workers = True
 
     def __init__(self) -> None:
         NeedDevice.__init__(self)
@@ -150,8 +153,8 @@ class Clip(Transform):
         else:
             max_value = self.max_value
 
-        tensor[torch.where(tensor < min_value)] = min_value
-        tensor[torch.where(tensor > max_value)] = max_value
+        tensor[torch.where(tensor.float() < min_value)] = min_value
+        tensor[torch.where(tensor.float() > max_value)] = max_value
         if self.save_clip_min:
             cache_attribute["Min"] = min_value
         if self.save_clip_max:
@@ -575,6 +578,35 @@ class Mask(Transform):
         return tensor
 
 
+class Dilate(Transform):
+
+    def __init__(self, dilate: int = 1) -> None:
+        super().__init__()
+        if dilate < 0:
+            raise ValueError(f"[Dilate] 'dilate' must be >= 0, got {dilate}")
+        self.dilate = dilate
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if self.dilate == 0:
+            return tensor
+
+        data = (tensor > 0).to(torch.float32)
+        spatial_dims = data.dim() - 1
+        kernel_size = 2 * self.dilate + 1
+
+        if spatial_dims == 2:
+            data = F.max_pool2d(data, kernel_size=kernel_size, stride=1, padding=self.dilate)
+        elif spatial_dims == 3:
+            data = F.max_pool3d(data, kernel_size=kernel_size, stride=1, padding=self.dilate)
+        else:
+            raise ValueError(
+                "[Dilate] Unsupported tensor shape for "
+                f"'{name}': expected [C,H,W] or [C,D,H,W], got {list(tensor.shape)}"
+            )
+
+        return data.to(tensor.dtype)
+
+
 class Sum(Transform):
 
     def __init__(self, dim: int = 0) -> None:
@@ -840,6 +872,7 @@ class OneHot(TransformInverse):
 
 
 class KonfAIInference(Transform):
+    supports_dataloader_workers = False
 
     def __init__(
         self,
@@ -867,6 +900,11 @@ class KonfAIInference(Transform):
                 "Install it from the repository with 'pip install -e ./konfai-apps'."
             ) from exc
 
+        # Nested KonfAI runs must choose their own rendezvous ports instead of
+        # inheriting the parent's already-bound distributed settings.
+        os.environ.pop("KONFAI_MASTER_PORT", None)
+        os.environ.pop("KONFAI_TENSORBOARD_PORT", None)
+
         konfai_app = KonfAIApp(f"{self.repo_id}:{self.model_name}", False, False)
         konfai_app.infer(
             [[dataset_path]],
@@ -880,6 +918,11 @@ class KonfAIInference(Transform):
         )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if current_process().daemon:
+            raise RuntimeError(
+                "KonfAIInference cannot run inside daemon DataLoader workers. "
+                "Use 'Dataset.num_workers: 0' for pipelines that include this transform."
+            )
         with tempfile.TemporaryDirectory() as tmpdir:
 
             dataset_path = Path(tmpdir) / "Dataset"
@@ -930,8 +973,12 @@ class InferenceStack(Transform):
         else:
             _tensors = tensors.squeeze(1)
         dataset = self.dataset if self.dataset else self.datasets[-1]
-        dataset.write("InferenceStack", name, _tensors.numpy(), cache_attribute)
-        return tensors.float().mean(0).to(tensors.dtype)
+        dataset.write("InferenceStack", name, _tensors.float().cpu().numpy(), cache_attribute)
+        return (
+            torch.median(tensors.float(), dim=0).values.to(tensors.dtype)
+            if self.mode == "median"
+            else tensors.float().mean(0).to(tensors.dtype)
+        )
 
 
 class Variance(Transform):
@@ -941,6 +988,52 @@ class Variance(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensors.float().var(0).unsqueeze(0) if tensors.shape[0] > 1 else torch.zeros_like(tensors[0])
+
+
+class SegmentationDisagreement(Transform):
+
+    def __init__(self, ignore_background: bool = False) -> None:
+        super().__init__()
+        self.ignore_background = ignore_background
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        # tensors shape: [N, ...] with N segmentations and integer labels per voxel
+        if tensors.shape[0] <= 1:
+            return torch.zeros_like(tensors[0], dtype=torch.float32).unsqueeze(0)
+
+        tensors = tensors.long()
+
+        if self.ignore_background:
+            valid = tensors != 0
+        else:
+            valid = torch.ones_like(tensors, dtype=torch.bool)
+
+        disagreement = torch.zeros_like(tensors[0], dtype=torch.float32)
+
+        # per-voxel disagreement = 1 - (frequency of majority label / number of valid segmentations)
+        unique_labels = torch.unique(tensors)
+        counts = []
+        for label in unique_labels:
+            counts.append(((tensors == label) & valid).sum(dim=0))
+
+        counts = torch.stack(counts, dim=0)  # [L, ...]
+        max_count = counts.max(dim=0).values
+        valid_count = valid.sum(dim=0)
+
+        non_empty = valid_count > 0
+        disagreement[non_empty] = 1.0 - (max_count[non_empty].float() / valid_count[non_empty].float())
+
+        return disagreement.unsqueeze(0)
+
+
+class Percentage(Transform):
+
+    def __init__(self, baseline: float) -> None:
+        super().__init__()
+        self.baseline = baseline
+
+    def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensors / self.baseline * 100.0
 
 
 class StandardDeviation(Transform):

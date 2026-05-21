@@ -94,13 +94,19 @@ Common fields:
 | `dataset_filenames` | list[str] | `["./Dataset:mha"]` | Dataset sources and selection mode. |
 | `groups_src` | mapping | required in practice | Maps on-disk groups to loaded tensors. |
 | `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
-| `inline_augmentations` | bool | `false` | Re-samples augmentations on each epoch when enabled. |
+| `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
 | `use_cache` | bool | `true` | Cache transformed data in memory. |
 | `subset` | object | `TrainSubset()` | Restricts which cases are used. |
 | `batch_size` | int | `1` | Batch size. |
+| `num_workers` | int or null | `None` | Number of DataLoader workers. When `use_cache: false`, `None` auto-enables worker prefetching. |
+| `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
+| `prefetch_factor` | int or null | `None` | Number of prefetched batches per worker when workers are enabled. |
+| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs when workers are enabled. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
+
+When `use_cache: false`, KonfAI now tries to stream patches directly from disk instead of materializing full volumes in RAM. This path is used automatically when the configured preprocessing chain is compatible with patch-wise loading; otherwise KonfAI falls back to the existing full-volume loading path.
 
 ### `groups_src`
 
