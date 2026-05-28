@@ -190,6 +190,25 @@ def test_prediction_subset_keeps_tilde_file_exclusion_with_file_lists(tmp_path: 
     assert selected == {"CASE_000", "CASE_002"}
 
 
+def test_prediction_subset_accepts_windows_style_case_list_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    windows_file = r"C:\tmp\subset_a.txt"
+    subset = PredictionSubset([windows_file])
+
+    monkeypatch.setattr(
+        "konfai.data.data_manager.os.path.exists",
+        lambda path: path == windows_file,
+    )
+    monkeypatch.setattr(
+        PredictionSubset,
+        "_read_names_from_file",
+        staticmethod(lambda filename: ["CASE_000", "CASE_002"] if filename == windows_file else []),
+    )
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002", "CASE_003"], {})
+
+    assert selected == {"CASE_000", "CASE_002"}
+
+
 def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> None:
     class InfoCountingDataset:
         def __init__(self) -> None:

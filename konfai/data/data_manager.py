@@ -401,19 +401,19 @@ class Subset:
         """Return whether this subset implementation needs per-sample metadata."""
         return self.__class__.__call__ is not Subset.__call__
 
+    @staticmethod
+    def _is_slice_selector(subset: str) -> bool:
+        start, sep, end = subset.partition(":")
+        if sep == "":
+            return False
+        return start.lstrip("-").isdigit() and end.lstrip("-").isdigit()
+
     def _resolve_selector(self, subset: str | int, names: list[str]) -> tuple[set[int], bool]:
         size = len(names)
         name_to_index = {name: i for i, name in enumerate(names)}
 
         if isinstance(subset, int):
             return {subset}, False
-        if ":" in subset:
-            r = np.clip(
-                np.asarray([int(subset.split(":")[0]), int(subset.split(":")[1])]),
-                0,
-                size,
-            )
-            return set(range(int(r[0]), int(r[1]))), False
         if subset.startswith("~"):
             excluded = subset[1:]
             if os.path.exists(excluded):
@@ -425,6 +425,14 @@ class Subset:
         if os.path.exists(subset):
             selected_names = set(self._read_names_from_file(subset))
             return {i for i, name in enumerate(names) if name in selected_names}, False
+        if self._is_slice_selector(subset):
+            start, _, end = subset.partition(":")
+            r = np.clip(
+                np.asarray([int(start), int(end)]),
+                0,
+                size,
+            )
+            return set(range(int(r[0]), int(r[1]))), False
         if subset in name_to_index:
             return {name_to_index[subset]}, False
         return set(), False
