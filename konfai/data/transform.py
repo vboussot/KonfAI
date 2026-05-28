@@ -422,22 +422,18 @@ class ResampleToResolution(Resample):
         if len(shape) != len(self.spacing):
             TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
         image_spacing = cache_attribute.get_tensor("Spacing")
-        spacing = self.spacing
-
-        for i, s in enumerate(self.spacing):
-            if s == 0:
-                spacing[i] = image_spacing[i]
-        resize_factor = spacing / image_spacing
+        resize_factor = torch.tensor([s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, image_spacing)])
         return [int(x) for x in (torch.tensor(shape) * 1 / resize_factor.flip(0))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         image_spacing = cache_attribute.get_tensor("Spacing")
         spacing = self.spacing
-        for i, s in enumerate(self.spacing):
-            if s == 0:
-                spacing[i] = image_spacing[i]
-        resize_factor = spacing / cache_attribute.get_tensor("Spacing")
-        cache_attribute["Spacing"] = spacing
+        resize_factor = torch.tensor(
+            [s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, cache_attribute.get_tensor("Spacing"))]
+        )
+        cache_attribute["Spacing"] = torch.tensor(
+            [float(s) if s > 0 else float(i_s) for s, i_s in zip(spacing, image_spacing)]
+        )
         cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(tensor.shape[1:])])
         size = [int(x) for x in (torch.tensor(tensor.shape[1:]) * 1 / resize_factor.flip(0))]
         cache_attribute["Size"] = np.asarray(size)
