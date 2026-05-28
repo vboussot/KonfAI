@@ -27,7 +27,7 @@ import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -64,10 +64,11 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
     """List app folders available inside a Hugging Face repository."""
     api = HfApi()
     app_names: list[str] = []
+    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
 
     if force_update:
         try:
-            tree = api.list_repo_tree(repo_id=repo_id)
+            tree = api.list_repo_tree(repo_id=base_repo_id, revision=revision, repo_type="model")
             for entry in tree:
                 app_name = Path(entry.path).name
                 if isinstance(entry, RepoFolder) and is_app_repo(
@@ -86,10 +87,10 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
 
     try:
         snapshot_dir = snapshot_download(
-            repo_id=repo_id,
+            repo_id=base_repo_id,
             repo_type="model",
             local_files_only=True,
-            revision="main",
+            revision=revision,
         )  # nosec B615
         root = Path(snapshot_dir)
         for path in root.iterdir():
@@ -104,7 +105,7 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
 
 def is_app_repo(filenames: list[str]) -> bool:
     """Return whether the given repository file list looks like a KonfAI app."""
-    return any(filename.endswith("app.json") for filename in filenames)
+    return "app.json" in filenames
 
 
 class VolumeType(Enum):
@@ -322,9 +323,7 @@ class LocalAppRepository(AppRepositoryInfo):
             }
 
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
-        checkpoints_name_available: list[str] = [
-            checkpoint_name for checkpoint_name in checkpoints_name if checkpoint_name in filenames
-        ]
+        checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
 
         super().__init__(
             app_name=app_name,
@@ -341,6 +340,44 @@ class LocalAppRepository(AppRepositoryInfo):
             terminology=terminology,
             vram_plan=vram_plan,
         )
+
+    def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
+        return [
+            checkpoint_name
+            for checkpoint_name in checkpoints_name
+            if self._find_repo_filename(checkpoint_name, filenames, suffix=".pt") is not None
+        ]
+
+    def _find_repo_filename(
+        self, requested_filename: str, filenames: list[str], suffix: str | None = None
+    ) -> str | None:
+        candidates = [PurePosixPath(requested_filename).as_posix()]
+        if suffix is not None and not candidates[0].endswith(suffix):
+            candidates.append(candidates[0] + suffix)
+
+        for candidate in candidates:
+            if candidate in filenames:
+                return candidate
+
+        basename_matches = [
+            filename
+            for filename in filenames
+            if PurePosixPath(filename).name in {PurePosixPath(c).name for c in candidates}
+        ]
+        if len(basename_matches) == 1:
+            return basename_matches[0]
+        if len(basename_matches) > 1:
+            raise AppRepositoryError(
+                f"Multiple files match '{requested_filename}' in app '{self._app_name}'. "
+                "Please use an explicit relative path in the app metadata."
+            )
+        return None
+
+    def _require_repo_filename(self, requested_filename: str, filenames: list[str], suffix: str | None = None) -> str:
+        resolved = self._find_repo_filename(requested_filename, filenames, suffix=suffix)
+        if resolved is None:
+            raise AppRepositoryError(f"File '{requested_filename}' was not found in app '{self._app_name}'.")
+        return resolved
 
     def _set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
@@ -413,7 +450,7 @@ class LocalAppRepository(AppRepositoryInfo):
         filenames = self._get_filenames()
         inference_support = len(self.get_inputs()) > 0
         evaluation_support = len(self.get_evaluations_inputs()) > 0
-        uncertainty_support = any(filename == "Uncertainty.yml" for filename in filenames)
+        uncertainty_support = self._find_repo_filename("Uncertainty.yml", filenames) is not None
         return inference_support, evaluation_support, uncertainty_support
 
     def download_config_file(self) -> list[Path]:
@@ -426,16 +463,16 @@ class LocalAppRepository(AppRepositoryInfo):
 
     def download_inference(
         self, number_of_model: int, name_of_models: list[str], prediction_file: str
-    ) -> tuple[list[Path], Path, list[Path]]:
+    ) -> tuple[list[Path], Path, list[tuple[str, Path]]]:
         filenames = self._get_filenames()
         models_path: list[Path] = []
-        codes_path: list[Path] = []
+        codes_path: list[tuple[str, Path]] = []
 
-        inference_file_path = self._download(prediction_file)
+        inference_file_path = self._download(self._require_repo_filename(prediction_file, filenames))
         available_models = [name for name in filenames if name.endswith(".pt")]
         if len(name_of_models):
             for name in name_of_models:
-                models_path.append(self._download(name if name.endswith(".pt") else name + ".pt"))
+                models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
         else:
             if len(available_models) < number_of_model and isinstance(self, LocalAppRepositoryFromHF):
                 filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
@@ -450,10 +487,11 @@ class LocalAppRepository(AppRepositoryInfo):
 
         for filename in filenames:
             if filename.endswith(".py"):
-                codes_path.append(self._download(filename))
+                codes_path.append((filename, self._download(filename)))
 
-        if "requirements.txt" in filenames:
-            with open(self._download("requirements.txt"), encoding="utf-8") as file:
+        requirements_filename = self._find_repo_filename("requirements.txt", filenames)
+        if requirements_filename is not None:
+            with open(self._download(requirements_filename), encoding="utf-8") as file:
                 required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
                 installed = {
                     dist.metadata["Name"].lower(): dist.version
@@ -481,30 +519,30 @@ class LocalAppRepository(AppRepositoryInfo):
 
         return models_path, inference_file_path, codes_path
 
-    def download_app(self) -> list[Path]:
+    def download_app(self) -> list[tuple[str, Path]]:
         filenames = self._get_filenames()
-        files_path: list[Path] = []
+        files_path: list[tuple[str, Path]] = []
         for filename in filenames:
-            files_path.append(self._download(filename))
+            files_path.append((filename, self._download(filename)))
             print(f"[KonfAI-Apps] {filename} is ready.")
         return files_path
 
-    def download_evaluation(self, evaluation_file: str) -> tuple[Path, list[Path]]:
+    def download_evaluation(self, evaluation_file: str) -> tuple[Path, list[tuple[str, Path]]]:
         filenames = self._get_filenames()
-        codes_path: list[Path] = []
-        evaluation_file_path = self._download(evaluation_file)
+        codes_path: list[tuple[str, Path]] = []
+        evaluation_file_path = self._download(self._require_repo_filename(evaluation_file, filenames))
         for filename in filenames:
             if filename.endswith(".py"):
-                codes_path.append(self._download(filename))
+                codes_path.append((filename, self._download(filename)))
         return evaluation_file_path, codes_path
 
-    def download_uncertainty(self, uncertainty_file: str) -> tuple[Path, list[Path]]:
+    def download_uncertainty(self, uncertainty_file: str) -> tuple[Path, list[tuple[str, Path]]]:
         filenames = self._get_filenames()
-        codes_path: list[Path] = []
-        uncertainty_file_path = self._download(uncertainty_file)
+        codes_path: list[tuple[str, Path]] = []
+        uncertainty_file_path = self._download(self._require_repo_filename(uncertainty_file, filenames))
         for filename in filenames:
             if filename.endswith(".py"):
-                codes_path.append(self._download(filename))
+                codes_path.append((filename, self._download(filename)))
         return uncertainty_file_path, codes_path
 
     def install_inference(
@@ -537,25 +575,31 @@ class LocalAppRepository(AppRepositoryInfo):
                     break
             vram_plan = self._vram_plan[selected_t]
             self._set_patch_size_and_batch_size(prediction_file, vram_plan.patch_size, vram_plan.batch_size)
-        for code_path in codes_path:
+        for repo_filename, code_path in codes_path:
             if code_path.suffix == ".py":
-                shutil.copy2(code_path, code_path.name)
+                dest = Path(repo_filename)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(code_path, dest)
 
         return models_path
 
     def install_evaluation(self, evaluation_file: str) -> None:
         evaluation_file_path, codes_path = self.download_evaluation(evaluation_file)
         shutil.copy2(evaluation_file_path, evaluation_file)
-        for code_path in codes_path:
+        for repo_filename, code_path in codes_path:
             if code_path.suffix == ".py":
-                shutil.copy2(code_path, code_path.name)
+                dest = Path(repo_filename)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(code_path, dest)
 
     def install_uncertainty(self, uncertainty_file: str) -> None:
         uncertainty_file_path, codes_path = self.download_uncertainty(uncertainty_file)
         shutil.copy2(uncertainty_file_path, uncertainty_file)
-        for code_path in codes_path:
+        for repo_filename, code_path in codes_path:
             if code_path.suffix == ".py":
-                shutil.copy2(code_path, code_path.name)
+                dest = Path(repo_filename)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(code_path, dest)
 
     def install_fine_tune(
         self,
@@ -590,30 +634,14 @@ class LocalAppRepository(AppRepositoryInfo):
                     return False
                 print("[KonfAI-Apps] Invalid input. Please choose y / n / a / s.")
 
-        for src in src_paths:
-            if src.is_dir():
-                for item in src.rglob("*"):
-                    rel = item.relative_to(src)
-                    dest = path / rel
-                    if item.is_dir():
-                        dest.mkdir(parents=True, exist_ok=True)
-                        continue
-
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    if dest.exists() and not ask_overwrite_cli(dest):
-                        continue
-                    shutil.copy2(item, dest)
-                    if str(item).endswith(".pt"):
-                        models_path.append(item)
-
-            elif src.is_file() or src.is_symlink():
-                dest = path / src.name
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if str(src).endswith(".pt"):
-                    models_path.append(src)
-                if dest.exists() and not ask_overwrite_cli(dest):
-                    continue
-                shutil.copy2(src, dest)
+        for repo_filename, src in src_paths:
+            dest = path / repo_filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if str(src).endswith(".pt"):
+                models_path.append(src)
+            if dest.exists() and not ask_overwrite_cli(dest):
+                continue
+            shutil.copy2(src, dest)
 
         metadata_file = path / "app.json"
         config_file_path = path / config_file
@@ -658,7 +686,8 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
 
     @staticmethod
     def get_filenames(app_directory: Path, app_name: str) -> list[str]:
-        return [filename.name for filename in (app_directory / app_name).glob("*")]
+        root = app_directory / app_name
+        return sorted([path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()])
 
     def _get_filenames(self) -> list[str]:
         return LocalAppRepositoryFromDirectory.get_filenames(self._app_directory, self._app_name)
@@ -679,12 +708,51 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         super().__init__(app_name)
 
     @staticmethod
+    def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:
+        base_repo_id, _, revision = repo_id.partition("@")
+        return base_repo_id, revision or None
+
+    @staticmethod
+    def _list_repo_tree(repo_id: str, app_name: str, recursive: bool = False) -> list[Any]:
+        base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+        api = HfApi()
+        return list(
+            api.list_repo_tree(
+                repo_id=base_repo_id,
+                path_in_repo=app_name,
+                recursive=recursive,
+                revision=revision,
+                repo_type="model",
+            )
+        )
+
+    @staticmethod
+    def _get_sync_patterns(repo_id: str, app_name: str, requested_filename: str) -> list[str]:
+        requested_path = PurePosixPath(requested_filename)
+        sync_patterns: set[str] = {requested_path.as_posix()}
+
+        for entry in LocalAppRepositoryFromHF._list_repo_tree(repo_id, app_name, recursive=True):
+            if isinstance(entry, RepoFolder):
+                continue
+            entry_path = PurePosixPath(entry.path)
+            if entry_path.suffix != ".pt":
+                sync_patterns.add(entry_path.as_posix())
+
+        return sorted(sync_patterns)
+
+    @staticmethod
     def get_filenames(repo_id: str, app_name: str, force_update: bool) -> list[str]:
         if force_update:
             try:
-                api = HfApi()
-                tree = api.list_repo_tree(repo_id=repo_id, path_in_repo=app_name)
-                return sorted([Path(filename.path).name for filename in tree])
+                app_root = PurePosixPath(app_name)
+                tree = LocalAppRepositoryFromHF._list_repo_tree(repo_id, app_name, recursive=True)
+                return sorted(
+                    [
+                        PurePosixPath(entry.path).relative_to(app_root).as_posix()
+                        for entry in tree
+                        if not isinstance(entry, RepoFolder)
+                    ]
+                )
             except Exception as exc:
                 raise AppRepositoryError(
                     f"Failed to list contents of '{app_name}' in Hugging Face repository '{repo_id}'. "
@@ -694,34 +762,80 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
                     f"Original error: {exc}"
                 )
         try:
-            snapshot_dir = snapshot_download(
-                repo_id=repo_id,
+            base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+            app_json_path = hf_hub_download(
+                repo_id=base_repo_id,
+                filename=f"{app_name}/app.json",
                 repo_type="model",
                 local_files_only=True,
-                revision="main",
+                revision=revision,
             )  # nosec B615
-            folder = Path(snapshot_dir) / app_name
-            return sorted([path.name for path in folder.iterdir() if path.is_file()])
+            folder = Path(app_json_path).parent
+            return sorted([path.relative_to(folder).as_posix() for path in folder.rglob("*") if path.is_file()])
         except Exception:
             return LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, True)
+
+    @staticmethod
+    def get_cached_filenames(repo_id: str, app_name: str) -> list[str]:
+        try:
+            base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+            app_json_path = hf_hub_download(
+                repo_id=base_repo_id,
+                filename=f"{app_name}/app.json",
+                repo_type="model",
+                local_files_only=True,
+                revision=revision,
+            )  # nosec B615
+            folder = Path(app_json_path).parent
+            return sorted([path.relative_to(folder).as_posix() for path in folder.rglob("*") if path.is_file()])
+        except Exception:
+            return []
 
     def _get_filenames(self) -> list[str]:
         return LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, self._force_update)
 
+    def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
+        cached_filenames = LocalAppRepositoryFromHF.get_cached_filenames(self._repo_id, self._app_name)
+        return [
+            checkpoint_name
+            for checkpoint_name in checkpoints_name
+            if self._find_repo_filename(checkpoint_name, cached_filenames, suffix=".pt") is not None
+        ]
+
     @staticmethod
     def download(repo_id: str, filename: str, force_update: bool) -> Path:
+        base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
         if force_update:
             try:
                 from huggingface_hub.constants import HF_HUB_CACHE
                 from huggingface_hub.file_download import repo_folder_name
 
-                lock_path = Path(HF_HUB_CACHE) / ".locks" / repo_folder_name(repo_id=repo_id, repo_type="model")
+                filename_path = PurePosixPath(filename)
+                if len(filename_path.parts) < 2:
+                    raise AppRepositoryError(
+                        f"Invalid Hugging Face app path '{filename}'. Expected '<app_name>/<file>'."
+                    )
+                app_name = filename_path.parts[0]
+                allow_patterns = LocalAppRepositoryFromHF._get_sync_patterns(repo_id, app_name, filename)
+
+                lock_path = (
+                    Path(HF_HUB_CACHE)
+                    / ".locks"
+                    / repo_folder_name(
+                        repo_id=base_repo_id,
+                        repo_type="model",
+                    )
+                )
                 if lock_path.is_dir():
                     shutil.rmtree(lock_path)
 
-                return Path(
-                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
-                )
+                snapshot_dir = snapshot_download(
+                    repo_id=base_repo_id,
+                    repo_type="model",
+                    revision=revision,
+                    allow_patterns=allow_patterns,
+                )  # nosec B615
+                return Path(snapshot_dir) / filename_path
             except Exception as exc:
                 raise AppRepositoryError(
                     f"Failed to download '{filename}' from '{repo_id}'. "
@@ -730,10 +844,10 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         try:
             return Path(
                 hf_hub_download(
-                    repo_id=repo_id,
+                    repo_id=base_repo_id,
                     filename=filename,
                     repo_type="model",
-                    revision=None,
+                    revision=revision,
                     local_files_only=True,
                 )  # nosec B615
             )
