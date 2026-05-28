@@ -63,13 +63,32 @@ Use:
 - `validation` to carve out a validation split during training or to define a
   validation report during evaluation
 
+Supported `subset` forms are inferred from the dataset loader code:
+
+- `None`
+- `0:10`
+- `./Subset.txt`
+- `~./Exclude.txt`
+- `[0, 1, 2]`
+- `["CASE_001", "CASE_002"]`
+- `["./SubsetA.txt", "./SubsetB.txt"]`
+
 Supported `validation` forms are inferred from the dataset loader code:
 
+- `None`
 - `0.2`
 - `0:10`
 - `./Validation.txt`
 - `[0, 1, 2]`
 - `["CASE_001", "CASE_002"]`
+- `["./ValidationA.txt", "./ValidationB.txt"]`
+
+Notes:
+
+- `subset: None` keeps the full dataset
+- `validation: None` keeps the full subset for training and disables the
+  validation split
+- `~...` exclusion applies to `subset`, not to `validation`
 
 ## Local modules next to YAML files
 

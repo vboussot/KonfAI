@@ -37,7 +37,7 @@ Evaluator:
                 inverse: true
             isInput: true
     subset: None # Use the full dataset
-    validation: None # Optional file listing validation cases (one patient per line); evaluated separately from training and produces a separate metrics JSON (useful for test cases)
+    validation: None # Optional validation selector: case-list file, list of files, or case names; produces a separate metrics JSON
     filter: None # Optional dataset filtering rule
     dataset_filenames: # Dataset sources (ground truth CT + predicted sCT)
     - ./Dataset:a:mha

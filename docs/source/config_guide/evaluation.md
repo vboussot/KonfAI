@@ -60,7 +60,7 @@ Common fields:
 | `dataset_filenames` | list[str] | Pairs or merges the datasets needed for evaluation. |
 | `groups_src` | mapping | Defines how the compared tensors are loaded. |
 | `subset` | object | Restricts evaluated cases. |
-| `validation` | string or null | Optional file listing validation cases for a separate JSON report. |
+| `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |
 
 ## Output files
 

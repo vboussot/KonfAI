@@ -9,6 +9,16 @@ The example used here is the shipped segmentation baseline in
 ``examples/Segmentation`` because it is the simplest starting point in the
 repository.
 
+By the end of this page, you should have:
+
+- one trained checkpoint under ``Checkpoints/SEG_BASELINE/``
+- one statistics folder under ``Statistics/SEG_BASELINE/``
+- optionally one prediction dataset and one evaluation JSON
+
+If you prefer a notebook-driven first run, especially on a fresh machine or in
+Google Colab, use ``examples/Segmentation/Segmentation_demo.ipynb`` instead of
+the CLI flow below.
+
 Prerequisites
 -------------
 
@@ -99,6 +109,10 @@ Training creates, at minimum:
 - ``Checkpoints/SEG_BASELINE/``
 - ``Statistics/SEG_BASELINE/``
 
+This is the most important first milestone. If these folders are created, your
+installation, dataset layout, and training entrypoint are all working together.
+If you only want a first success today, it is reasonable to stop here.
+
 Run prediction
 --------------
 
@@ -135,6 +149,17 @@ What to inspect
   ``Evaluations/`` for reproducibility
 - The prediction dataset written under ``Predictions/SEG_BASELINE/Dataset/``
 - The aggregated metrics in ``Metric_TRAIN.json``
+
+Success checklist
+-----------------
+
+You can consider the onboarding successful if:
+
+- ``konfai --help`` works
+- the demo dataset matches the expected folder layout
+- ``konfai TRAIN`` creates ``Checkpoints/SEG_BASELINE/`` and ``Statistics/SEG_BASELINE/``
+- ``konfai PREDICTION`` creates ``Predictions/SEG_BASELINE/``
+- ``konfai EVALUATION`` creates ``Evaluations/SEG_BASELINE/Metric_TRAIN.json``
 
 Common first issues
 -------------------

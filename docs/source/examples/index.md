@@ -38,6 +38,12 @@ configuration model:
 - shared prediction and evaluation configs
 - a GAN variant with nested patching scopes
 
+A good adoption pattern is:
+
+1. get **Segmentation** to run once
+2. adapt that layout to your own data
+3. move to **Synthesis** only when you need custom modules or more advanced workflow structure
+
 ## Working from the repository
 
 All example commands in this documentation assume you are running from the

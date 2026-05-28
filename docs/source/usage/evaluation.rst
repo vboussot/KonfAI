@@ -59,8 +59,9 @@ The ``i`` flag keeps only cases present in both sources.
 Validation reports
 ------------------
 
-``Evaluator.Dataset.validation`` can optionally point to a case list. When it is
-set, KonfAI writes a separate validation metrics JSON in addition to
+``Evaluator.Dataset.validation`` can optionally target a case list or an
+explicit case selector. When it is set, KonfAI writes a separate validation
+metrics JSON in addition to
 ``Metric_TRAIN.json``.
 
 Common evaluation mistakes

@@ -81,10 +81,13 @@ When in doubt:
 
 `Dataset.validation` is flexible. In code it can be:
 
+- `None`
 - a float ratio
 - a `start:stop` slice string
 - a path to a text file
-- an explicit list of indices or case names
+- an explicit list of indices
+- an explicit list of case names
+- a list mixing case names and text-file paths
 
 If the split looks wrong, check which form your config is actually using.
 

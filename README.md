@@ -107,6 +107,8 @@ Notebook entry points:
 For editable installs and optional extras such as `server` or `cluster`, see:
 
 - [`docs/source/getting-started/installation.md`](docs/source/getting-started/installation.md)
+- [`docs/source/quickstart.rst`](docs/source/quickstart.rst)
+- [`examples/Segmentation/README.md`](examples/Segmentation/README.md)
 
 ---
 

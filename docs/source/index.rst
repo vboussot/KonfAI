@@ -30,6 +30,18 @@ If you want one concrete recommendation: start with
 ``examples/Segmentation`` and the ``konfai TRAIN`` command before looking at
 KonfAI Apps.
 
+Choose your start
+-----------------
+
+- I want the fastest first successful run: :doc:`quickstart`
+- I want to copy a working example before learning the internals: :doc:`examples/index`
+- I want to understand how the YAML maps to Python objects: :doc:`concepts/index`
+- I want to package a stable workflow behind a cleaner interface: :doc:`concepts/apps`
+
+For most new users, the best first stopping point is simple: get
+``examples/Segmentation`` to run through ``konfai TRAIN`` and confirm that
+``Checkpoints/`` and ``Statistics/`` are created.
+
 Quick links
 -----------
 

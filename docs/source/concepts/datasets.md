@@ -89,14 +89,25 @@ Examples:
 
 KonfAI supports several ways to define subsets and validation sets.
 
+From the dataset code, `subset` may be:
+
+- `None`
+- a slice string such as `0:10`
+- a path to a text file listing case names
+- a `~path.txt` exclusion file
+- a list of indices
+- a list of case names
+- a list of case-list files
+
 From the dataset code, `validation` may be:
 
+- `None`
 - a float such as `0.2`
 - a slice string such as `0:10`
 - a path to a text file listing case names
 - a list of indices
 - a list of case names
-- `None`
+- a list mixing case names and case-list files
 
 The `subset` object is applied before validation splitting and can exclude or
 include items. The exact logic is implemented by `TrainSubset` and

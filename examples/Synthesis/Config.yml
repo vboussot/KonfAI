@@ -156,7 +156,7 @@ Trainer:
       mask: None
       pad_value: -1 # Value used when padding outside image boundaries
       extend_slice: 4 # Number of neighboring slices used as context (2 above and 2 below for 2.5D input)
-    subset: None  # Use the full dataset (or give a file path listing cases; prefix with ~ to exclude cases)
+    subset: None  # Use the full dataset (or give a case-list file / list of files; prefix entries with ~ to exclude cases)
     shuffle: true # Shuffle samples at each epoch
     filter: None # Optional dataset filtering rule
     dataset_filenames:  # Dataset sources (format: folder_path:mode:image_format; mode = a = add cases, i = keep only common cases across datasets)
@@ -164,7 +164,7 @@ Trainer:
     inline_augmentations: true # Apply new augmentations at each epoch
     use_cache: true # Cache processed data in memory for faster training
     batch_size: 1 # Number of samples per training batch
-    validation: None  # Path to a file defining validation cases (each line = patient name)
+    validation: None  # None = no validation split, or use a case-list file / list of files / case names
   train_name: TRAIN_01  # Training name used to create the output folder structure
   manual_seed: 32 # Fixed seed for reproducibility
   epochs: 100
