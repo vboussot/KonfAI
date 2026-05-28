@@ -4,6 +4,10 @@
 [![CI](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/vboussot/KonfAI/actions/workflows/konfai_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://arxiv.org/abs/2510.21358)
 
+<p align="center">
+  <img src="Logo.png" alt="IMPACT-Synth logo" width="220">
+</p>
+
 # IMPACT-Synth-KonfAI
 
 **Fast and lightweight CLI for synthetic CT generation using IMPACT-Synth models within the KonfAI framework.**

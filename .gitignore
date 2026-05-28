@@ -13,5 +13,6 @@ examples/Synthesis/Task_1
 .vscode
 .mypy_cache
 apps/impact_reg
+apps/impact_seg
 docs/build/
 .codex
