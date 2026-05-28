@@ -5,10 +5,19 @@ import numpy as np
 import pytest
 import torch
 
-from konfai.data.data_manager import DataPrediction, DatasetIter, DataTrain, Group, GroupTransform
+from konfai.data.data_manager import (
+    Data,
+    DataPrediction,
+    DatasetIter,
+    DataTrain,
+    Group,
+    GroupTransform,
+    PredictionSubset,
+)
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import KonfAIInference, Normalize, Standardize, TransformLoader
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.runtime import State
 
 SimpleITK = pytest.importorskip("SimpleITK")
 
@@ -139,6 +148,174 @@ def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
     assert cast(int, dataset.dataLoader_args["num_workers"]) >= 1
     assert dataset.dataLoader_args["prefetch_factor"] == 2
     assert dataset.dataLoader_args["persistent_workers"] is True
+
+
+def test_prediction_subset_none_selects_full_dataset() -> None:
+    subset = PredictionSubset(None)
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002"], {})
+
+    assert selected == {"CASE_000", "CASE_001", "CASE_002"}
+
+
+def test_prediction_subset_accepts_explicit_index_lists() -> None:
+    subset = PredictionSubset([0, 2])
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002"], {})
+
+    assert selected == {"CASE_000", "CASE_002"}
+
+
+def test_prediction_subset_accepts_lists_of_case_files(tmp_path: Path) -> None:
+    file_a = tmp_path / "subset_a.txt"
+    file_b = tmp_path / "subset_b.txt"
+    file_a.write_text("CASE_000\nCASE_002\n", encoding="utf-8")
+    file_b.write_text("CASE_001\n", encoding="utf-8")
+    subset = PredictionSubset([str(file_a), str(file_b)])
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002", "CASE_003"], {})
+
+    assert selected == {"CASE_000", "CASE_001", "CASE_002"}
+
+
+def test_prediction_subset_keeps_tilde_file_exclusion_with_file_lists(tmp_path: Path) -> None:
+    include_file = tmp_path / "subset_include.txt"
+    exclude_file = tmp_path / "subset_exclude.txt"
+    include_file.write_text("CASE_000\nCASE_001\nCASE_002\n", encoding="utf-8")
+    exclude_file.write_text("CASE_001\n", encoding="utf-8")
+    subset = PredictionSubset([str(include_file), f"~{exclude_file}"])
+
+    selected = subset(["CASE_000", "CASE_001", "CASE_002", "CASE_003"], {})
+
+    assert selected == {"CASE_000", "CASE_002"}
+
+
+def test_builtin_subset_does_not_read_infos_during_common_name_resolution() -> None:
+    class InfoCountingDataset:
+        def __init__(self) -> None:
+            self.info_calls = 0
+
+        @staticmethod
+        def get_names(group: str) -> list[str]:
+            assert group == "CT"
+            return ["CASE_000", "CASE_001"]
+
+        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+            assert group == "CT"
+            self.info_calls += 1
+            return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+
+    dataset = DataPrediction(
+        augmentations=None,
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+    )
+    dataset.datasets = {"fake": cast(Dataset, InfoCountingDataset())}
+
+    dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]})
+
+    assert dataset_name["CT"]["fake"] == ["CASE_000", "CASE_001"]
+    assert subset_names == {"CASE_000", "CASE_001"}
+    assert cast(InfoCountingDataset, dataset.datasets["fake"]).info_calls == 0
+
+
+def test_custom_subset_can_still_request_infos_during_common_name_resolution() -> None:
+    class InfoCountingDataset:
+        def __init__(self) -> None:
+            self.info_calls = 0
+
+        @staticmethod
+        def get_names(group: str) -> list[str]:
+            assert group == "CT"
+            return ["CASE_000", "CASE_001"]
+
+        def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+            assert group == "CT"
+            self.info_calls += 1
+            return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+
+    class InfoAwareSubset(PredictionSubset):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.last_infos: dict[str, tuple[list[int], Attribute]] | None = None
+
+        def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
+            self.last_infos = infos
+            return set(names)
+
+    subset = InfoAwareSubset()
+    dataset = DataPrediction(
+        augmentations=None,
+        subset=subset,
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+    )
+    dataset.datasets = {"fake": cast(Dataset, InfoCountingDataset())}
+
+    _dataset_name, subset_names = dataset._resolve_common_names({"CT": [("fake", True)]})
+
+    assert subset_names == {"CASE_000", "CASE_001"}
+    assert subset.last_infos is not None
+    assert set(subset.last_infos) == {"CASE_000", "CASE_001"}
+    assert cast(InfoCountingDataset, dataset.datasets["fake"]).info_calls == 2
+
+
+def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path: Path) -> None:
+    validation_file = tmp_path / "validation.txt"
+    validation_file.write_text("CASE_001\nCASE_003\n", encoding="utf-8")
+    dataset = DataTrain(
+        augmentations=None,
+        validation=[str(validation_file), "CASE_002"],
+    )
+
+    _train_mapping, validate_mapping, train_names, validation_names = dataset._split_train_validation(
+        ["CASE_000", "CASE_001", "CASE_002", "CASE_003"],
+        [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)],
+    )
+
+    assert [entry[0] for entry in validate_mapping] == [1, 2, 3]
+    assert train_names == ["CASE_000"]
+    assert validation_names == ["CASE_001", "CASE_002", "CASE_003"]
+
+
+def test_data_split_prediction_keeps_case_patches_together_and_allows_empty_shards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+
+    shards = Data._split(
+        [(0, 0, 0), (0, 0, 1), (1, 0, 0), (2, 0, 0), (2, 0, 1)],
+        4,
+    )
+
+    assert shards == [
+        [(0, 0, 0), (0, 0, 1)],
+        [(1, 0, 0)],
+        [(2, 0, 0), (2, 0, 1)],
+        [],
+    ]
+
+
+def test_data_remap_dataset_indices_compacts_sparse_mapping_indices() -> None:
+    indices, remapped = Data._remap_dataset_indices([(3, 0, 0), (3, 0, 1), (8, 1, 0), (3, 1, 2)])
+
+    assert indices == [3, 8]
+    assert remapped == [(0, 0, 0), (0, 0, 1), (1, 1, 0), (0, 1, 2)]
+
+
+def test_data_train_validation_none_keeps_full_dataset_for_training() -> None:
+    dataset = DataTrain(
+        augmentations=None,
+        validation=None,
+    )
+
+    train_mapping, validate_mapping, train_names, validation_names = dataset._split_train_validation(
+        ["CASE_000", "CASE_001", "CASE_002"],
+        [(0, 0, 0), (1, 0, 0), (2, 0, 0)],
+    )
+
+    assert [entry[0] for entry in train_mapping] == [0, 1, 2]
+    assert validate_mapping == []
+    assert train_names == ["CASE_000", "CASE_001", "CASE_002"]
+    assert validation_names == []
 
 
 def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> None:

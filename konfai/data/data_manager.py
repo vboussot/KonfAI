@@ -392,37 +392,48 @@ class Subset:
         self.subset = subset
         self.shuffle = shuffle
 
-    def _get_index(self, subset: str | int, names: list[str]) -> list[int]:
+    @staticmethod
+    def _read_names_from_file(filename: str) -> list[str]:
+        with open(filename) as f:
+            return [name.strip() for name in f if name.strip()]
+
+    def requires_infos(self) -> bool:
+        """Return whether this subset implementation needs per-sample metadata."""
+        return self.__class__.__call__ is not Subset.__call__
+
+    def _resolve_selector(self, subset: str | int, names: list[str]) -> tuple[set[int], bool]:
         size = len(names)
-        index = []
+        name_to_index = {name: i for i, name in enumerate(names)}
+
         if isinstance(subset, int):
-            index.append(subset)
-        elif ":" in subset:
+            return {subset}, False
+        if ":" in subset:
             r = np.clip(
                 np.asarray([int(subset.split(":")[0]), int(subset.split(":")[1])]),
                 0,
                 size,
             )
-            index = list(range(r[0], r[1]))
-        elif os.path.exists(subset):
-            train_names = []
-            with open(subset) as f:
-                for name in f:
-                    train_names.append(name.strip())
-            index = []
-            for i, name in enumerate(names):
-                if name in train_names:
-                    index.append(i)
-        elif subset.startswith("~") and os.path.exists(subset[1:]):
-            exclude_names = []
-            with open(subset[1:]) as f:
-                for name in f:
-                    exclude_names.append(name.strip())
-            index = []
-            for i, name in enumerate(names):
-                if name not in exclude_names:
-                    index.append(i)
-        return index
+            return set(range(int(r[0]), int(r[1]))), False
+        if subset.startswith("~"):
+            excluded = subset[1:]
+            if os.path.exists(excluded):
+                exclude_names = set(self._read_names_from_file(excluded))
+                return {i for i, name in enumerate(names) if name in exclude_names}, True
+            if excluded in name_to_index:
+                return {name_to_index[excluded]}, True
+            return set(), True
+        if os.path.exists(subset):
+            selected_names = set(self._read_names_from_file(subset))
+            return {i for i, name in enumerate(names) if name in selected_names}, False
+        if subset in name_to_index:
+            return {name_to_index[subset]}, False
+        return set(), False
+
+    def _get_index(self, subset: str | int, names: list[str]) -> list[int]:
+        index, is_exclusion = self._resolve_selector(subset, names)
+        if is_exclusion:
+            return [i for i in range(len(names)) if i not in index]
+        return list(index)
 
     def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
         names = sorted(names)
@@ -431,13 +442,21 @@ class Subset:
         if self.subset is None:
             index = list(range(0, size))
         elif isinstance(self.subset, list):
-            index_set: set[int] = set()
-            for s in self.subset:
-                if len(index_set) == 0:
-                    index_set.update(set(self._get_index(s, names)))
-                else:
-                    index_set = index_set.intersection(set(self._get_index(s, names)))
-                index = list(index_set)
+            if len(self.subset) == 0:
+                index = []
+            else:
+                include_index: set[int] = set()
+                exclude_index: set[int] = set()
+                has_include = False
+                for s in self.subset:
+                    resolved_index, is_exclusion = self._resolve_selector(s, names)
+                    if is_exclusion:
+                        exclude_index.update(resolved_index)
+                    else:
+                        include_index.update(resolved_index)
+                        has_include = True
+                index_set = include_index if has_include else set(range(size))
+                index = list(index_set.difference(exclude_index))
         else:
             index = self._get_index(self.subset, names)
         if self.shuffle:
@@ -488,6 +507,21 @@ class Data(ABC):
                     ):
                         return True
         return False
+
+    @staticmethod
+    def _read_names_from_file(filename: str) -> list[str]:
+        with open(filename) as f:
+            return [name.strip() for name in f if name.strip()]
+
+    @classmethod
+    def _resolve_name_selectors(cls, selectors: list[str]) -> set[str]:
+        resolved_names: set[str] = set()
+        for selector in selectors:
+            if os.path.exists(selector):
+                resolved_names.update(cls._read_names_from_file(selector))
+            else:
+                resolved_names.add(selector)
+        return resolved_names
 
     @abstractmethod
     def __init__(
@@ -632,18 +666,25 @@ class Data(ABC):
         datasets: dict[str, list[tuple[str, bool]]],
     ) -> tuple[dict[str, dict[str, list[str]]], set[str]]:
         dataset_name: dict[str, dict[str, list[str]]] = {}
-        dataset_info: dict[str, dict[str, dict[str, tuple[list[int], Attribute]]]] = {}
+        subset_requires_infos = self.subset.requires_infos()
+        dataset_info: dict[str, dict[str, dict[str, tuple[list[int], Attribute]]]] | None = (
+            {} if subset_requires_infos else None
+        )
+        empty_infos: dict[str, tuple[list[int], Attribute]] = {}
         names: set[str] = set()
         for group in self.groups_src:
             names_by_group = set()
             dataset_name[group] = {}
-            dataset_info[group] = {}
+            if dataset_info is not None:
+                dataset_info[group] = {}
             for filename, _ in datasets[group]:
-                names_by_group.update(self.datasets[filename].get_names(group))
-                dataset_name[group][filename] = self.datasets[filename].get_names(group)
-                dataset_info[group][filename] = {
-                    name: self.datasets[filename].get_infos(group, name) for name in dataset_name[group][filename]
-                }
+                group_names = self.datasets[filename].get_names(group)
+                names_by_group.update(group_names)
+                dataset_name[group][filename] = group_names
+                if dataset_info is not None:
+                    dataset_info[group][filename] = {
+                        name: self.datasets[filename].get_infos(group, name) for name in group_names
+                    }
             if len(names) == 0:
                 names.update(names_by_group)
             else:
@@ -660,7 +701,7 @@ class Data(ABC):
             for filename, append in datasets[group]:
                 resolved_subset = self.subset(
                     dataset_name[group][filename],
-                    dataset_info[group][filename],
+                    dataset_info[group][filename] if dataset_info is not None else empty_infos,
                 )
                 if append:
                     subset_names_bygroup.update(resolved_subset)
@@ -683,6 +724,7 @@ class Data(ABC):
                 "Please check your 'subset' configuration — it may be too restrictive or incorrectly formatted.",
                 "Examples of valid subset formats:",
                 "\tsubset: [0, 1]            # explicit indices",
+                "\tsubset: [./A.txt, ./B.txt]# union of multiple files",
                 "\tsubset: 0:10              # slice notation",
                 "\tsubset: ./Validation.txt  # external file",
                 "\tsubset: None              # to disable filtering",
@@ -718,27 +760,32 @@ class Data(ABC):
                     "Expected one of the following formats:",
                     "\t• A slice string like '0:10'",
                     "\t• A path to a text file listing validation sample names (e.g., './val.txt')",
+                    "\t• A list of text files listing validation sample names",
                     "\t• A float between 0 and 1 (e.g., 0.2)",
                     "\t• A list of sample names or indices",
                     "The provided value is neither a valid slice nor a readable file.",
                     "Please fix your 'validation' setting in the configuration.",
                 )
         elif isinstance(self.validation, list):
-            if isinstance(self.validation[0], int):
+            if len(self.validation) == 0:
+                index = []
+            elif all(isinstance(item, int) for item in self.validation):
                 index = cast(list[int], self.validation)
-            elif isinstance(self.validation[0], str):
-                index = [i for i, n in enumerate(subset_names) if n in self.validation]
+            elif all(isinstance(item, str) for item in self.validation):
+                validation_name_set = self._resolve_name_selectors(cast(list[str], self.validation))
+                index = [i for i, n in enumerate(subset_names) if n in validation_name_set]
             else:
+                element_types = sorted({type(item).__name__ for item in self.validation})
                 raise DatasetManagerError(
-                    "Invalid list type for 'validation': elements of type "
-                    f"'{type(self.validation[0]).__name__}' are not supported.",
+                    "Invalid list type for 'validation': elements of type " f"{element_types} are not supported.",
                     "Supported list element types are:",
                     "\t• int  → list of indices (e.g., [0, 1, 2])",
-                    "\t• str  → list of sample names (e.g., ['patient01', 'patient02'])",
+                    "\t• str  → list of sample names or file paths",
                     f"Received list: {self.validation}",
                 )
-        train_mapping = [m for m in mapping if m[0] not in index]
-        validate_mapping = [m for m in mapping if m[0] in index]
+        index_set = set(index)
+        train_mapping = [m for m in mapping if m[0] not in index_set]
+        validate_mapping = [m for m in mapping if m[0] in index_set]
 
         if len(train_mapping) == 0:
             raise DatasetManagerError(
@@ -756,8 +803,9 @@ class Data(ABC):
                 "Please increase the validation size, increase the dataset, or disable validation.",
             )
 
-        validation_names = [name for i, name in enumerate(subset_names) if i in index]
-        train_names = [name for name in subset_names if name not in validation_names]
+        validation_names = [name for i, name in enumerate(subset_names) if i in index_set]
+        validation_names_set = set(validation_names)
+        train_names = [name for name in subset_names if name not in validation_names_set]
         return train_mapping, validate_mapping, train_names, validation_names
 
     def _prepare_datasets(self) -> None:
@@ -783,12 +831,19 @@ class Data(ABC):
         nb_patch: list[list[int]]
         data = {}
         mapping = []
+        source_filename_by_group: dict[str, dict[str, str]] = {}
         nb_augmentation = np.max(
             [
                 int(np.sum([data_augmentation.nb for data_augmentation in self.data_augmentations_list.values()]) + 1),
                 1,
             ]
         )
+
+        for group_src, filenames_by_group in dataset_name.items():
+            source_filename_by_group[group_src] = {}
+            for filename, group_names in filenames_by_group.items():
+                for name in group_names:
+                    source_filename_by_group[group_src].setdefault(name, filename)
 
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
@@ -798,9 +853,7 @@ class Data(ABC):
                         group_src,
                         group_dest,
                         name,
-                        self.datasets[
-                            [filename for filename, names in dataset_name[group_src].items() if name in names][0]
-                        ],
+                        self.datasets[source_filename_by_group[group_src][name]],
                         patch=self.patch,
                         transforms=self.groups_src[group_src][group_dest].transforms,
                         data_augmentations_list=list(self.data_augmentations_list.values()),
@@ -829,25 +882,37 @@ class Data(ABC):
 
         mappings: list[list[tuple[int, int, int]]] = []
         if konfai_state() == str(State.PREDICTION) or konfai_state() == str(State.EVALUATION):
-            np_mapping = np.asarray(mapping)
-            unique_index = np.unique(np_mapping[:, 0])
+            mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
+            for entry in mapping:
+                mapping_by_index.setdefault(entry[0], []).append(entry)
+            unique_index = np.asarray(sorted(mapping_by_index))
             for shard in np.array_split(unique_index, world_size):
-                if len(shard) == 0:
-                    mappings.append([])
-                else:
-                    mappings.append(
-                        [
-                            tuple(v)
-                            for v in np_mapping[
-                                np.where(np.isin(np_mapping[:, 0], shard))[0],
-                                :,
-                            ]
-                        ]
-                    )
+                shard_mapping: list[tuple[int, int, int]] = []
+                for dataset_index in shard.tolist():
+                    shard_mapping.extend(mapping_by_index[int(dataset_index)])
+                mappings.append(shard_mapping)
         else:
-            for shard in np.array_split(np.arange(len(mapping)), world_size):
-                mappings.append([mapping[int(index)] for index in shard.tolist()])
+            size = len(mapping)
+            for rank in range(world_size):
+                start = (size * rank) // world_size
+                end = (size * (rank + 1)) // world_size
+                mappings.append(mapping[start:end])
         return mappings
+
+    @staticmethod
+    def _remap_dataset_indices(mapping_tmp: list[tuple[int, int, int]]) -> tuple[list[int], list[tuple[int, int, int]]]:
+        """Compress sparse dataset indices into local contiguous indices for one loader shard."""
+        local_indices: list[int] = []
+        index_map: dict[int, int] = {}
+        remapped_mapping: list[tuple[int, int, int]] = []
+        for dataset_index, augmentation_index, patch_index in mapping_tmp:
+            local_index = index_map.get(dataset_index)
+            if local_index is None:
+                local_index = len(local_indices)
+                local_indices.append(dataset_index)
+                index_map[dataset_index] = local_index
+            remapped_mapping.append((local_index, augmentation_index, patch_index))
+        return local_indices, remapped_mapping
 
     def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
         if self._prepared_data is None:
@@ -864,12 +929,9 @@ class Data(ABC):
             self.data.append([])
             self.mapping.append([])
             for mapping_tmp in mappings:
-                indexs = np.unique(np.asarray(mapping_tmp)[:, 0])
+                indexs, remapped_mapping = self._remap_dataset_indices(mapping_tmp)
                 self.data[i].append({k: [v[it] for it in indexs] for k, v in self._prepared_data.items()})
-                mapping_tmp_array = np.asarray(mapping_tmp)
-                for a, b in enumerate(indexs):
-                    mapping_tmp_array[np.where(np.asarray(mapping_tmp_array)[:, 0] == b), 0] = a
-                self.mapping[i].append([(a, b, c) for a, b, c in mapping_tmp_array])
+                self.mapping[i].append(remapped_mapping)
 
         data_loaders: list[list[DataLoader]] = []
         for i, (datas, mappings) in enumerate(zip(self.data, self.mapping)):
@@ -921,7 +983,7 @@ class DataTrain(Data):
         use_cache: bool = True,
         subset: TrainSubset = TrainSubset(),
         batch_size: int = 1,
-        validation: float | str | list[int] | list[str] = 0.2,
+        validation: float | str | list[int] | list[str] | None = 0.2,
         num_workers: int | None = None,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
@@ -988,7 +1050,7 @@ class DataMetric(Data):
         dataset_filenames: list[str] = ["default|./Dataset:mha"],
         groups_src: dict[str, GroupMetric] = {"default": GroupMetric()},
         subset: PredictionSubset = PredictionSubset(),
-        validation: str | None = None,
+        validation: str | list[int] | list[str] | None = None,
         num_workers: int | None = None,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
