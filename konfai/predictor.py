@@ -320,6 +320,10 @@ class OutSameAsGroupDataset(OutputDataset):
                     layer,
                     self.attributes[index_dataset][index_augmentation][index_patch],
                 )
+        # Prediction accumulators can span many patches; keep them on CPU so
+        # each GPU patch output is released as soon as it has been post-processed.
+        if layer.device.type != "cpu":
+            layer = layer.detach().cpu()
         self.output_layer_accumulator[index_dataset][index_augmentation].add_layer(index_patch, layer)
 
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):

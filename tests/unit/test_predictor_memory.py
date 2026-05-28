@@ -107,3 +107,65 @@ def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> No
 
     assert "Size" in output_dataset.attributes[0][0][0]
     assert output_dataset.attributes[0][0][0].get_np_array("Size").tolist() == [2.0, 2.0]
+
+
+def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() -> None:
+    class DummyPatch:
+        patch_size = [2, 2]
+
+        @staticmethod
+        def get_patch_slices(index_augmentation: int):
+            del index_augmentation
+            return [(slice(0, 2), slice(0, 2))]
+
+    class DummyManager:
+        name = "CASE_000"
+        patch = DummyPatch()
+        cache_attributes = [Attribute({"Origin": [0.0, 0.0]})]
+
+    class DummyGroupTransform:
+        patch_transforms: list[object] = []
+
+    class DummyDatasetIter:
+        groups_src = {"src": {"dest": DummyGroupTransform()}}
+
+        @staticmethod
+        def get_dataset_from_index(group_dest: str, index: int):
+            assert group_dest == "dest"
+            assert index == 0
+            return DummyManager()
+
+    class FakeCudaTensor:
+        def __init__(self) -> None:
+            self.device = torch.device("cuda:0")
+            self.cpu_calls = 0
+
+        def detach(self):
+            return self
+
+        def cpu(self) -> torch.Tensor:
+            self.cpu_calls += 1
+            return torch.ones(1, 2, 2)
+
+    output_dataset = OutSameAsGroupDataset(
+        same_as_group="src:dest",
+        dataset_filename="./Output:mha",
+        group="out",
+        patch_combine=None,
+        reduction="Mean",
+    )
+
+    fake_layer = FakeCudaTensor()
+    output_dataset.add_layer(
+        index_dataset=0,
+        index_augmentation=0,
+        index_patch=0,
+        layer=cast(torch.Tensor, fake_layer),
+        dataset=cast(DatasetIter, DummyDatasetIter()),
+        attribute=Attribute(),
+    )
+
+    stored_layer = output_dataset.output_layer_accumulator[0][0]._layer_accumulator[0]
+    assert fake_layer.cpu_calls == 1
+    assert isinstance(stored_layer, torch.Tensor)
+    assert stored_layer.device.type == "cpu"
