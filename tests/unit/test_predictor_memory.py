@@ -1,11 +1,12 @@
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
+import pytest
 import torch
 
 from konfai.data.data_manager import BatchDataItem, DatasetIter
 from konfai.network.network import Network
-from konfai.predictor import Mean, ModelComposite, OutSameAsGroupDataset
+from konfai.predictor import Mean, ModelComposite, OutSameAsGroupDataset, _Predictor
 from konfai.utils.dataset import Attribute
 
 
@@ -169,3 +170,134 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
     assert fake_layer.cpu_calls == 1
     assert isinstance(stored_layer, torch.Tensor)
     assert stored_layer.device.type == "cpu"
+
+
+def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    predictor = _Predictor.__new__(_Predictor)
+    predictor_any = cast(Any, predictor)
+    predictor_any.tb = None
+    predictor_any._has_runtime_measures = True
+    predictor_any.world_size = 2
+    predictor_any.global_rank = 0
+    predictor_any.local_rank = 0
+    predictor_any.model_composite = object()
+
+    monkeypatch.setattr(
+        "konfai.predictor.DistributedObject.get_measure",
+        staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected sync"))),
+    )
+
+    predictor._predict_log({})
+
+
+def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyPredictionDataset:
+        def __init__(self) -> None:
+            self.labels: list[str] = []
+
+        def load(self, label: str) -> None:
+            self.labels.append(label)
+
+    class DummyPredictionLoader:
+        def __init__(self, batches: list[dict[str, BatchDataItem]], dataset: DummyPredictionDataset) -> None:
+            self._batches = batches
+            self.dataset = dataset
+
+        def __iter__(self):
+            return iter(self._batches)
+
+        def __len__(self) -> int:
+            return len(self._batches)
+
+    class DummyOutputDataset:
+        group_dest = "input"
+
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def add_layer(self, *args, **kwargs) -> None:
+            pass
+
+        def is_done(self, index: int) -> bool:
+            assert index == 0
+            return True
+
+        def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DummyPredictionDataset):
+            assert index == 0
+            assert number_of_channels_per_model == [1]
+            assert isinstance(dataset, DummyPredictionDataset)
+            return torch.ones(1, 2, 2)
+
+        def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
+            assert index == 0
+            assert name == "CASE_000"
+            assert layer.shape == (1, 2, 2)
+            self.writes += 1
+
+    class DummyCompositeModule:
+        @staticmethod
+        def set_state(state) -> None:
+            del state
+
+        @staticmethod
+        def get_networks() -> dict[str, object]:
+            return {}
+
+    class DummyComposite:
+        def __init__(self) -> None:
+            self.module = DummyCompositeModule()
+            self.eval_calls = 0
+            self.eval = self._eval
+
+        def _eval(self) -> None:
+            self.eval_calls += 1
+
+        def __call__(self, batch_sample, output_layers):
+            assert output_layers == ["out_a", "out_b"]
+            return [
+                ("out_a", [1], torch.ones(1, 1, 2, 2)),
+                ("out_b", [1], torch.ones(1, 1, 2, 2) * 2),
+            ]
+
+    dataset = DummyPredictionDataset()
+    batch = {
+        "input": BatchDataItem(
+            name=["CASE_000"],
+            tensor=torch.ones(1, 1, 2, 2),
+            attribute=[Attribute()],
+            x=[0],
+            a=[0],
+            p=[0],
+            is_input=True,
+        )
+    }
+    loader = DummyPredictionLoader([batch], dataset)
+    outputs_dataset = {"out_a": DummyOutputDataset(), "out_b": DummyOutputDataset()}
+    model_composite = DummyComposite()
+
+    predictor = _Predictor.__new__(_Predictor)
+    predictor_any = cast(Any, predictor)
+    predictor_any.world_size = 1
+    predictor_any.global_rank = 0
+    predictor_any.local_rank = 0
+    predictor_any.model_composite = model_composite
+    predictor_any.dataloader_prediction = loader
+    predictor_any.outputs_dataset = outputs_dataset
+    predictor_any.autocast = False
+    predictor_any.it = 0
+    predictor_any.dataset = dataset
+    predictor_any.tb = None
+
+    log_calls: list[int] = []
+    monkeypatch.setattr(predictor, "_predict_log", lambda batch_sample: log_calls.append(len(batch_sample)))
+    monkeypatch.setattr("konfai.predictor.description", lambda model: "stub")
+
+    predictor.run()
+
+    assert log_calls == [1]
+    assert dataset.labels == ["Prediction"]
+    assert model_composite.eval_calls == 1
+    assert outputs_dataset["out_a"].writes == 1
+    assert outputs_dataset["out_b"].writes == 1

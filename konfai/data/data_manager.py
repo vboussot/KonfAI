@@ -224,6 +224,7 @@ class DatasetIter(data.Dataset):
         self.nb_dataset = len(data[list(data.keys())[0]])
         self.buffer_size = buffer_size
         self._index_cache: list[int] = []
+        self._index_cache_lookup: set[int] = set()
         self.inline_augmentations = inline_augmentations
 
     def get_patch_config(self) -> tuple[list[int] | None, int | None]:
@@ -313,8 +314,9 @@ class DatasetIter(data.Dataset):
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
                 loaded |= self.load_data(group_src, group_dest, index, augmentation_index)
-        if loaded and index not in self._index_cache:
+        if loaded and index not in self._index_cache_lookup:
             self._index_cache.append(index)
+            self._index_cache_lookup.add(index)
         return loaded
 
     def load_data(self, group_src: str, group_dest: str, index: int, augmentation_index: int | None = None) -> bool:
@@ -337,7 +339,8 @@ class DatasetIter(data.Dataset):
         return True
 
     def _unload_data(self, index: int) -> None:
-        if index in self._index_cache:
+        if index in self._index_cache_lookup:
+            self._index_cache_lookup.remove(index)
             self._index_cache.remove(index)
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
@@ -357,7 +360,7 @@ class DatasetIter(data.Dataset):
             for group_src in self.groups_src
             for group_dest in self.groups_src[group_src]
         )
-        if x not in self._index_cache and needs_full_load:
+        if x not in self._index_cache_lookup and needs_full_load:
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
                 self._unload_data(self._index_cache[0])
             self._load_data(x, a)

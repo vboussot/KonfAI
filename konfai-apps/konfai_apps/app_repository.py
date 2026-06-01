@@ -471,18 +471,26 @@ class LocalAppRepository(AppRepositoryInfo):
         inference_file_path = self._download(self._require_repo_filename(prediction_file, filenames))
         available_models = [name for name in filenames if name.endswith(".pt")]
         if len(name_of_models):
+            if isinstance(self, LocalAppRepositoryFromHF):
+                for name in name_of_models:
+                    if self._find_repo_filename(name, filenames, suffix=".pt") is None:
+                        filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+                        break
             for name in name_of_models:
                 models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
         else:
+            models_to_download = available_models
             if len(available_models) < number_of_model and isinstance(self, LocalAppRepositoryFromHF):
-                filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
-            available_models = [name for name in filenames if name.endswith(".pt")]
-            if len(available_models) < number_of_model:
+                remote_filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+                remote_models = [name for name in remote_filenames if name.endswith(".pt")]
+                models_to_download = available_models + [name for name in remote_models if name not in available_models]
+                filenames = remote_filenames
+            if len(models_to_download) < number_of_model:
                 raise AppRepositoryError(
                     f"Expected {number_of_model} model files (.pt), but found "
-                    f"{len(available_models)} in the repository."
+                    f"{len(models_to_download)} in the repository."
                 )
-            for name in available_models[:number_of_model]:
+            for name in models_to_download[:number_of_model]:
                 models_path.append(self._download(name))
 
         for filename in filenames:

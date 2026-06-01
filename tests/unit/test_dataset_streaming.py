@@ -448,3 +448,34 @@ def test_dataset_iter_streams_patch_reads_with_computed_standardize_stats() -> N
     assert dataset_stub.patch_reads == 1
     assert dataset_stub.stats_reads == 1
     np.testing.assert_allclose(sample.numpy(), expected)
+
+
+def test_dataset_iter_keeps_cache_lookup_in_sync_with_load_and_unload() -> None:
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"CT": [cast(DatasetManager, object())]},
+        mapping=[],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[],
+        patch_size=None,
+        overlap=None,
+        buffer_size=1,
+        use_cache=True,
+    )
+
+    dataset_iter.load_data = lambda *args, **kwargs: True  # type: ignore[method-assign]
+    dataset_iter.unload_data = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    assert dataset_iter._index_cache == []
+    assert dataset_iter._index_cache_lookup == set()
+
+    dataset_iter._load_data(0)
+
+    assert dataset_iter._index_cache == [0]
+    assert dataset_iter._index_cache_lookup == {0}
+
+    dataset_iter._unload_data(0)
+
+    assert dataset_iter._index_cache == []
+    assert dataset_iter._index_cache_lookup == set()

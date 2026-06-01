@@ -511,17 +511,11 @@ class _Predictor:
                     DataLog[data.split("/")[1]],
                     int(data.split("/")[2]),
                 )
+        self._has_runtime_measures = any(
+            network.measure is not None for network in self.model_composite.module.get_networks().values()
+        )
         self.tb = (
-            SummaryWriter(log_dir=predict_path / "Metric")
-            if len(
-                [
-                    network
-                    for network in self.model_composite.module.get_networks().values()
-                    if network.measure is not None
-                ]
-            )
-            or len(self.data_log)
-            else None
+            SummaryWriter(log_dir=predict_path / "Metric") if self._has_runtime_measures or len(self.data_log) else None
         )
 
     def __enter__(self):
@@ -560,10 +554,12 @@ class _Predictor:
             with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=self.autocast):
                     for _, batch_sample in batch_iter:
-                        for name, number_of_channels_per_model, output in self.model_composite(
-                            batch_sample, list(self.outputs_dataset.keys())
-                        ):
-                            self._predict_log(batch_sample)
+                        outputs = self.model_composite(
+                            batch_sample,
+                            list(self.outputs_dataset.keys()),
+                        )
+                        self._predict_log(batch_sample)
+                        for name, number_of_channels_per_model, output in outputs:
                             output_dataset = self.outputs_dataset[name]
                             group = getattr(output_dataset, "group_dest", next(iter(batch_sample)))
                             for i, (index, patch_augmentation, patch_index) in enumerate(
@@ -618,51 +614,58 @@ class _Predictor:
                 - metadata (list of strings),
                 - `requires_grad` flag (as a tensor).
         """
-        measures = DistributedObject.get_measure(
-            self.world_size,
-            self.global_rank,
-            self.local_rank,
-            {"": self.model_composite.module},
-            1,
-        )
+        if self.tb is None:
+            return
 
-        if self.global_rank == 0 and self.tb is not None:
-            images_log = []
-            if len(self.data_log):
-                for name, data_type in self.data_log.items():
-                    if name in batch_sample:
-                        data_type[0](
-                            self.tb,
-                            f"Prediction/{name}",
-                            batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
-                            self.it,
-                        )
-                    else:
-                        images_log.append(name.replace(":", "."))
+        measures: dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]] = {}
+        if self._has_runtime_measures:
+            measures = DistributedObject.get_measure(
+                self.world_size,
+                self.global_rank,
+                self.local_rank,
+                {"": self.model_composite.module},
+                1,
+            )
 
-            for name, network in self.model_composite.module.get_networks().items():
-                if network.measure is not None:
-                    self.tb.add_scalars(
-                        f"Prediction/{name}/Loss",
-                        {k.replace(":", "."): v[1] for k, v in measures[name][0].items()},
+        if self.global_rank != 0:
+            return
+
+        images_log = []
+        if len(self.data_log):
+            for name, data_type in self.data_log.items():
+                if name in batch_sample:
+                    data_type[0](
+                        self.tb,
+                        f"Prediction/{name}",
+                        batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
                         self.it,
                     )
-                    self.tb.add_scalars(
-                        f"Prediction/{name}/Metric",
-                        {k.replace(":", "."): v[1] for k, v in measures[name][1].items()},
+                else:
+                    images_log.append(name.replace(":", "."))
+
+        for name, network in self.model_composite.module.get_networks().items():
+            if network.measure is not None:
+                self.tb.add_scalars(
+                    f"Prediction/{name}/Loss",
+                    {k.replace(":", "."): v[1] for k, v in measures[name][0].items()},
+                    self.it,
+                )
+                self.tb.add_scalars(
+                    f"Prediction/{name}/Metric",
+                    {k.replace(":", "."): v[1] for k, v in measures[name][1].items()},
+                    self.it,
+                )
+            if len(images_log):
+                for name, layer, _ in self.model_composite.module.get_layers(
+                    [v.tensor for v in batch_sample.values() if v.is_input],
+                    images_log,
+                ):
+                    self.data_log[name][0](
+                        self.tb,
+                        f"Prediction/{name}",
+                        layer[: self.data_log[name][1]].detach().cpu().numpy(),
                         self.it,
                     )
-                if len(images_log):
-                    for name, layer, _ in self.model_composite.module.get_layers(
-                        [v.tensor for v in batch_sample.values() if v.is_input],
-                        images_log,
-                    ):
-                        self.data_log[name][0](
-                            self.tb,
-                            f"Prediction/{name}",
-                            layer[: self.data_log[name][1]].detach().cpu().numpy(),
-                            self.it,
-                        )
 
 
 class ModelComposite(Network):

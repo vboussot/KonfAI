@@ -190,6 +190,10 @@ class _Trainer:
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
         self.it = it
         self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
+        self._best_checkpoint_path: Path | None = None
+        self._best_checkpoint_loss: float | None = None
+        if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
+            self._initialize_best_checkpoint_state()
         self.data_log: dict[str, tuple[DataLog, int]] = {}
         if data_log is not None:
             for data in data_log:
@@ -206,6 +210,46 @@ class _Trainer:
         if self.tb is not None:
             self.tb.close()
         self.checkpoint_save(None)
+
+    def _initialize_best_checkpoint_state(self) -> None:
+        """Bootstrap BEST-checkpoint tracking once, including resume scenarios."""
+        path = checkpoints_directory() / self.train_name
+        if not path.exists():
+            return
+
+        all_checkpoints = sorted(path.glob("*.pt"))
+        best_loss = float("inf")
+        best_ckpt: Path | None = None
+        for checkpoint_path in all_checkpoints:
+            state_dict = torch.load(
+                checkpoint_path,
+                map_location=torch.device("cpu"),
+                weights_only=False,
+            )  # nosec B614
+            checkpoint_loss = float(state_dict.get("loss", float("inf")))
+            if checkpoint_loss < best_loss:
+                best_loss = checkpoint_loss
+                best_ckpt = checkpoint_path
+
+        if best_ckpt is not None:
+            self._best_checkpoint_path = best_ckpt
+            self._best_checkpoint_loss = best_loss
+            for checkpoint_path in all_checkpoints:
+                if checkpoint_path != best_ckpt:
+                    checkpoint_path.unlink()
+
+    def _update_best_checkpoint(self, checkpoint_path: Path, loss: float) -> None:
+        """Keep only the current best checkpoint without rescanning all saves."""
+        is_new_best = self._best_checkpoint_loss is None or loss < self._best_checkpoint_loss
+        if is_new_best:
+            previous_best = self._best_checkpoint_path
+            self._best_checkpoint_loss = loss
+            self._best_checkpoint_path = checkpoint_path
+            if previous_best is not None and previous_best != checkpoint_path and previous_best.exists():
+                previous_best.unlink()
+            return
+
+        checkpoint_path.unlink()
 
     def run(self) -> None:
         """
@@ -334,7 +378,7 @@ class _Trainer:
         save_dict = {
             "epoch": self.epoch,
             "it": self.it,
-            "loss": loss if loss else 0,
+            "loss": loss if loss is not None else 0,
             "Model": self.model.module.state_dict(),
         }
 
@@ -366,19 +410,7 @@ class _Trainer:
         torch.save(save_dict, save_path)
 
         if self.save_checkpoint_mode == "BEST" and loss is not None:
-            all_checkpoints = sorted(path.glob("*.pt"))
-            best_ckpt = None
-            best_loss = float("inf")
-
-            for f in all_checkpoints:
-                d = torch.load(f, map_location=torch.device("cpu"), weights_only=False)  # nosec B614
-                if d.get("loss", float("inf")) < best_loss:
-                    best_loss = d["loss"]
-                    best_ckpt = f
-
-            for f in all_checkpoints:
-                if f != best_ckpt and f != save_path:
-                    f.unlink()
+            self._update_best_checkpoint(save_path, loss)
 
     @torch.no_grad()
     def _log(

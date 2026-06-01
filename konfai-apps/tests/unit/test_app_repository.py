@@ -282,6 +282,69 @@ def test_local_hf_nested_cached_model_is_reported_available(
     assert repo.get_checkpoints_name_available() == ["model.pt"]
 
 
+def test_local_hf_download_inference_refreshes_selected_remote_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_json = tmp_path / "app.json"
+    app_json.write_text(
+        json.dumps(
+            {
+                "display_name": "Demo App",
+                "description": "HF test app",
+                "short_description": "Demo",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["CV_0.pt"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    inference_yml = tmp_path / "Inference.yml"
+    inference_yml.write_text("Predictor: {}\n", encoding="utf-8")
+
+    get_filenames_calls: list[bool] = []
+
+    def fake_get_filenames(repo_id: str, app_name: str, force_update: bool) -> list[str]:
+        get_filenames_calls.append(force_update)
+        if force_update:
+            return ["CV_0.pt", "Inference.yml", "app.json"]
+        return ["Inference.yml", "app.json"]
+
+    monkeypatch.setattr(
+        app_repository_module.LocalAppRepositoryFromHF,
+        "get_filenames",
+        staticmethod(fake_get_filenames),
+    )
+    monkeypatch.setattr(
+        app_repository_module.LocalAppRepositoryFromHF,
+        "get_cached_filenames",
+        staticmethod(lambda repo_id, app_name: ["Inference.yml", "app.json"]),
+    )
+
+    def fake_download(repo_id: str, filename: str, force_update: bool) -> Path:
+        if filename.endswith("app.json"):
+            return app_json
+        if filename.endswith("Inference.yml"):
+            return inference_yml
+        return tmp_path / Path(filename).name
+
+    monkeypatch.setattr(
+        app_repository_module.LocalAppRepositoryFromHF,
+        "download",
+        staticmethod(fake_download),
+    )
+
+    repo = app_repository_module.LocalAppRepositoryFromHF("org/demo", "demo_app", False)
+
+    models_path, prediction_path, codes_path = repo.download_inference(1, ["CV_0"], "Inference.yml")
+
+    assert models_path == [tmp_path / "CV_0.pt"]
+    assert prediction_path == inference_yml
+    assert codes_path == []
+    assert get_filenames_calls == [False, False, True]
+
+
 def test_local_directory_install_inference_preserves_nested_python_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
