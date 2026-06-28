@@ -21,10 +21,11 @@ Example:
 
 ```yaml
 Model:
-  classpath: segmentation.UNet.UNet
+  classpath: UNet.yml
   UNet:
-    dim: 2
-    nb_class: 41
+    parameters:
+      dim: 2
+      nb_class: 41
 ```
 
 ## Addressing outputs
@@ -122,6 +123,7 @@ This lets you control:
 ## See also
 
 - {doc}`configuration`
+- {doc}`yaml-model-builder`
 - {doc}`datasets`
 - {doc}`../config_guide/prediction`
 - {doc}`../usage/custom-models`

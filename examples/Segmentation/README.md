@@ -12,7 +12,7 @@ It is intentionally conservative and is meant to be:
 
 The current baseline uses:
 
-- the built-in `segmentation.UNet.UNet`
+- the routed KonfAI model graph declared in `UNet.yml`
 - a 2D slice-wise setup
 - patch-based training
 - `CrossEntropyLoss` during training
@@ -24,6 +24,7 @@ The current baseline uses:
 ```text
 examples/Segmentation/
 ├── Config.yml
+├── UNet.yml
 ├── Prediction.yml
 ├── Evaluation.yml
 ├── README.md
@@ -31,6 +32,7 @@ examples/Segmentation/
 ```
 
 - `Config.yml`: training workflow
+- `UNet.yml`: UNet modules, nested skip connections, parameters, and routing
 - `Prediction.yml`: inference workflow
 - `Evaluation.yml`: evaluation workflow
 - `Segmentation_demo.ipynb`: guided onboarding notebook
