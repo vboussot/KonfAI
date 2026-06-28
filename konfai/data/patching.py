@@ -24,9 +24,9 @@ from dataclasses import dataclass
 from functools import partial
 
 import numpy as np
-import SimpleITK as sitk  # noqa: N813
+import SimpleITK as sitk
 import torch
-import torch.nn.functional as F  # noqa: N812
+import torch.nn.functional as F
 
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.transform import Clip, Normalize, Save, Standardize, TensorCast, Transform
@@ -102,7 +102,7 @@ class PathCombine(ABC):
                     for index in indexs:
                         slices_list.insert(index, c)
                     result.append(tuple(slices_list))
-                for patch, s in zip(PathCombine._normalise([self.data[s] for s in result]), result):
+                for patch, s in zip(PathCombine._normalise([self.data[s] for s in result]), result, strict=False):
                     self.data[s] = patch
 
     @staticmethod
@@ -162,7 +162,7 @@ class Accumulator:
         if patch_size is not None and not all(p == 0 for p in patch_size):
             for patch in patch_slices:
                 slices: list[slice] = []
-                for s, shape in zip(patch, patch_size):
+                for s, shape in zip(patch, patch_size, strict=False):
                     slices.append(slice(s.start, s.start + shape))
                 self.patch_slices.append(tuple(slices))
         else:
@@ -189,7 +189,7 @@ class Accumulator:
                 ),
                 dtype=self._layer_accumulator[0].dtype,
             ).to(self._layer_accumulator[0].device)
-        for patch_slice, data in zip(self.patch_slices, self._layer_accumulator):
+        for patch_slice, data in zip(self.patch_slices, self._layer_accumulator, strict=False):
             if data is not None:
                 slices_dest = tuple([slice(result.shape[i]) for i in range(n)] + list(patch_slice))
 
@@ -264,7 +264,7 @@ class Patch(ABC):
                 else data_shape[len(slices_pre)]
             ),
         )
-        slices = [s] + list(self._patch_slices[a][index][1:])
+        slices = [s, *list(self._patch_slices[a][index][1:])]
         reflect_padding = [0 for _ in range((len(slices) - 1) * 2)] + [0, 0]
         if extend_slice > 0 and (s.stop - s.start) < bottom + top + 1:
             if self._patch_slices[a][index][0].start - bottom < 0:
@@ -529,7 +529,7 @@ class DatasetManager:
             if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:
                 a_data = data_augmentation(self.name, self.index, a_data)
 
-        for index, data in zip(indices, a_data):
+        for index, data in zip(indices, a_data, strict=False):
             self.augmented_data[index] = data
         self.augmentationLoaded = len(self.augmented_data) == self.total_augmentations
 

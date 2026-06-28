@@ -4,7 +4,6 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
-
 from konfai.data.data_manager import (
     Data,
     DataPrediction,
@@ -15,7 +14,7 @@ from konfai.data.data_manager import (
     PredictionSubset,
 )
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import KonfAIInference, Normalize, Standardize, TransformLoader
+from konfai.data.transform import KonfAIInference, Mask, Normalize, Standardize, TransformLoader
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import State
 
@@ -74,7 +73,6 @@ def test_dataset_read_data_slice_sitk_reads_requested_patch_and_updates_origin(t
 
 
 class StreamingDatasetStub:
-
     def __init__(self, volume: np.ndarray) -> None:
         self.volume = volume
         self.full_reads = 0
@@ -450,6 +448,33 @@ def test_dataset_iter_streams_patch_reads_with_computed_standardize_stats() -> N
     np.testing.assert_allclose(sample.numpy(), expected)
 
 
+def test_transform_mask_caches_mha_read_and_reads_file_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mask.__call__ must not re-read the .mha file on every invocation."""
+    read_count = 0
+    original_read_image = SimpleITK.ReadImage
+
+    def counting_read(path: str) -> SimpleITK.Image:
+        nonlocal read_count
+        read_count += 1
+        return original_read_image(path)
+
+    monkeypatch.setattr("konfai.data.transform.sitk.ReadImage", counting_read)
+
+    mask_array = np.ones((4, 4), dtype=np.uint8)
+    mask_path = str(tmp_path / "mask.mha")
+    SimpleITK.WriteImage(SimpleITK.GetImageFromArray(mask_array), mask_path)
+
+    transform = Mask(path=mask_path, value_outside=0)
+    attr = Attribute()
+
+    for case in ("CASE_000", "CASE_001", "CASE_002"):
+        transform(case, torch.ones(1, 4, 4), attr)
+
+    assert read_count == 1, f"Expected mask to be read once, got {read_count} reads"
+
+
 def test_dataset_iter_keeps_cache_lookup_in_sync_with_load_and_unload() -> None:
     dataset_iter = DatasetIter(
         rank=0,
@@ -479,3 +504,42 @@ def test_dataset_iter_keeps_cache_lookup_in_sync_with_load_and_unload() -> None:
 
     assert dataset_iter._index_cache == []
     assert dataset_iter._index_cache_lookup == set()
+
+
+def test_dataset_get_names_caches_result_and_avoids_repeated_listdir(tmp_path: Path) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
+    dataset.write("CT", "CASE_000", volume, attrs)
+    dataset.write("CT", "CASE_001", volume, attrs)
+
+    first = dataset.get_names("CT")
+    cached = dataset.get_names("CT")
+
+    assert first == cached == ["CASE_000", "CASE_001"]
+    assert "CT" in dataset._names_cache
+
+
+def test_dataset_get_names_cache_invalidated_on_write(tmp_path: Path) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
+    dataset.write("CT", "CASE_000", volume, attrs)
+
+    _ = dataset.get_names("CT")
+    assert dataset._names_cache
+
+    dataset.write("CT", "CASE_001", volume, attrs)
+    assert not dataset._names_cache
+    assert dataset.get_names("CT") == ["CASE_000", "CASE_001"]
+
+
+def test_dataset_is_dataset_exist_benefits_from_cache(tmp_path: Path) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
+    dataset.write("CT", "CASE_000", volume, attrs)
+
+    assert dataset.is_dataset_exist("CT", "CASE_000")
+    assert "CT" in dataset._names_cache
+    assert not dataset.is_dataset_exist("CT", "CASE_999")

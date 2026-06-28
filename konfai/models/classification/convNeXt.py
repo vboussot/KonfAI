@@ -14,9 +14,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import torch.nn.functional as F  # noqa: N812
+import itertools
 
+import torch
+import torch.nn.functional as F
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
@@ -39,7 +40,6 @@ depths=[3, 3, 27, 3], dims=[256, 512, 1024, 2048]
 
 
 class LayerNorm(torch.nn.Module):
-
     def __init__(
         self,
         normalized_shape: int,
@@ -75,7 +75,6 @@ class LayerNorm(torch.nn.Module):
 
 
 class DropPath(torch.nn.Module):
-
     def __init__(self, drop_prob: float = 0.0, scale_by_keep: bool = True):
         super().__init__()
         self.drop_prob = drop_prob
@@ -96,7 +95,6 @@ class DropPath(torch.nn.Module):
 
 
 class LayerScaler(torch.nn.Module):
-
     def __init__(self, init_value: float, dimensions: int):
         super().__init__()
         self.init_value = init_value
@@ -133,7 +131,6 @@ class BottleNeckBlock(network.ModuleArgsDict):
 
 
 class DownSample(network.ModuleArgsDict):
-
     def __init__(self, in_features: int, out_features: int, dim: int):
         super().__init__()
         self.add_module(
@@ -149,7 +146,6 @@ class DownSample(network.ModuleArgsDict):
 
 
 class ConvNexStage(network.ModuleArgsDict):
-
     def __init__(self, features: int, depth: int, drop_p: list[float], dim: int):
         super().__init__()
         for i in range(depth):
@@ -166,7 +162,6 @@ class ConvNexStage(network.ModuleArgsDict):
 
 
 class ConvNextStem(network.ModuleArgsDict):
-
     def __init__(self, in_features: int, out_features: int, dim: int):
         super().__init__()
         self.add_module(
@@ -182,7 +177,6 @@ class ConvNextStem(network.ModuleArgsDict):
 
 
 class ConvNextEncoder(network.ModuleArgsDict):
-
     def __init__(
         self,
         in_channels: int,
@@ -210,7 +204,7 @@ class ConvNextEncoder(network.ModuleArgsDict):
             alias=["stages.0"],
         )
 
-        for i, (in_features, out_features) in enumerate(list(zip(widths[:], widths[1:]))):
+        for i, (in_features, out_features) in enumerate(list(itertools.pairwise(widths))):
             self.add_module(
                 f"DownSample_{i + 1}",
                 DownSample(in_features=in_features, out_features=out_features, dim=dim),
@@ -229,7 +223,6 @@ class ConvNextEncoder(network.ModuleArgsDict):
 
 
 class Head(network.ModuleArgsDict):
-
     def __init__(self, in_features: int, num_classes: list[int], dim: int) -> None:
         super().__init__()
         self.add_module(
@@ -256,7 +249,6 @@ class Head(network.ModuleArgsDict):
 
 
 class ConvNeXt(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),

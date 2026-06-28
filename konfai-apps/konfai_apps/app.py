@@ -31,8 +31,7 @@ from typing import Any, cast
 
 import numpy as np
 import requests
-import SimpleITK as sitk  # noqa: N813
-
+import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import KonfAIAppClientError
@@ -267,7 +266,6 @@ class KonfAIAppClient(AbstractKonfAIApp):
                 stream=True,
                 timeout=(connect_timeout, read_timeout),
             ) as r:
-
                 if r.status_code == 401:
                     raise RuntimeError("Unauthorized: invalid or missing token")
                 if r.status_code == 403:
@@ -286,10 +284,10 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         else:
                             print(msg, flush=True)
 
-        except requests.exceptions.ReadTimeout:
-            raise RuntimeError(f"Log stream stalled (no data received for {read_timeout}s)")
-        except requests.exceptions.ConnectTimeout:
-            raise RuntimeError("Connection timeout")
+        except requests.exceptions.ReadTimeout as e:
+            raise RuntimeError(f"Log stream stalled (no data received for {read_timeout}s)") from e
+        except requests.exceptions.ConnectTimeout as e:
+            raise RuntimeError("Connection timeout") from e
         except requests.RequestException as e:
             raise RuntimeError(f"Failed to stream logs from {url}: {e}") from e
 
@@ -398,7 +396,6 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     stream=True,
                     timeout=(connect_timeout, read_timeout),
                 ) as r:
-
                     if r.status_code == 401:
                         raise RuntimeError("Unauthorized: invalid or missing token")
 
@@ -413,8 +410,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
                                 f.write(chunk)
             except requests.exceptions.ConnectTimeout as e:
                 raise TimeoutError("Connection timeout while downloading result") from e
-            except requests.exceptions.ReadTimeout:
-                raise TimeoutError(f"Download stalled (no data for {read_timeout:.0f}s)")
+            except requests.exceptions.ReadTimeout as e:
+                raise TimeoutError(f"Download stalled (no data for {read_timeout:.0f}s)") from e
             except requests.RequestException as e:
                 raise RuntimeError(f"Failed to download result for job {job_id}: {e}") from e
 
@@ -713,7 +710,6 @@ class KonfAIApp(AbstractKonfAIApp):
                 else:
                     raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
             else:
-
                 for f in path.rglob("*"):
                     if f.is_file() and KonfAIApp._match_supported(f):
                         files.append(f)

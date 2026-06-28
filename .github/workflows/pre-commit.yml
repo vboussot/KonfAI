@@ -1,8 +1,13 @@
 name: pre-commit
 
+# Run repository hygiene, Ruff, mypy, and Bandit hooks on pull requests.
+# Commit-message hooks are exercised separately by commit-hygiene.yml because
+# pre-commit/action runs the pre-commit stage, not the commit-msg stage.
 on:
-  push:
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   pre-commit:

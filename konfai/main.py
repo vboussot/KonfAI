@@ -232,7 +232,7 @@ def main():
     `konfai.predictor.predict`, and `konfai.evaluator.evaluate`.
     """
     parser = argparse.ArgumentParser(
-        prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models", allow_abbrev=False
+        prog="konfAI", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
     )
     _run(parser)
 
@@ -251,7 +251,7 @@ def cluster():
       ``_run``.
     """
     parser = argparse.ArgumentParser(
-        prog="konfAI", description="KonfAI – Deep learning framework for Medical AI Models", allow_abbrev=False
+        prog="konfAI", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
     )
 
     # Cluster manager arguments

@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/konfai_ci.yml"
       - "konfai/**"
+      - "konfai-apps/**"
       - "tests/**"
       - "pyproject.toml"
       - "README.md"
@@ -12,6 +13,7 @@ on:
     paths:
       - ".github/workflows/konfai_ci.yml"
       - "konfai/**"
+      - "konfai-apps/**"
       - "tests/**"
       - "pyproject.toml"
       - "README.md"
@@ -27,7 +29,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-      
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -37,7 +39,63 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e ".[dev]"
-      
+
       - name: Run pytest
         run: |
           pytest -q tests
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.15.2
+
+      - name: Run ruff lint
+        run: ruff check konfai konfai-apps/konfai_apps
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.15.2
+
+      - name: Check formatting
+        run: ruff format --check konfai konfai-apps/konfai_apps
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install build setuptools-scm
+
+      - name: Build sdist and wheel
+        run: python -m build --sdist --wheel
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: konfai-wheel
+          path: dist/*.whl

@@ -22,9 +22,17 @@ from importlib import metadata
 from pathlib import Path
 
 import psutil
-import pynvml
 import requests
+
+try:
+    import pynvml
+
+    _PYNVML_AVAILABLE = True
+except ImportError:
+    _PYNVML_AVAILABLE = False
 from torch.cuda import get_device_name
+
+from konfai.utils.errors import KonfAIError
 
 try:
     __version__ = metadata.version("konfai")
@@ -206,15 +214,18 @@ def get_vram(
         data = r.json()
         return data["used_gb"], data["total_gb"]
     else:
+        if not _PYNVML_AVAILABLE:
+            raise KonfAIError(
+                "GPU monitoring",
+                "nvidia-ml-py is required for local VRAM queries. Install it with `pip install konfai[monitoring]`.",
+            )
         used_gb = 0.0
         total_gb = 0.0
-
         pynvml.nvmlInit()
         for device_index in devices:
             info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(device_index))
             used_gb += info.used / (1024**3)
             total_gb += info.total / (1024**3)
-
         return used_gb, total_gb
 
 

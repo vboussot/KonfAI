@@ -14,18 +14,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import itertools
 from functools import partial
 
 import torch
-
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
 
 class Discriminator(network.Network):
-
     class DiscriminatorNLayers(network.ModuleArgsDict):
-
         def __init__(self, channels: list[int], strides: list[int], dim: int) -> None:
             super().__init__()
             block_config = partial(
@@ -36,14 +34,13 @@ class Discriminator(network.Network):
                 activation=partial(torch.nn.LeakyReLU, negative_slope=0.2, inplace=True),
                 norm_mode=blocks.NormMode.SYNCBATCH,
             )
-            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides)):
+            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides, strict=False)):
                 self.add_module(
                     f"Layer_{i}",
                     blocks.ConvBlock(in_channels, out_channels, [block_config(stride=stride)], dim),
                 )
 
     class DiscriminatorHead(network.ModuleArgsDict):
-
         def __init__(self, channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -87,9 +84,7 @@ class Discriminator(network.Network):
 
 
 class Generator(network.Network):
-
     class GeneratorStem(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -103,7 +98,6 @@ class Generator(network.Network):
             )
 
     class GeneratorHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -122,7 +116,6 @@ class Generator(network.Network):
             self.add_module("Tanh", torch.nn.Tanh())
 
     class GeneratorDownSample(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -136,7 +129,6 @@ class Generator(network.Network):
             )
 
     class GeneratorUpSample(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -156,14 +148,13 @@ class Generator(network.Network):
     class GeneratorEncoder(network.ModuleArgsDict):
         def __init__(self, channels: list[int], dim: int) -> None:
             super().__init__()
-            for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
+            for i, (in_channels, out_channels) in enumerate(itertools.pairwise(channels)):
                 self.add_module(
                     f"DownSample_{i}",
                     Generator.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, dim=dim),
                 )
 
     class GeneratorResnetBlock(network.ModuleArgsDict):
-
         def __init__(self, channels: int, dim: int):
             super().__init__()
             self.add_module(
@@ -178,7 +169,6 @@ class Generator(network.Network):
             self.add_module("Residual", blocks.Add(), in_branch=[0, 1])
 
     class GeneratorNResnetBlock(network.ModuleArgsDict):
-
         def __init__(self, channels: int, nb_conv: int, dim: int) -> None:
             super().__init__()
             for i in range(nb_conv):
@@ -190,14 +180,15 @@ class Generator(network.Network):
     class GeneratorDecoder(network.ModuleArgsDict):
         def __init__(self, channels: list[int], dim: int) -> None:
             super().__init__()
-            for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
+            for i, (in_channels, out_channels) in enumerate(
+                zip(reversed(channels), reversed(channels[:-1]), strict=False)
+            ):
                 self.add_module(
                     f"UpSample_{i}",
                     Generator.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, dim=dim),
                 )
 
     class GeneratorAutoEncoder(network.ModuleArgsDict):
-
         def __init__(self, ngf: int, dim: int) -> None:
             super().__init__()
             channels = [ngf, ngf * 2]
@@ -238,7 +229,6 @@ class Generator(network.Network):
 
 
 class Gan(network.Network):
-
     def __init__(
         self,
         generator: Generator = Generator(),

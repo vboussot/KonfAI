@@ -17,7 +17,6 @@
 from abc import ABC
 
 import torch
-
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
@@ -50,13 +49,11 @@ num_classes=1000, use_bottleneck=True
 
 
 class AbstractResBlock(network.ModuleArgsDict, ABC):
-
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__()
 
 
 class ResBlock(AbstractResBlock):
-
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__(in_channels, out_channels, downsample, dim)
         if downsample:
@@ -215,7 +212,6 @@ class ResBottleneckBlock(AbstractResBlock):
 
 
 class ResNetStage(network.ModuleArgsDict):
-
     def __init__(
         self,
         in_channels: int,
@@ -250,7 +246,6 @@ class ResNetStage(network.ModuleArgsDict):
 
 
 class ResNetStem(network.ModuleArgsDict):
-
     def __init__(self, in_channels: int, out_features: int, dim: int):
         super().__init__()
         self.add_module(
@@ -279,7 +274,6 @@ class ResNetStem(network.ModuleArgsDict):
 
 
 class ResNetEncoder(network.ModuleArgsDict):
-
     def __init__(
         self,
         in_channels: int,
@@ -291,7 +285,7 @@ class ResNetEncoder(network.ModuleArgsDict):
         super().__init__()
         self.add_module("ResNetStem", ResNetStem(in_channels, widths[0], dim=dim))
 
-        for i, (in_channels, out_channels, depth) in enumerate(list(zip(widths[:], widths[1:], depths))):
+        for i, (in_channels, out_channels, depth) in enumerate(list(zip(widths[:], widths[1:], depths, strict=False))):
             self.add_module(
                 f"ResNetStage_{i}",
                 ResNetStage(
@@ -307,7 +301,6 @@ class ResNetEncoder(network.ModuleArgsDict):
 
 
 class Head(network.ModuleArgsDict):
-
     def __init__(self, in_features: int, num_classes: int, dim: int):
         super().__init__()
         self.add_module("AdaptiveAvgPool", blocks.get_torch_module("AdaptiveAvgPool", dim)(1))
@@ -322,7 +315,6 @@ class Head(network.ModuleArgsDict):
 
 
 class ResNet(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),

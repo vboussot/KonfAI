@@ -21,7 +21,7 @@ import importlib
 from collections.abc import Callable
 from enum import Enum
 
-import SimpleITK as sitk  # noqa: N813
+import SimpleITK as sitk
 import torch
 
 from konfai.network import network
@@ -247,12 +247,11 @@ def upsample(
 
 
 class Unsqueeze(torch.nn.Module):
-
     def __init__(self, dim: int = 0):
         super().__init__()
         self.dim = dim
 
-    def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         return torch.unsqueeze(tensor, self.dim)
 
     def extra_repr(self):
@@ -260,7 +259,6 @@ class Unsqueeze(torch.nn.Module):
 
 
 class Permute(torch.nn.Module):
-
     def __init__(self, dims: list[int]):
         super().__init__()
         self.dims = dims
@@ -273,19 +271,16 @@ class Permute(torch.nn.Module):
 
 
 class ToChannels(Permute):
-
     def __init__(self, dim: int):
         super().__init__([0, dim + 1, *[i + 1 for i in range(dim)]])
 
 
 class ToFeatures(Permute):
-
     def __init__(self, dim: int):
         super().__init__([0, *[i + 2 for i in range(dim)], 1])
 
 
 class Add(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -294,7 +289,6 @@ class Add(torch.nn.Module):
 
 
 class Multiply(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -303,7 +297,6 @@ class Multiply(torch.nn.Module):
 
 
 class Concat(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -312,7 +305,6 @@ class Concat(torch.nn.Module):
 
 
 class Print(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -322,7 +314,6 @@ class Print(torch.nn.Module):
 
 
 class Write(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -333,7 +324,6 @@ class Write(torch.nn.Module):
 
 
 class Exit(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -342,7 +332,6 @@ class Exit(torch.nn.Module):
 
 
 class Detach(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -351,7 +340,6 @@ class Detach(torch.nn.Module):
 
 
 class Negative(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -360,7 +348,6 @@ class Negative(torch.nn.Module):
 
 
 class GetShape(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -369,7 +356,6 @@ class GetShape(torch.nn.Module):
 
 
 class ArgMax(torch.nn.Module):
-
     def __init__(self, dim: int) -> None:
         super().__init__()
         self.dim = dim
@@ -379,21 +365,19 @@ class ArgMax(torch.nn.Module):
 
 
 class Select(torch.nn.Module):
-
     def __init__(self, slices: list[slice]) -> None:
         super().__init__()
         self.slices = tuple(slices)
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         result = tensor[self.slices]
-        for i, s in enumerate(range(len(result.shape))):
-            if s == 1:
+        for i in reversed(range(len(result.shape))):
+            if result.shape[i] == 1:
                 result = result.squeeze(dim=i)
         return result
 
 
 class NormalNoise(torch.nn.Module):
-
     def __init__(self, dim: int | None = None) -> None:
         super().__init__()
         self.dim = dim
@@ -406,7 +390,6 @@ class NormalNoise(torch.nn.Module):
 
 
 class Const(torch.nn.Module):
-
     def __init__(self, shape: list[int], std: float) -> None:
         super().__init__()
         self.noise = torch.nn.parameter.Parameter(torch.randn(shape) * std)
@@ -418,7 +401,7 @@ class Const(torch.nn.Module):
 class Subset(torch.nn.Module):
     def __init__(self, slices: list[slice]):
         super().__init__()
-        self.slices = [slice(None, None), slice(None, None)] + slices
+        self.slices = [slice(None, None), slice(None, None), *slices]
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor[self.slices]
@@ -434,9 +417,7 @@ class View(torch.nn.Module):
 
 
 class LatentDistribution(network.ModuleArgsDict):
-
     class LatentDistributionLinear(torch.nn.Module):
-
         def __init__(self, shape: list[int], latent_dim: int) -> None:
             super().__init__()
             self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), latent_dim)
@@ -445,7 +426,6 @@ class LatentDistribution(network.ModuleArgsDict):
             return torch.unsqueeze(self.linear(tensor), 1)
 
     class LatentDistributionDecoder(torch.nn.Module):
-
         def __init__(self, shape: list[int], latent_dim: int) -> None:
             super().__init__()
             self.linear = torch.nn.Linear(latent_dim, torch.prod(torch.tensor(shape)))
@@ -455,12 +435,11 @@ class LatentDistribution(network.ModuleArgsDict):
             return self.linear(tensor).view(-1, *[int(i) for i in self.shape])
 
     class LatentDistributionZ(torch.nn.Module):
-
         def __init__(self) -> None:
             super().__init__()
 
         def forward(self, mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
-            return torch.exp(log_std / 2) * torch.rand_like(mu) + mu
+            return torch.exp(log_std / 2) * torch.randn_like(mu) + mu
 
     def __init__(self, shape: list[int], latent_dim: int) -> None:
         super().__init__()
@@ -491,7 +470,6 @@ class LatentDistribution(network.ModuleArgsDict):
 
 
 class Attention(network.ModuleArgsDict):
-
     def __init__(self, f_g: int, f_l: int, f_int: int, dim: int):
         super().__init__()
         self.add_module(

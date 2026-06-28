@@ -15,13 +15,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
 
 class UNetHead(network.ModuleArgsDict):
-
     def __init__(self, in_channels: int, nb_class: int, dim: int, level: int) -> None:
         super().__init__()
         self.add_module(
@@ -39,7 +37,6 @@ class UNetHead(network.ModuleArgsDict):
 
 
 class UNetBlock(network.ModuleArgsDict):
-
     def __init__(
         self,
         channels: list[int],
@@ -138,7 +135,6 @@ class UNetBlock(network.ModuleArgsDict):
 
 
 class UNet(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
