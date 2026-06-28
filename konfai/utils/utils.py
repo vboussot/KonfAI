@@ -94,7 +94,7 @@ def get_patch_slices_from_shape(
     nb_patch_per_dim = []
     slices: list[list[slice]] = []
     if overlap_tmp is None:
-        size = [np.ceil(a / b) for a, b in zip(shape, patch_size)]
+        size = [np.ceil(a / b) for a, b in zip(shape, patch_size, strict=False)]
         tmp = np.zeros(len(size), dtype=np.int_)
         for i, s in enumerate(size):
             if s > 1:
@@ -143,6 +143,11 @@ SUPPORTED_EXTENSIONS = [
     "hdr",
     "img",  # Analyze
     "dcm",  # DICOM (si GDCM activé)
+    "dicom",  # DICOM series directory backend
+    "omezarr",
+    "ome-zarr",
+    "ome_zarr",
+    "zarr",  # OME-NGFF directory backend and accepted aliases
     "tif",
     "tiff",  # TIFF
     "png",
@@ -164,6 +169,20 @@ _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 def is_windows_absolute_path(path: str) -> bool:
     """Return whether *path* looks like a Windows absolute path."""
     return bool(_WINDOWS_ABSOLUTE_PATH_RE.match(path))
+
+
+def split_format_level(file_format: str) -> tuple[str, int]:
+    """Split an optional pyramid-level suffix from a format token.
+
+    Used by the OME-Zarr backend to pick a multiscale resolution directly in
+    the dataset spec, e.g. ``omezarr@2`` selects pyramid level 2 (coarser),
+    independently of any transform. Returns ``(base_format, level)`` and
+    defaults to level 0 (full resolution) when no ``@<int>`` suffix is present.
+    """
+    base, separator, level = file_format.rpartition("@")
+    if separator and level.isdigit():
+        return base, int(level)
+    return file_format, 0
 
 
 def split_path_spec(
