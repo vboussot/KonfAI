@@ -98,6 +98,48 @@ def test_inline_augmentations_are_loaded_on_demand() -> None:
     assert torch.equal(second_augmented_sample, torch.from_numpy(base) + 2)
 
 
+def test_dataset_iter_can_skip_augmentation_loading_when_validation_disables_them() -> None:
+    base = np.arange(4, dtype=np.float32).reshape(1, 2, 2)
+    dataset = cast(Dataset, DummyDataset(base))
+    augmentation = CountingOffsetAugmentation()
+    augmentation.load(1.0)
+
+    augmentations = DataAugmentationsList(nb=2, data_augmentations={})
+    augmentations.data_augmentations = [augmentation]
+
+    manager = DatasetManager(
+        index=0,
+        group_src="src",
+        group_dest="dest",
+        name="case_000",
+        dataset=dataset,
+        patch=None,
+        transforms=[],
+        data_augmentations_list=[augmentations],
+    )
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"dest": [manager]},
+        mapping=[(0, 0, 0)],
+        groups_src={"src": Group(groups_dest={"dest": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[augmentations],
+        patch_size=None,
+        overlap=None,
+        buffer_size=1,
+        apply_augmentations=False,
+        use_cache=True,
+    )
+
+    dataset_iter.load("Validation")
+    base_sample = dataset_iter[0]["dest"].tensor
+
+    assert augmentation.compute_calls == 0
+    assert manager.loaded is True
+    assert manager.augmentationLoaded is False
+    assert torch.equal(base_sample, torch.from_numpy(base))
+
+
 def test_simpleitk_augmentations_fail_clearly_when_dependency_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

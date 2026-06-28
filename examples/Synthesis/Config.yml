@@ -165,6 +165,7 @@ Trainer:
     use_cache: true # Cache processed data in memory for faster training
     batch_size: 1 # Number of samples per training batch
     validation: None  # None = no validation split, or use a case-list file / list of files / case names
+    validation_augmentations: true # Set to false to validate only on non-augmented samples
   train_name: TRAIN_01  # Training name used to create the output folder structure
   manual_seed: 32 # Fixed seed for reproducibility
   epochs: 100

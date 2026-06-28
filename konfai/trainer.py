@@ -59,17 +59,19 @@ class EarlyStoppingBase:
     """Minimal protocol for early stopping strategies used by :class:`Trainer`."""
 
     def __init__(self):
-        pass
+        self.early_stop = False
 
     def is_stopped(self) -> bool:
-
-        return False
+        return self.early_stop
 
     def get_score(self, values: dict[str, float]):
         return sum(list(values.values()))
 
     def __call__(self, current_score: float) -> bool:
         return False
+
+    def stop(self) -> None:
+        self.early_stop = True
 
 
 @config()
@@ -98,10 +100,6 @@ class EarlyStopping(EarlyStoppingBase):
         self.mode = mode
         self.counter = 0
         self.best_score: float | None = None
-        self.early_stop = False
-
-    def is_stopped(self) -> bool:
-        return self.early_stop
 
     def get_score(self, values: dict[str, float]):
         if len(self.monitor) == 0:
@@ -324,6 +322,13 @@ class _Trainer:
                         score = self.early_stopping.get_score(loss)
                         self.checkpoint_save(score)
                         if self.early_stopping(score):
+                            break
+
+                        # Stop once the schedulers have decayed the learning rate to zero:
+                        # no further optimisation is possible, so end the run cleanly.
+                        optimizer = self.model.module.optimizer
+                        if optimizer is not None and optimizer.param_groups[0]["lr"] <= 0:
+                            self.early_stopping.stop()
                             break
 
                 batch_iter.set_description(f"Training : {description(self.model, self.model_ema)}")

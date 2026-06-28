@@ -4,6 +4,7 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
+from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import (
     Data,
     DataPrediction,
@@ -283,12 +284,11 @@ def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path:
         validation=[str(validation_file), "CASE_002"],
     )
 
-    _train_mapping, validate_mapping, train_names, validation_names = dataset._split_train_validation(
+    train_names, validation_names = dataset._split_train_validation_names(
         ["CASE_000", "CASE_001", "CASE_002", "CASE_003"],
-        [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0)],
+        {},
     )
 
-    assert [entry[0] for entry in validate_mapping] == [1, 2, 3]
     assert train_names == ["CASE_000"]
     assert validation_names == ["CASE_001", "CASE_002", "CASE_003"]
 
@@ -324,15 +324,87 @@ def test_data_train_validation_none_keeps_full_dataset_for_training() -> None:
         validation=None,
     )
 
-    train_mapping, validate_mapping, train_names, validation_names = dataset._split_train_validation(
+    train_names, validation_names = dataset._split_train_validation_names(
         ["CASE_000", "CASE_001", "CASE_002"],
-        [(0, 0, 0), (1, 0, 0), (2, 0, 0)],
+        {},
     )
 
-    assert [entry[0] for entry in train_mapping] == [0, 1, 2]
-    assert validate_mapping == []
     assert train_names == ["CASE_000", "CASE_001", "CASE_002"]
     assert validation_names == []
+
+
+def test_data_train_validation_augmentations_can_be_disabled() -> None:
+    augmentations = DataAugmentationsList(nb=2, data_augmentations={})
+    dataset = DataTrain(
+        augmentations={"DataAugmentation_0": augmentations},
+        validation_augmentations=False,
+    )
+    dataset._prepared_validation_mapping = [(0, 0, 0), (0, 1, 0), (1, 0, 0), (1, 2, 0)]
+
+    validation_mapping = dataset._get_validation_mapping()
+
+    assert validation_mapping == [(0, 0, 0), (1, 0, 0)]
+
+
+def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "Dataset"
+    dataset_storage = Dataset(dataset_path, "mha")
+    volume = np.arange(1 * 4 * 4, dtype=np.float32).reshape(1, 4, 4)
+    dataset_storage.write("CT", "CASE_000", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset_storage.write("CT", "CASE_001", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={})
+    dataset = DataTrain(
+        dataset_filenames=[f"{dataset_path}:mha"],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        augmentations={"DataAugmentation_0": augmentations},
+        patch=None,
+        validation=["CASE_001"],
+        validation_augmentations=False,
+    )
+
+    dataset.prepare()
+
+    assert dataset._prepared_data is not None
+    assert dataset._prepared_validation_data is not None
+    assert dataset._prepared_data["CT"][0].total_augmentations == 1
+    assert dataset._prepared_validation_data["CT"][0].total_augmentations == 0
+
+
+def test_dataset_iter_streams_base_patch_when_augmentations_are_disabled() -> None:
+    volume = np.arange(1 * 4 * 4, dtype=np.float32).reshape(1, 4, 4)
+    dataset_stub = StreamingDatasetStub(volume)
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={})
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, dataset_stub),
+        patch=DatasetPatch([2, 2]),
+        transforms=[],
+        data_augmentations_list=[augmentations],
+    )
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"CT": [manager]},
+        mapping=[(0, 0, 1)],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[augmentations],
+        patch_size=[2, 2],
+        overlap=None,
+        buffer_size=1,
+        apply_augmentations=False,
+        use_cache=False,
+    )
+
+    sample = dataset_iter[0]["CT"].tensor
+
+    assert dataset_stub.full_reads == 0
+    assert dataset_stub.patch_reads == 1
+    assert manager.loaded is False
+    assert torch.equal(sample, torch.from_numpy(volume[:, 0:2, 2:4]))
 
 
 def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> None:

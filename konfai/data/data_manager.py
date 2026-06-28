@@ -211,6 +211,7 @@ class DatasetIter(data.Dataset):
         patch_size: list[int] | None,
         overlap: int | None,
         buffer_size: int,
+        apply_augmentations: bool = True,
         use_cache=True,
     ) -> None:
         self.rank = rank
@@ -219,13 +220,15 @@ class DatasetIter(data.Dataset):
         self.patch_size = patch_size
         self.overlap = overlap
         self.groups_src = groups_src
-        self.data_augmentations_list = data_augmentations_list
+        self.apply_augmentations = apply_augmentations
+        self.data_augmentations_list = data_augmentations_list if apply_augmentations else []
         self.use_cache = use_cache
         self.nb_dataset = len(data[next(iter(data.keys()))])
         self.buffer_size = buffer_size
         self._index_cache: list[int] = []
         self._index_cache_lookup: set[int] = set()
         self.inline_augmentations = inline_augmentations
+        self.has_augmented_samples = self.apply_augmentations and any(a > 0 for _, a, _ in mapping)
 
     def get_patch_config(self) -> tuple[list[int] | None, int | None]:
         return self.patch_size, self.overlap
@@ -242,7 +245,7 @@ class DatasetIter(data.Dataset):
         return self.data[group_dest][index]
 
     def reset_augmentation(self, label):
-        if self.inline_augmentations and len(self.data_augmentations_list) > 0:
+        if self.inline_augmentations and self.has_augmented_samples and len(self.data_augmentations_list) > 0:
             for index in range(self.nb_dataset):
                 for group_src in self.groups_src:
                     for group_dest in self.groups_src[group_src]:
@@ -321,13 +324,13 @@ class DatasetIter(data.Dataset):
 
     def load_data(self, group_src: str, group_dest: str, index: int, augmentation_index: int | None = None) -> bool:
         item = self.data[group_dest][index]
-        if augmentation_index is not None and item.can_stream_patch(augmentation_index):
+        if augmentation_index is not None and item.can_stream_patch(augmentation_index, self.apply_augmentations):
             return False
         try:
             item.load(
                 self.groups_src[group_src][group_dest].transforms,
                 self.data_augmentations_list,
-                load_augmentations=not self.inline_augmentations,
+                load_augmentations=self.apply_augmentations and not self.inline_augmentations,
             )
         except Exception as e:
             raise RuntimeError(
@@ -356,7 +359,7 @@ class DatasetIter(data.Dataset):
         sample: Sample = {}
         x, a, p = self.mapping[index]
         needs_full_load = any(
-            not self.data[group_dest][x].can_stream_patch(a)
+            not self.data[group_dest][x].can_stream_patch(a, self.apply_augmentations)
             for group_src in self.groups_src
             for group_dest in self.groups_src[group_src]
         )
@@ -375,6 +378,7 @@ class DatasetIter(data.Dataset):
                         a,
                         self.groups_src[group_src][group_dest].patch_transforms,
                         self.groups_src[group_src][group_dest].is_input,
+                        self.apply_augmentations,
                     ),
                     dataset.cache_attributes[a],
                     x,
@@ -541,6 +545,7 @@ class Data(ABC):
         subset: Subset,
         batch_size: int,
         validation: float | str | list[int] | list[str] | None,
+        validation_augmentations: bool,
         inline_augmentations: bool,
         data_augmentations_list: dict[str, DataAugmentationsList],
         num_workers: int | None,
@@ -553,6 +558,7 @@ class Data(ABC):
         self.groups_src = groups_src
         self.patch = patch
         self.validation = validation
+        self.validation_augmentations = validation_augmentations
         self.data_augmentations_list = data_augmentations_list
         self.batch_size = batch_size
         self.use_cache = use_cache
@@ -563,7 +569,6 @@ class Data(ABC):
             DatasetIter,
             groups_src=self.groups_src,
             inline_augmentations=inline_augmentations,
-            data_augmentations_list=list(self.data_augmentations_list.values()),
             patch_size=self.patch.patch_size if self.patch is not None else None,
             overlap=self.patch.overlap if self.patch is not None else None,
             buffer_size=batch_size + 1,
@@ -586,14 +591,27 @@ class Data(ABC):
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self.datasets: dict[str, Dataset] = {}
         self._prepared_data: dict[str, list[DatasetManager]] | None = None
+        self._prepared_validation_data: dict[str, list[DatasetManager]] | None = None
         self._prepared_mapping: list[tuple[int, int, int]] = []
         self._prepared_validation_mapping: list[tuple[int, int, int]] = []
         self._prepared_train_names: list[str] = []
         self._prepared_validation_names: list[str] = []
 
+    def _get_data_augmentations(self, apply_augmentations: bool = True) -> list[DataAugmentationsList]:
+        return list(self.data_augmentations_list.values()) if apply_augmentations else []
+
+    @staticmethod
+    def _get_nb_augmentation(data_augmentations_list: list[DataAugmentationsList]) -> int:
+        return max(int(np.sum([data_augmentation.nb for data_augmentation in data_augmentations_list]) + 1), 1)
+
+    def _get_validation_mapping(self) -> list[tuple[int, int, int]]:
+        if self.validation_augmentations:
+            return self._prepared_validation_mapping
+        return [entry for entry in self._prepared_validation_mapping if entry[1] == 0]
+
     def prepare(self) -> None:
         """Instantiate config-driven transforms and augmentations before runtime."""
-        if self._prepared_data is not None:
+        if self._prepared_data is not None and self._prepared_validation_data is not None:
             return
 
         model_have_input = False
@@ -739,11 +757,55 @@ class Data(ABC):
             )
         return dataset_name, subset_names
 
-    def _split_train_validation(
+    @staticmethod
+    def _get_source_filename_by_group(
+        dataset_name: dict[str, dict[str, list[str]]],
+    ) -> dict[str, dict[str, str]]:
+        source_filename_by_group: dict[str, dict[str, str]] = {}
+        for group_src, filenames_by_group in dataset_name.items():
+            source_filename_by_group[group_src] = {}
+            for filename, group_names in filenames_by_group.items():
+                for name in group_names:
+                    source_filename_by_group[group_src].setdefault(name, filename)
+        return source_filename_by_group
+
+    def _get_case_entry_counts(
+        self,
+        names: list[str],
+        dataset_name: dict[str, dict[str, list[str]]],
+        data_augmentations_list: list[DataAugmentationsList],
+    ) -> list[int]:
+        if len(names) == 0:
+            return []
+
+        source_filename_by_group = self._get_source_filename_by_group(dataset_name)
+        nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
+        nb_patch = [[0] * nb_augmentation for _ in names]
+
+        for group_src in self.groups_src:
+            for group_dest in self.groups_src[group_src]:
+                datasets = [
+                    DatasetManager(
+                        i,
+                        group_src,
+                        group_dest,
+                        name,
+                        self.datasets[source_filename_by_group[group_src][name]],
+                        patch=self.patch,
+                        transforms=self.groups_src[group_src][group_dest].transforms,
+                        data_augmentations_list=data_augmentations_list,
+                    )
+                    for i, name in enumerate(names)
+                ]
+                nb_patch = [[dataset.get_size(a) for a in range(nb_augmentation)] for dataset in datasets]
+
+        return [int(np.sum(case_patch_counts)) for case_patch_counts in nb_patch]
+
+    def _resolve_validation_indices(
         self,
         subset_names: list[str],
-        mapping: list[tuple[int, int, int]],
-    ) -> tuple[list[tuple[int, int, int]], list[tuple[int, int, int]], list[str], list[str]]:
+        case_entry_counts: list[int] | None = None,
+    ) -> list[int]:
         index: list[int] = []
         if isinstance(self.validation, float):
             if self.validation <= 0 or self.validation >= 1:
@@ -752,7 +814,15 @@ class Data(ABC):
                     f"Received: {self.validation}",
                     "Example: validation = 0.2  # for a 20% validation split",
                 )
-            index = [m[0] for m in mapping[math.floor(len(mapping) * (1 - self.validation)) :]]
+            if case_entry_counts is None:
+                raise DatasetManagerError("Internal error: missing case entry counts for float validation split.")
+            threshold = math.floor(sum(case_entry_counts) * (1 - self.validation))
+            cumulative = 0
+            for dataset_index, count in enumerate(case_entry_counts):
+                cumulative += count
+                if cumulative > threshold:
+                    index = list(range(dataset_index, len(subset_names)))
+                    break
         elif isinstance(self.validation, str):
             if ":" in self.validation:
                 index = list(range(int(self.validation.split(":")[0]), int(self.validation.split(":")[1])))
@@ -791,67 +861,86 @@ class Data(ABC):
                     "\t• str  → list of sample names or file paths",
                     f"Received list: {self.validation}",
                 )
-        index_set = set(index)
-        train_mapping = [m for m in mapping if m[0] not in index_set]
-        validate_mapping = [m for m in mapping if m[0] in index_set]
+        return index
 
-        if len(train_mapping) == 0:
+    def _split_train_validation_names(
+        self,
+        subset_names: list[str],
+        dataset_name: dict[str, dict[str, list[str]]],
+    ) -> tuple[list[str], list[str]]:
+        case_entry_counts = None
+        dataset_size = len(subset_names)
+        if isinstance(self.validation, float):
+            case_entry_counts = self._get_case_entry_counts(
+                subset_names,
+                dataset_name,
+                self._get_data_augmentations(True),
+            )
+            dataset_size = int(sum(case_entry_counts))
+
+        index = self._resolve_validation_indices(subset_names, case_entry_counts)
+        index_set = set(index)
+        validation_names = [name for i, name in enumerate(subset_names) if i in index_set]
+        validation_names_set = set(validation_names)
+        train_names = [name for name in subset_names if name not in validation_names_set]
+
+        if len(train_names) == 0:
             raise DatasetManagerError(
                 "No data left for training after applying the validation split.",
-                f"Dataset size: {len(mapping)}",
+                f"Dataset size: {dataset_size}",
                 f"Validation setting: {self.validation}",
                 "Please reduce the validation size, increase the dataset, or disable validation.",
             )
 
-        if self.validation is not None and len(validate_mapping) == 0:
+        if self.validation is not None and len(validation_names) == 0:
             raise DatasetManagerError(
                 "No data left for validation after applying the validation split.",
-                f"Dataset size: {len(mapping)}",
+                f"Dataset size: {dataset_size}",
                 f"Validation setting: {self.validation}",
                 "Please increase the validation size, increase the dataset, or disable validation.",
             )
 
-        validation_names = [name for i, name in enumerate(subset_names) if i in index_set]
-        validation_names_set = set(validation_names)
-        train_names = [name for name in subset_names if name not in validation_names_set]
-        return train_mapping, validate_mapping, train_names, validation_names
+        return train_names, validation_names
 
     def _prepare_datasets(self) -> None:
         """Resolve dataset files, validate subsets, and precompute train/validation mappings."""
         datasets = self._resolve_dataset_sources()
         dataset_name, subset_names = self._resolve_common_names(datasets)
         subset_names_list = list(subset_names)
-        data, mapping = self._get_datasets(subset_names_list, dataset_name)
-        train_mapping, validate_mapping, train_names, validation_names = self._split_train_validation(
-            subset_names_list, mapping
+        train_names, validation_names = self._split_train_validation_names(
+            subset_names_list,
+            dataset_name,
+        )
+        train_data, train_mapping = self._get_datasets(
+            train_names,
+            dataset_name,
+            self._get_data_augmentations(True),
+        )
+        validation_data, validate_mapping = self._get_datasets(
+            validation_names,
+            dataset_name,
+            self._get_data_augmentations(self.validation_augmentations),
         )
 
-        self._prepared_data = data
+        self._prepared_data = train_data
+        self._prepared_validation_data = validation_data
         self._prepared_mapping = train_mapping
         self._prepared_validation_mapping = validate_mapping
         self._prepared_train_names = train_names
         self._prepared_validation_names = validation_names
 
     def _get_datasets(
-        self, names: list[str], dataset_name: dict[str, dict[str, list[str]]]
+        self,
+        names: list[str],
+        dataset_name: dict[str, dict[str, list[str]]],
+        data_augmentations_list: list[DataAugmentationsList],
     ) -> tuple[dict[str, list[DatasetManager]], list[tuple[int, int, int]]]:
         nb_dataset = len(names)
         nb_patch: list[list[int]]
         data = {}
         mapping = []
-        source_filename_by_group: dict[str, dict[str, str]] = {}
-        nb_augmentation = np.max(
-            [
-                int(np.sum([data_augmentation.nb for data_augmentation in self.data_augmentations_list.values()]) + 1),
-                1,
-            ]
-        )
-
-        for group_src, filenames_by_group in dataset_name.items():
-            source_filename_by_group[group_src] = {}
-            for filename, group_names in filenames_by_group.items():
-                for name in group_names:
-                    source_filename_by_group[group_src].setdefault(name, filename)
+        source_filename_by_group = self._get_source_filename_by_group(dataset_name)
+        nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
 
         for group_src in self.groups_src:
             for group_dest in self.groups_src[group_src]:
@@ -864,7 +953,7 @@ class Data(ABC):
                         self.datasets[source_filename_by_group[group_src][name]],
                         patch=self.patch,
                         transforms=self.groups_src[group_src][group_dest].transforms,
-                        data_augmentations_list=list(self.data_augmentations_list.values()),
+                        data_augmentations_list=data_augmentations_list,
                     )
                     for i, name in enumerate(names)
                 ]
@@ -923,34 +1012,40 @@ class Data(ABC):
         return local_indices, remapped_mapping
 
     def get_data(self, world_size: int) -> tuple[list[list[DataLoader]], list[str], list[str]]:
-        if self._prepared_data is None:
+        if self._prepared_data is None or self._prepared_validation_data is None:
             raise DatasetManagerError("Dataset configuration was not prepared before runtime data loading.")
 
         self.data = []
         self.mapping = []
         train_mappings = Data._split(self._prepared_mapping, world_size)
-        validate_mappings = Data._split(self._prepared_validation_mapping, world_size)
+        validate_mappings = Data._split(self._get_validation_mapping(), world_size)
         for i, (train_mapping, validate_mapping) in enumerate(zip(train_mappings, validate_mappings, strict=False)):
-            mappings = [train_mapping]
-            if len(validate_mapping):
-                mappings += [validate_mapping]
             self.data.append([])
             self.mapping.append([])
-            for mapping_tmp in mappings:
-                indexs, remapped_mapping = self._remap_dataset_indices(mapping_tmp)
-                self.data[i].append({k: [v[it] for it in indexs] for k, v in self._prepared_data.items()})
-                self.mapping[i].append(remapped_mapping)
+            train_indices, train_remapped_mapping = self._remap_dataset_indices(train_mapping)
+            self.data[i].append({k: [v[it] for it in train_indices] for k, v in self._prepared_data.items()})
+            self.mapping[i].append(train_remapped_mapping)
+            if len(validate_mapping):
+                validation_indices, validation_remapped_mapping = self._remap_dataset_indices(validate_mapping)
+                self.data[i].append(
+                    {k: [v[it] for it in validation_indices] for k, v in self._prepared_validation_data.items()}
+                )
+                self.mapping[i].append(validation_remapped_mapping)
 
         data_loaders: list[list[DataLoader]] = []
         for i, (datas, mappings) in enumerate(zip(self.data, self.mapping, strict=False)):
             data_loaders.append([])
-            for dataset_items, mapping in zip(datas, mappings, strict=False):
+            for loader_index, (dataset_items, mapping) in enumerate(zip(datas, mappings, strict=False)):
                 data_loaders[i].append(
                     DataLoader(
                         dataset=self.datasetIter(
                             rank=i,
                             data=dataset_items,
                             mapping=mapping,
+                            data_augmentations_list=self._get_data_augmentations(
+                                loader_index == 0 or self.validation_augmentations
+                            ),
+                            apply_augmentations=loader_index == 0 or self.validation_augmentations,
                         ),
                         sampler=CustomSampler(len(mapping), self.subset.shuffle),
                         batch_size=self.batch_size,
@@ -968,6 +1063,7 @@ class Data(ABC):
             "subset": self.subset,
             "batch_size": self.batch_size,
             "validation": self.validation,
+            "validation_augmentations": self.validation_augmentations,
             "inline_augmentations": self.inline_augmentations,
             "data_augmentations_list": self.data_augmentations_list,
         }
@@ -992,6 +1088,7 @@ class DataTrain(Data):
         subset: TrainSubset = TrainSubset(),
         batch_size: int = 1,
         validation: float | str | list[int] | list[str] | None = 0.2,
+        validation_augmentations: bool = True,
         num_workers: int | None = None,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
@@ -1005,6 +1102,7 @@ class DataTrain(Data):
             subset,
             batch_size,
             validation,
+            validation_augmentations,
             inline_augmentations,
             augmentations if augmentations else {},
             num_workers,
@@ -1040,6 +1138,7 @@ class DataPrediction(Data):
             subset=subset,
             batch_size=batch_size,
             validation=None,
+            validation_augmentations=True,
             inline_augmentations=False,
             data_augmentations_list=augmentations if augmentations else {},
             num_workers=num_workers,
@@ -1073,6 +1172,7 @@ class DataMetric(Data):
             subset=subset,
             batch_size=1,
             validation=validation,
+            validation_augmentations=True,
             data_augmentations_list={},
             inline_augmentations=False,
             num_workers=num_workers,

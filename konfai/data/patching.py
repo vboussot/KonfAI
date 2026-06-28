@@ -423,8 +423,7 @@ class DatasetManager:
         self.patch.load(_shape, 0)
         self.shape = _shape
         self.data_augmentations_list = data_augmentations_list
-        self._patch_stream_source: tuple[Dataset, str, list[int], list[Transform]] | None = None
-        self._patch_stream_checked = False
+        self._patch_stream_sources: dict[bool, tuple[Dataset, str, list[int], list[Transform]] | None] = {}
         self.reset_augmentation()
         self.cache_attributes_bak = copy.deepcopy(self.cache_attributes)
 
@@ -633,9 +632,12 @@ class DatasetManager:
         )
         return Dataset(filename, file_format)
 
-    def _resolve_patch_stream_source(self) -> tuple[Dataset, str, list[int], list[Transform]] | None:
-        if self._patch_stream_checked:
-            return self._patch_stream_source
+    def _resolve_patch_stream_source(
+        self,
+        apply_augmentations: bool = True,
+    ) -> tuple[Dataset, str, list[int], list[Transform]] | None:
+        if apply_augmentations in self._patch_stream_sources:
+            return self._patch_stream_sources[apply_augmentations]
 
         source_dataset = self.dataset
         source_group = self.group_src
@@ -655,7 +657,7 @@ class DatasetManager:
                     break
 
         stream_cache_attribute = Attribute(self.cache_attributes[0])
-        if len(self.data_augmentations_list) == 0 and all(
+        if (not apply_augmentations or len(self.data_augmentations_list) == 0) and all(
             self._supports_patch_stream_transform(
                 transform,
                 source_dataset,
@@ -666,17 +668,27 @@ class DatasetManager:
         ):
             self.cache_attributes[0] = Attribute(stream_cache_attribute)
             self.cache_attributes_bak[0] = Attribute(stream_cache_attribute)
-            self._patch_stream_source = (source_dataset, source_group, list(source_shape), trailing_transforms)
+            self._patch_stream_sources[apply_augmentations] = (
+                source_dataset,
+                source_group,
+                list(source_shape),
+                trailing_transforms,
+            )
         else:
-            self._patch_stream_source = None
-        self._patch_stream_checked = True
-        return self._patch_stream_source
+            self._patch_stream_sources[apply_augmentations] = None
+        return self._patch_stream_sources[apply_augmentations]
 
-    def can_stream_patch(self, a: int) -> bool:
-        return a == 0 and self._resolve_patch_stream_source() is not None
+    def can_stream_patch(self, a: int, apply_augmentations: bool = True) -> bool:
+        return a == 0 and self._resolve_patch_stream_source(apply_augmentations) is not None
 
-    def _get_streamed_data(self, index: int, a: int, is_input: bool) -> tuple[torch.Tensor, Attribute]:
-        stream_source = self._resolve_patch_stream_source()
+    def _get_streamed_data(
+        self,
+        index: int,
+        a: int,
+        is_input: bool,
+        apply_augmentations: bool = True,
+    ) -> tuple[torch.Tensor, Attribute]:
+        stream_source = self._resolve_patch_stream_source(apply_augmentations)
         if stream_source is None:
             raise RuntimeError("Patch streaming requested on a dataset manager without a streaming source.")
 
@@ -700,9 +712,16 @@ class DatasetManager:
         self.augmented_data.clear()
         self.augmentationLoaded = self.total_augmentations == 0
 
-    def get_data(self, index: int, a: int, patch_transforms: list[Transform], is_input: bool) -> torch.Tensor:
-        if not self.loaded and self.can_stream_patch(a):
-            data, _ = self._get_streamed_data(index, a, is_input)
+    def get_data(
+        self,
+        index: int,
+        a: int,
+        patch_transforms: list[Transform],
+        is_input: bool,
+        apply_augmentations: bool = True,
+    ) -> torch.Tensor:
+        if not self.loaded and self.can_stream_patch(a, apply_augmentations):
+            data, _ = self._get_streamed_data(index, a, is_input, apply_augmentations)
         else:
             data = self.patch.get_data(self._get_tensor(a), index, a, is_input)
         for transform_function in patch_transforms:

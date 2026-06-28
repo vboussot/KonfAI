@@ -244,6 +244,7 @@ Trainer:
     use_cache: true
     batch_size: 1
     validation: None
+    validation_augmentations: true
   train_name: TRAIN_GAN_01
   manual_seed: 32
   epochs: 100

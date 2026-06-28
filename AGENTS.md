@@ -123,10 +123,10 @@ Workspace/
 
 ### Config anatomy (high-value keys an agent will touch)
 - **`Trainer.Model`**: `classpath` (e.g. `segmentation.UNet.UNet` or `UNet.yml`), `Optimizer`, `schedulers`, `outputs_criterions` (loss/metric attached to a **named** module output, e.g. `UNetBlock_0:Head:Softmax`), plus the model's own constructor args.
-- **`Dataset`**: `groups_src` → `groups_dest` (each group has `transforms`, `is_input`, `patch_transforms`); `dataset_filenames` (e.g. `./Dataset/:a:mha` — the `:a:`/`:i:` flags mean append/intersect and the suffix is the format); `use_cache`, `batch_size`, `subset`, `validation`, `shuffle`, `inline_augmentations`.
+- **`Dataset`**: `groups_src` → `groups_dest` (each group has `transforms`, `is_input`, `patch_transforms`); `dataset_filenames` (e.g. `./Dataset/:a:mha` — the `:a:`/`:i:` flags mean append/intersect and the suffix is the format); `use_cache`, `batch_size`, `subset`, `validation`, `validation_augmentations` (default `true`; set `false` to validate only on base samples — train and validation datasets are then prepared separately so augmented variants never leak into validation), `shuffle`, `inline_augmentations`.
 - **`Patch`**: `patch_size`, `overlap`, `extend_slice` (>0 ⇒ 2.5D, requires `patch_size[0]==1`), `pad_value`.
 - **`augmentations`**: `DataAugmentation_*` → `data_augmentations` (Flip/Rotate/…); `nb` augmentations per sample.
-- **Training params**: `epochs`, `it_validation`, `autocast` (AMP), `gradient_checkpoints`, `gpu_checkpoints`, `ema_decay`, `data_log`, `save_checkpoint_mode` (`BEST`/`ALL`), `EarlyStopping`, `manual_seed`.
+- **Training params**: `epochs`, `it_validation`, `autocast` (AMP), `gradient_checkpoints`, `gpu_checkpoints`, `ema_decay`, `data_log`, `save_checkpoint_mode` (`BEST`/`ALL`), `EarlyStopping`, `manual_seed`. (Training also stops automatically once the schedulers decay the optimizer learning rate to `≤ 0`, via `EarlyStoppingBase.stop()`.)
 - **`Predictor.outputs_dataset`**: per output module, `OutputDataset` with `after_reduction_transforms` (Argmax/…), `final_transforms` (TensorCast), `patch_combine`, `reduction` (TTA: Mean/Median/…), `inverse_transform`; top-level `combine` does model ensembling.
 - **`Evaluator.metrics`**: per target group, `targets_criterions` → `criterions_loader` (e.g. `Dice`).
 
