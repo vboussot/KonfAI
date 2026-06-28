@@ -16,3 +16,4 @@ apps/impact_reg
 apps/impact_seg
 docs/build/
 .codex
+docs/_build/

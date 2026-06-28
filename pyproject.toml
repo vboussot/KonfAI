@@ -14,17 +14,29 @@ authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
 ]
 
+keywords = ["deep learning", "medical imaging", "YAML", "configuration", "PyTorch", "reproducibility"]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 dependencies = [
   "torch",
   "tqdm",
   "numpy",
   "ruamel.yaml",
   "psutil",
-  "tensorboard",
-  "SimpleITK",
   "lxml",
-  "h5py",
-  "nvidia-ml-py",
   "requests",
   "huggingface_hub"
 ]
@@ -40,11 +52,28 @@ konfai = "konfai.main:main"
 konfai-cluster = "konfai.main:cluster"
 
 [project.optional-dependencies]
+itk = ["SimpleITK"]
+hdf5 = ["h5py"]
+monitoring = ["nvidia-ml-py"]
+tensorboard = ["tensorboard"]
+imaging = ["SimpleITK", "h5py", "pydicom", "zarr", "ngff-zarr"]
 vtk = ["vtk"]
 lpips = ["lpips"]
 cluster = ["submitit"]
+dicom = ["pydicom"]
+omezarr = ["zarr", "ngff-zarr"]
+all = [
+  "konfai[itk]",
+  "konfai[hdf5]",
+  "konfai[monitoring]",
+  "konfai[tensorboard]",
+  "konfai[vtk]",
+  "konfai[lpips]",
+  "konfai[cluster]",
+  "konfai[dicom]",
+  "konfai[omezarr]"
+]
 dev = [
-  "submitit",
   "fastapi",
   "uvicorn",
   "python-multipart",
@@ -70,3 +99,128 @@ local_scheme = "no-local-version"
 [tool.setuptools.packages.find]
 include = ["konfai*"]
 exclude = ["apps*"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+
+[tool.pixi.pypi-dependencies]
+konfai = { path = ".", editable = true }
+
+[tool.pixi.dependencies]
+python = ">=3.10,<3.14"
+pip = "*"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+lint = { features = ["lint"], no-default-feature = true, solve-group = "default" }
+docs = { features = ["docs"], no-default-feature = true, solve-group = "default" }
+
+# ---------------------------------------------------------------------------
+# Feature: dev
+# ---------------------------------------------------------------------------
+[tool.pixi.feature.dev.pypi-dependencies]
+pytest = "*"
+pytest-cov = "*"
+ruff = "==0.15.2"
+build = "*"
+twine = "*"
+mypy = "*"
+types-requests = "*"
+fastapi = "*"
+uvicorn = "*"
+python-multipart = "*"
+submitit = "*"
+SimpleITK = "*"
+h5py = "*"
+tensorboard = "*"
+nvidia-ml-py = "*"
+pydicom = "*"
+zarr = "*"
+ngff-zarr = "*"
+
+[tool.pixi.feature.dev.tasks]
+test = { cmd = "pytest -q tests/", description = "Run the test suite" }
+test-cov = { cmd = "pytest --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
+lint = { cmd = "ruff check konfai konfai-apps/konfai_apps", description = "Lint source code" }
+format = { cmd = "ruff format konfai konfai-apps/konfai_apps", description = "Format source code" }
+format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps", description = "Check formatting without modifying files" }
+typecheck = { cmd = "python -m mypy konfai --ignore-missing-imports --no-site-packages", description = "Type-check the konfai package" }
+build = { cmd = "python -m build", description = "Build sdist and wheel" }
+check = { depends-on = ["lint", "format-check", "test"], description = "Run all quality checks" }
+
+# ---------------------------------------------------------------------------
+# Feature: lint
+# ---------------------------------------------------------------------------
+[tool.pixi.feature.lint.dependencies]
+python = ">=3.10,<3.14"
+
+[tool.pixi.feature.lint.pypi-dependencies]
+ruff = "==0.15.2"
+pre-commit = "*"
+
+[tool.pixi.feature.lint.tasks]
+lint = { cmd = "ruff check konfai konfai-apps/konfai_apps", description = "Lint source code" }
+format = { cmd = "ruff format konfai konfai-apps/konfai_apps", description = "Format source code" }
+format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps", description = "Check formatting without modifying files" }
+pre-commit-install = { cmd = "pre-commit install --hook-type pre-commit --hook-type commit-msg", description = "Install pre-commit and commit-msg hooks" }
+pre-commit-run = { cmd = "pre-commit run --all-files", description = "Run pre-commit hooks on all repository files" }
+
+# ---------------------------------------------------------------------------
+# Feature: docs
+# ---------------------------------------------------------------------------
+[tool.pixi.feature.docs.dependencies]
+python = ">=3.10,<3.14"
+
+[tool.pixi.feature.docs.pypi-dependencies]
+sphinx = ">=7.0"
+shibuya = "*"
+myst-parser = "*"
+sphinx-autodoc-typehints = "*"
+sphinx-copybutton = "*"
+sphinx-togglebutton = "*"
+sphinx-tabs = "*"
+
+[tool.pixi.feature.docs.tasks]
+build-docs = { cmd = "make html", cwd = "docs", description = "Build Sphinx documentation" }
+dev-docs = { cmd = "sphinx-autobuild docs/source docs/_build/html", description = "Live-reload docs during development" }
+
+# ---------------------------------------------------------------------------
+# Ruff (replaces black + flake8 + isort)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+src = ["konfai", "konfai-apps/konfai_apps"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "C4", "RUF"]
+extend-ignore = ["E501", "B006", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["T20"]
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+    "integration: marks integration tests",
+]
+
+# ---------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+python_version = "3.10"
+
+# ---------------------------------------------------------------------------
+# Commitizen
+# ---------------------------------------------------------------------------
+[tool.commitizen]
+name = "cz_conventional_commits"

@@ -17,16 +17,29 @@ This installs the core CLI entrypoints:
 Optional extras exposed by the package metadata:
 
 ```bash
-python -m pip install "konfai[cluster]"
-python -m pip install "konfai[vtk]"
-python -m pip install "konfai[lpips]"
+python -m pip install "konfai[imaging]"   # SimpleITK + h5py (most medical imaging workflows)
+python -m pip install "konfai[dicom]"     # pydicom — DICOM series reader
+python -m pip install "konfai[omezarr]"   # zarr + ngff-zarr — OME-Zarr dataset read/write
+python -m pip install "konfai[all]"       # every optional extra at once
+python -m pip install "konfai[dev]"       # test, docs, lint, and server tooling
 ```
 
-These extras enable optional entrypoints or integrations:
+### Optional extras
 
-- `konfai-cluster` with `cluster`
-- VTK-dependent features with `vtk`
-- LPIPS-based metrics with `lpips`
+| Extra | Pulls in | Use it for |
+| --- | --- | --- |
+| `itk` | `SimpleITK` | reading/writing ITK formats (`.mha`, `.nii.gz`, …) |
+| `hdf5` | `h5py` | HDF5-backed datasets |
+| `imaging` | `SimpleITK`, `h5py` | the common medical-imaging stack (ITK + HDF5) |
+| `dicom` | `pydicom` | DICOM series input — see {doc}`../concepts/imaging-formats` |
+| `omezarr` | `zarr`, `ngff-zarr` | OME-Zarr / OME-NGFF input — see {doc}`../concepts/imaging-formats` |
+| `tensorboard` | `tensorboard` | TensorBoard logging |
+| `monitoring` | `nvidia-ml-py` | GPU monitoring |
+| `vtk` | `vtk` | VTK-dependent rendering and mesh features |
+| `lpips` | `lpips` | LPIPS perceptual metrics |
+| `cluster` | `submitit` | `konfai-cluster` job submission |
+| `all` | all of the above | install every optional extra at once |
+| `dev` | pytest, ruff, sphinx, fastapi, … | local development, tests, docs, and the app server |
 
 Install the standalone apps package separately when you need packaged app
 execution:
@@ -41,19 +54,41 @@ This provides:
 - `konfai-apps-server`
 - the Python API under `konfai_apps`
 
-## Install from source
+## Install with Pixi
 
-Use an editable install when you want to:
+[Pixi](https://pixi.sh) is the recommended tool for reproducible environments
+because it pins both Python packages and system libraries.
 
-- work on the framework itself
-- modify example YAML files
-- create local Python modules next to your configs
-- build the documentation
+Install a released version:
+
+```bash
+pixi add konfai
+```
+
+Or, for a fully locked development environment from the repository:
 
 ```bash
 git clone https://github.com/vboussot/KonfAI.git
 cd KonfAI
-python -m pip install -e .
+pixi install        # resolves and installs all environments
+pixi run test       # run the test suite
+pixi run lint       # ruff lint the source tree
+pixi run check      # lint + format-check + test (run before pushing)
+```
+
+See {doc}`../development` for the full developer workflow and the complete task
+list.
+
+## Install from source (pip)
+
+Use an editable pip install when Pixi is not available or when you need to
+install into an existing environment:
+
+```bash
+git clone https://github.com/vboussot/KonfAI.git
+cd KonfAI
+python -m pip install -e ".[imaging,dev]"
+pytest -q tests/    # verify
 ```
 
 ## PyTorch and GPU notes
