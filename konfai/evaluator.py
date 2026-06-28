@@ -296,7 +296,7 @@ class Evaluator(DistributedObject):
         for targets in self.metrics.values():
             for target_group in targets:
                 target_groups.extend(target_group.split(";"))
-        missing_targets = set(target_groups) - (set(groups_dest + ["None"]))
+        missing_targets = set(target_groups) - ({*groups_dest, "None"})
         if missing_targets:
             raise EvaluatorError(
                 f"The following metric target groups are missing from 'groups_dest': {sorted(missing_targets)}. ",
@@ -525,7 +525,7 @@ def evaluate(
     gpu: list[int] | None = cuda_visible_devices(),
     cpu: int = 1,
     quiet: bool = False,
-    tb: bool = False,
+    tensorboard: bool = False,
     evaluations_file: Path | str = Path("./Evaluation.yml").resolve(),
     evaluations_dir: Path | str = Path("./Evaluations").resolve(),
 ) -> DistributedObject:
@@ -535,7 +535,7 @@ def evaluate(
     This compatibility wrapper preserves the historical CLI-facing API while
     delegating the pure build step to :func:`build_evaluate`.
     """
-    del overwrite, gpu, cpu, quiet, tb
+    del overwrite, gpu, cpu, quiet, tensorboard
     return build_evaluate(
         evaluations_file=evaluations_file,
         evaluations_dir=evaluations_dir,

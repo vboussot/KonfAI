@@ -34,12 +34,11 @@ import numpy as np
 import requests
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
-from packaging.requirements import Requirement
-from ruamel.yaml import YAML
-
 from konfai import RemoteServer
 from konfai.utils.errors import AppMetadataError, AppRepositoryError, ConfigError
 from konfai.utils.utils import is_windows_absolute_path
+from packaging.requirements import Requirement
+from ruamel.yaml import YAML
 
 
 def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str]:
@@ -83,7 +82,7 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
                 "Please check that the repository exists, that you have access to it, "
                 "that your authentication is valid, and that your internet connection is working.\n"
                 f"Original error: {exc}"
-            )
+            ) from exc
 
     try:
         snapshot_dir = snapshot_download(
@@ -297,13 +296,13 @@ class LocalAppRepository(AppRepositoryInfo):
 
         try:
             maximum_tta = int(app_repository_metadata["tta"])
-        except Exception:
-            raise AppMetadataError("The field 'tta' must be an integer.")
+        except Exception as exc:
+            raise AppMetadataError("The field 'tta' must be an integer.") from exc
 
         try:
             mc_dropout = int(app_repository_metadata["mc_dropout"])
-        except Exception:
-            raise AppMetadataError("The field 'mc_dropout' must be an integer.")
+        except Exception as exc:
+            raise AppMetadataError("The field 'mc_dropout' must be an integer.") from exc
 
         terminology: dict[int, TerminologyEntry] | None = None
         if "terminology" in app_repository_metadata:
@@ -519,9 +518,7 @@ class LocalAppRepository(AppRepositoryInfo):
 
                 if missing_or_outdated:
                     try:
-                        subprocess.check_call(
-                            [sys.executable, "-m", "pip", "install", *missing_or_outdated]
-                        )  # nosec B603
+                        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_or_outdated])  # nosec B603
                     except subprocess.CalledProcessError as exc:
                         raise AppRepositoryError(f"Failed to install packages: {exc}") from exc
 
@@ -768,7 +765,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
                     "Please check that the repository exists, that the path is correct, "
                     "and that you have sufficient access rights.\n"
                     f"Original error: {exc}"
-                )
+                ) from exc
         try:
             base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
             app_json_path = hf_hub_download(

@@ -15,12 +15,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-
 from konfai.network import blocks, network
 
 
 class ConvBlock(torch.nn.Module):
-
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
         self.Conv_0 = torch.nn.Conv3d(
@@ -55,7 +53,6 @@ class ConvBlock(torch.nn.Module):
 
 
 class UnetCPP1Layers(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
         self.DownConvBlock_0 = ConvBlock(in_channels=1, out_channels=32)
@@ -65,7 +62,6 @@ class UnetCPP1Layers(torch.nn.Module):
 
 
 class Adaptation(torch.nn.Module):
-
     def __init__(self) -> None:
         super().__init__()
         self.Encoder_1 = UnetCPP1Layers()
@@ -85,7 +81,6 @@ class Adaptation(torch.nn.Module):
 
 
 class Representation(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),

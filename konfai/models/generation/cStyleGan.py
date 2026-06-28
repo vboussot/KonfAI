@@ -15,9 +15,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+import itertools
 
 import torch
-
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
@@ -44,14 +44,12 @@ class MappingNetwork(network.ModuleArgsDict):
         if c_dim > 0:
             self.add_module("Concat", blocks.Concat(), in_branch=[0, "Embed"])
 
-        for i, (in_features, out_features) in enumerate(zip(features, features[1:])):
+        for i, (in_features, out_features) in enumerate(itertools.pairwise(features)):
             self.add_module(f"Linear_{i}", torch.nn.Linear(in_features, out_features))
 
 
 class ModulatedConv(torch.nn.Module):
-
     class _ModulatedConv(torch.nn.Module):
-
         def __init__(self, w_dim: int, conv: torch.nn.modules.conv._ConvNd, dim: int) -> None:
             super().__init__()
             self.affine = torch.nn.Linear(w_dim, conv.in_channels)
@@ -153,7 +151,6 @@ class ModulatedConv(torch.nn.Module):
 
 
 class UNetBlock(network.ModuleArgsDict):
-
     def __init__(
         self,
         w_dim: int,
@@ -244,9 +241,7 @@ class UNetBlock(network.ModuleArgsDict):
 
 
 class Generator(network.Network):
-
     class GeneratorHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(

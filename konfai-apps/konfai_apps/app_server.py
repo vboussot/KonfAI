@@ -32,11 +32,10 @@ from functools import wraps
 from pathlib import Path
 from typing import Annotated
 
+import konfai
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-import konfai
 from konfai.utils.errors import AppRepositoryError
 
 from .app_repository import get_app_repository_info
@@ -477,8 +476,8 @@ def download_app_repository_configs(app_id: str, background_tasks: BackgroundTas
     """
     try:
         app = get_app_repository_info(app_id, False)
-    except AppRepositoryError:
-        raise HTTPException(404, f"Unknown app '{app_id}'")
+    except AppRepositoryError as exc:
+        raise HTTPException(404, f"Unknown app '{app_id}'") from exc
 
     files = app.download_config_file()
 
@@ -728,7 +727,7 @@ def submit_job():
                 cleanup_pending_job(job)
                 raise
 
-            asyncio.create_task(start_job(job, cmd, gpu_list))
+            asyncio.create_task(start_job(job, cmd, gpu_list))  # noqa: RUF006
 
             return {
                 "job_id": job_id,
@@ -813,7 +812,7 @@ async def infer(
     if uncertainty:
         cmd += ["-uncertainty"]
     if len(ensemble_models_list) > 0:
-        cmd += ["--ensemble_models"] + ensemble_models_list
+        cmd += ["--ensemble_models", *ensemble_models_list]
     else:
         cmd += ["--ensemble", str(ensemble)]
     return cmd
@@ -1004,7 +1003,7 @@ async def pipeline(
     if uncertainty:
         cmd += ["-uncertainty"]
     if ensemble_models_list:
-        cmd += ["--ensemble_models"] + ensemble_models_list
+        cmd += ["--ensemble_models", *ensemble_models_list]
     return cmd
 
 
@@ -1225,7 +1224,7 @@ def kill_job(job_id: str):
         return {"job_id": job.job_id, "status": "killed", "message": "Kill requested"}
 
     except Exception as e:
-        raise HTTPException(500, f"Failed to kill job: {e}")
+        raise HTTPException(500, f"Failed to kill job: {e}") from e
 
 
 app.include_router(protected)

@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-
 from konfai.utils.config import Config, apply_config, config
 from konfai.utils.errors import ConfigError
 
@@ -125,7 +124,7 @@ def test_apply_config_instantiates_dict_of_nested_objects(
     _configure_env(
         tmp_path,
         monkeypatch,
-        ("Root:\n" "  children:\n" "    left:\n" "      value: 3\n" "    right:\n" "      value: 7\n"),
+        ("Root:\n  children:\n    left:\n      value: 3\n    right:\n      value: 7\n"),
     )
 
     class Child:
@@ -150,7 +149,7 @@ def test_apply_config_preserves_dict_of_primitives(
     _configure_env(
         tmp_path,
         monkeypatch,
-        ("Root:\n" "  weights:\n" "    mae: 1\n" "    ssim: 2\n"),
+        ("Root:\n  weights:\n    mae: 1\n    ssim: 2\n"),
     )
 
     class Root:
@@ -169,7 +168,7 @@ def test_apply_config_converts_sequence_of_union_scalars(
     _configure_env(
         tmp_path,
         monkeypatch,
-        ("Root:\n" "  values:\n" "    - '1'\n" "    - 2\n" "    - '3'\n"),
+        ("Root:\n  values:\n    - '1'\n    - 2\n    - '3'\n"),
     )
 
     class Root:
@@ -189,7 +188,7 @@ def test_apply_config_honors_konfai_without_for_skipped_parameters(
     _configure_env(
         tmp_path,
         monkeypatch,
-        ("Root:\n" "  kept: 5\n" "  skipped: 42\n"),
+        ("Root:\n  kept: 5\n  skipped: 42\n"),
     )
 
     class Root:
@@ -201,3 +200,42 @@ def test_apply_config_honors_konfai_without_for_skipped_parameters(
 
     assert root.kept == 5
     assert root.skipped == 0
+
+
+def test_config_missing_env_var_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KONFAI_config_file", raising=False)
+
+    with pytest.raises(KeyError):
+        Config("Trainer")
+
+
+def test_get_value_returns_default_when_key_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "empty.yml"
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("KONFAI_config_file", str(config_path))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "default")
+    monkeypatch.setattr("builtins.input", _fail_input)
+
+    with Config("Root") as cfg:
+        value = cfg.get_value("missing_key", "default|FALLBACK")
+
+    assert value == "FALLBACK"
+
+
+def test_config_raises_on_invalid_yaml_syntax(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "broken.yml"
+    config_path.write_text("key: {unclosed\n", encoding="utf-8")
+    monkeypatch.setenv("KONFAI_config_file", str(config_path))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+
+    with pytest.raises(ConfigError, match=r"broken\.yml"):
+        with Config("Root"):
+            pass

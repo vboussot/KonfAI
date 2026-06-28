@@ -19,7 +19,6 @@ from collections.abc import Callable
 import numpy as np
 import torch
 import tqdm
-
 from konfai.data.patching import ModelPatch
 from konfai.metric.measure import Criterion
 from konfai.network import blocks, network
@@ -36,9 +35,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
 
 
 class DDPM(network.Network):
-
     class DDPMTE(torch.nn.Module):
-
         def __init__(self, in_channels: int, out_channels: int) -> None:
             super().__init__()
             self.linear_0 = torch.nn.Linear(in_channels, out_channels)
@@ -51,7 +48,6 @@ class DDPM(network.Network):
             )
 
     class DDPMUNetBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int],
@@ -153,7 +149,6 @@ class DDPM(network.Network):
                 self.add_module("SkipConnection", blocks.Concat(), in_branch=[0, 2])
 
     class DDPMUNetHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -168,7 +163,6 @@ class DDPM(network.Network):
             )
 
     class DDPMForwardProcess(torch.nn.Module):
-
         def __init__(
             self,
             noise_step: int = 1000,
@@ -206,7 +200,6 @@ class DDPM(network.Network):
             return result
 
     class DDPMSampleT(torch.nn.Module):
-
         def __init__(self, noise_step: int) -> None:
             super().__init__()
             self.noise_step = noise_step
@@ -215,7 +208,6 @@ class DDPM(network.Network):
             return torch.randint(0, self.noise_step, (tensor.shape[0],)).to(tensor.device)
 
     class DDPMTimeEmbedding(torch.nn.Module):
-
         @staticmethod
         def sinusoidal_embedding(noise_step: int, time_embedding_dim: int):
             noise_step += 1
@@ -238,7 +230,6 @@ class DDPM(network.Network):
             return self.time_embed((p * self.noise_step).long().repeat(tensor.shape[0]))
 
     class DDPMUNet(network.ModuleArgsDict):
-
         def __init__(
             self,
             noise_step: int,
@@ -278,7 +269,6 @@ class DDPM(network.Network):
             )
 
     class DDPMInference(torch.nn.Module):
-
         def __init__(
             self,
             model: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -336,7 +326,6 @@ class DDPM(network.Network):
             return torch.concat(result, dim=1)
 
     class DDPMVLoss(torch.nn.Module):
-
         def __init__(self, alpha_hat: torch.Tensor) -> None:
             super().__init__()
             self.alpha_hat = alpha_hat
@@ -451,7 +440,6 @@ class DDPM(network.Network):
 
 
 class MSE(Criterion):
-
     def __init__(self):
         super().__init__()
         self.loss = torch.nn.MSELoss()

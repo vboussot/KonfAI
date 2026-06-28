@@ -15,14 +15,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-
 from konfai.network import blocks, network
 
 
 class VAE(network.Network):
-
     class AutoEncoderBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int],
@@ -91,7 +88,6 @@ class VAE(network.Network):
                 )
 
     class VAEHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -147,9 +143,7 @@ class VAE(network.Network):
 
 
 class LinearVAE(network.Network):
-
     class LinearVAEDenseLayer(network.ModuleArgsDict):
-
         def __init__(self, in_features: int, out_features: int) -> None:
             super().__init__()
             self.add_module("Linear", torch.nn.Linear(in_features, out_features))
@@ -157,7 +151,6 @@ class LinearVAE(network.Network):
             self.add_module("Activation", torch.nn.LeakyReLU())
 
     class LinearVAEHead(network.ModuleArgsDict):
-
         def __init__(self, in_features: int, out_features: int) -> None:
             super().__init__()
             self.add_module("Linear", torch.nn.Linear(in_features, out_features))

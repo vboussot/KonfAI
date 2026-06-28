@@ -35,12 +35,22 @@ from typing import Any, TextIO, TypedDict, cast
 
 import numpy as np
 import psutil
-import pynvml
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard.writer import SummaryWriter
+
+try:
+    import pynvml
+
+    _PYNVML_AVAILABLE = True
+except ImportError:
+    _PYNVML_AVAILABLE = False
+
+try:
+    from torch.utils.tensorboard.writer import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
 
 from konfai import (
     cuda_visible_devices,
@@ -70,7 +80,9 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
                     + " ".join(
                         f"{k.split(':')[-1]}({w:.2f}) : {v:.6f}"
                         for (k, v), w in zip(
-                            network.measure.get_last_values().items(), network.measure.get_last_weights().values()
+                            network.measure.get_last_values().items(),
+                            network.measure.get_last_weights().values(),
+                            strict=False,
                         )
                     )
                     for name, network in model.module.get_networks().items()
@@ -150,7 +162,7 @@ def memory_forecast(memory_init: float, i: int, size: int) -> str:
 
 def gpu_info() -> str:
     """Return a compact status line describing visible GPU usage."""
-    if len(cuda_visible_devices()) == 0:
+    if not _PYNVML_AVAILABLE or len(cuda_visible_devices()) == 0:
         return ""
 
     devices = [int(i) for i in cuda_visible_devices()]
@@ -167,6 +179,8 @@ def gpu_info() -> str:
 
 def get_max_gpu_memory(device: int | torch.device) -> float:
     """Return the total VRAM in GB for one device, or ``0`` on CPU."""
+    if not _PYNVML_AVAILABLE:
+        return 0
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -183,6 +197,8 @@ def get_max_gpu_memory(device: int | torch.device) -> float:
 
 def get_gpu_memory(device: int | torch.device) -> float:
     """Return current VRAM usage in GB for one device, or ``0`` on CPU."""
+    if not _PYNVML_AVAILABLE:
+        return 0
     if isinstance(device, torch.device):
         if str(device).startswith("cuda:"):
             device = int(str(device).replace("cuda:", ""))
@@ -530,7 +546,7 @@ class DistributedObject(ABC):
         if global_rank is None or local_rank is None:
             return
         with Log(self.name, global_rank):
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
             if self.manual_seed is not None:
                 np.random.seed(self.manual_seed * world_size + global_rank)
@@ -545,7 +561,7 @@ class DistributedObject(ABC):
                 self.run_process(world_size, global_rank, local_rank, dataloaders)
             finally:
                 cleanup()
-                if torch.cuda.is_available():
+                if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                     pynvml.nvmlShutdown()
 
 

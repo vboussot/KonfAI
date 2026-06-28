@@ -1,16 +1,19 @@
 from typing import cast
+from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
-from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
+import konfai.data.augmentation as augmentation_module
+from konfai.data.augmentation import DataAugmentation, DataAugmentationsList, Elastix, Mask
 from konfai.data.data_manager import DatasetIter, Group, GroupTransform
 from konfai.data.patching import DatasetManager
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import AugmentationError
 
 
 class DummyDataset:
-
     def __init__(self, array: np.ndarray) -> None:
         self.array = array
 
@@ -22,7 +25,6 @@ class DummyDataset:
 
 
 class CountingOffsetAugmentation(DataAugmentation):
-
     def __init__(self) -> None:
         super().__init__()
         self.compute_calls = 0
@@ -94,3 +96,37 @@ def test_inline_augmentations_are_loaded_on_demand() -> None:
     second_augmented_sample = dataset_iter[2]["dest"].tensor
     assert augmentation.compute_calls == 1
     assert torch.equal(second_augmented_sample, torch.from_numpy(base) + 2)
+
+
+def test_simpleitk_augmentations_fail_clearly_when_dependency_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(augmentation_module, "sitk", None)
+
+    with pytest.raises(AugmentationError, match="SimpleITK"):
+        Elastix()
+    with pytest.raises(AugmentationError, match="SimpleITK"):
+        Mask("mask.mha", 0)
+
+
+def test_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sitk = pytest.importorskip("SimpleITK")
+    mask_path = tmp_path / "mask.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((2, 2), dtype=np.uint8)), str(mask_path))
+
+    read_count = 0
+    original_read_image = sitk.ReadImage
+
+    def counting_read_image(path: str):
+        nonlocal read_count
+        read_count += 1
+        return original_read_image(path)
+
+    monkeypatch.setattr(augmentation_module.sitk, "ReadImage", counting_read_image)
+    augmentation = Mask(str(mask_path), 0)
+    augmentation._state_init(0, [[2, 2]], [Attribute()])
+
+    assert read_count == 0
+    augmentation._compute("case", 0, [torch.ones((1, 2, 2))])
+    augmentation._compute("case", 0, [torch.ones((1, 2, 2))])
+    assert read_count == 1

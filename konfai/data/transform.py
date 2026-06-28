@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import SimpleITK as sitk  # noqa: N813
+import SimpleITK as sitk
 import torch
-import torch.nn.functional as F  # noqa: N812
+import torch.nn.functional as F
 
 from konfai import cuda_visible_devices
 from konfai.utils.config import apply_config
@@ -126,8 +126,10 @@ class Clip(Transform):
                 try:
                     percentile = float(self.min_value.split(":")[1])
                     min_value = np.percentile(tensor_masked, percentile)
-                except (IndexError, ValueError):
-                    raise ValueError(f"Invalid format for min_value: '{self.min_value}'. Expected 'percentile:<float>'")
+                except (IndexError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid format for min_value: '{self.min_value}'. Expected 'percentile:<float>'"
+                    ) from exc
             else:
                 raise TypeError(
                     f"Unsupported string for min_value: '{self.min_value}'."
@@ -143,8 +145,10 @@ class Clip(Transform):
                 try:
                     percentile = float(self.max_value.split(":")[1])
                     max_value = np.percentile(tensor_masked, percentile)
-                except (IndexError, ValueError):
-                    raise ValueError(f"Invalid format for max_value: '{self.max_value}'. Expected 'percentile:<float>'")
+                except (IndexError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid format for max_value: '{self.max_value}'. Expected 'percentile:<float>'"
+                    ) from exc
             else:
                 raise TypeError(
                     f"Unsupported string for max_value: '{self.max_value}'."
@@ -227,7 +231,6 @@ class Normalize(TransformInverse):
 
 
 class UnNormalize(Transform):
-
     def __init__(self, min_value: int = -1024, max_value: int = 3071) -> None:
         super().__init__()
         self.min_value = min_value
@@ -275,33 +278,39 @@ class Standardize(TransformInverse):
             cache_attribute["Mean"] = (
                 torch.tensor([torch.mean(tensor_masked.type(torch.float32))])
                 if self.mean is None
-                else torch.tensor([self.mean])
+                else torch.tensor(self.mean)
             )
 
         if "Std" not in cache_attribute:
             cache_attribute["Std"] = (
                 torch.tensor([torch.std(tensor_masked.type(torch.float32))])
                 if self.std is None
-                else torch.tensor([self.std])
+                else torch.tensor(self.std)
             )
         if self.lazy:
             return tensor
         else:
-            mean = cache_attribute.get_tensor("Mean")
-            std = cache_attribute.get_tensor("Std")
+            mean = self._broadcast(cache_attribute.get_tensor("Mean"), tensor)
+            std = self._broadcast(cache_attribute.get_tensor("Std"), tensor)
             return (tensor - mean) / std
+
+    @staticmethod
+    def _broadcast(stat: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+        """Shape a scalar or per-channel statistic to broadcast over a channel-first tensor."""
+        if stat.numel() > 1:
+            return stat.reshape(-1, *([1] * (tensor.dim() - 1)))
+        return stat
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.lazy:
             return tensor
         else:
-            mean = cache_attribute.pop_tensor("Mean")
-            std = cache_attribute.pop_tensor("Std")
+            mean = self._broadcast(cache_attribute.pop_tensor("Mean"), tensor)
+            std = self._broadcast(cache_attribute.pop_tensor("Std"), tensor)
             return tensor * std + mean
 
 
 class TensorCast(TransformInverse):
-
     def __init__(self, dtype: str = "float32", inverse: bool = True) -> None:
         super().__init__(inverse)
         self.dtype: torch.dtype = getattr(torch, dtype)
@@ -314,15 +323,14 @@ class TensorCast(TransformInverse):
     def safe_dtype_cast(dtype_str: str) -> torch.dtype:
         try:
             return getattr(torch, dtype_str)
-        except AttributeError:
-            raise ValueError(f"Unsupported dtype: {dtype_str}")
+        except AttributeError as exc:
+            raise ValueError(f"Unsupported dtype: {dtype_str}") from exc
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.to(TensorCast.safe_dtype_cast(cache_attribute.pop("dtype")))
 
 
 class Padding(TransformInverse):
-
     def __init__(self, padding: list[int] = [0, 0, 0, 0, 0, 0], mode: str = "constant", inverse: bool = True) -> None:
         super().__init__(inverse)
         self.padding = padding
@@ -360,7 +368,6 @@ class Padding(TransformInverse):
 
 
 class Squeeze(TransformInverse):
-
     def __init__(self, dim: int, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.dim = dim
@@ -373,7 +380,6 @@ class Squeeze(TransformInverse):
 
 
 class Resample(TransformInverse, ABC):
-
     def __init__(self, inverse: bool) -> None:
         super().__init__(inverse)
 
@@ -408,7 +414,6 @@ class Resample(TransformInverse, ABC):
 
 
 class ResampleToResolution(Resample):
-
     def __init__(self, spacing: list[float] = [1.0, 1.0, 1.0], inverse: bool = True) -> None:
         super().__init__(inverse)
         self.spacing = torch.tensor([0 if s < 0 else s for s in spacing])
@@ -422,17 +427,22 @@ class ResampleToResolution(Resample):
         if len(shape) != len(self.spacing):
             TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
         image_spacing = cache_attribute.get_tensor("Spacing")
-        resize_factor = torch.tensor([s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, image_spacing)])
+        resize_factor = torch.tensor(
+            [s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, image_spacing, strict=False)]
+        )
         return [int(x) for x in (torch.tensor(shape) * 1 / resize_factor.flip(0))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         image_spacing = cache_attribute.get_tensor("Spacing")
         spacing = self.spacing
         resize_factor = torch.tensor(
-            [s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, cache_attribute.get_tensor("Spacing"))]
+            [
+                s / i_s if s > 0 else 1.0
+                for s, i_s in zip(self.spacing, cache_attribute.get_tensor("Spacing"), strict=False)
+            ]
         )
         cache_attribute["Spacing"] = torch.tensor(
-            [float(s) if s > 0 else float(i_s) for s, i_s in zip(spacing, image_spacing)]
+            [float(s) if s > 0 else float(i_s) for s, i_s in zip(spacing, image_spacing, strict=False)]
         )
         cache_attribute["Size"] = np.asarray([int(x) for x in torch.tensor(tensor.shape[1:])])
         size = [int(x) for x in (torch.tensor(tensor.shape[1:]) * 1 / resize_factor.flip(0))]
@@ -441,7 +451,6 @@ class ResampleToResolution(Resample):
 
 
 class ResampleToShape(Resample):
-
     def __init__(self, shape: list[float] = [100, 256, 256], inverse: bool = True) -> None:
         super().__init__(inverse)
         self.shape = torch.tensor([0 if s < 0 else s for s in shape])
@@ -454,14 +463,14 @@ class ResampleToShape(Resample):
             )
         if len(shape) != len(self.shape):
             TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
-        new_shape = self.shape
+        new_shape = self.shape.clone()
         for i, s in enumerate(self.shape):
             if s == 0:
                 new_shape[i] = shape[i]
         return new_shape
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        shape = self.shape
+        shape = self.shape.clone()
         image_shape = torch.tensor([int(x) for x in torch.tensor(tensor.shape[1:])])
         for i, s in enumerate(self.shape):
             if s == 0:
@@ -477,7 +486,6 @@ class ResampleToShape(Resample):
 
 
 class ResampleTransform(TransformInverse):
-
     def __init__(self, transforms: dict[str, bool], inverse: bool = True) -> None:
         super().__init__(inverse)
         self.transforms = transforms
@@ -553,15 +561,17 @@ class ResampleTransform(TransformInverse):
 
 
 class Mask(Transform):
-
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
         super().__init__()
         self.path = path
         self.value_outside = value_outside
+        self._cached_mask: torch.Tensor | None = None
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.path.endswith(".mha"):
-            mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
+            if self._cached_mask is None:
+                self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
+            mask = self._cached_mask
         else:
             mask = None
             for dataset in self.datasets:
@@ -575,7 +585,6 @@ class Mask(Transform):
 
 
 class Dilate(Transform):
-
     def __init__(self, dilate: int = 1) -> None:
         super().__init__()
         if dilate < 0:
@@ -604,7 +613,6 @@ class Dilate(Transform):
 
 
 class Sum(Transform):
-
     def __init__(self, dim: int = 0) -> None:
         super().__init__()
         self.dim = dim
@@ -622,7 +630,6 @@ class Sum(Transform):
 
 
 class Gradient(Transform):
-
     def __init__(self, per_dim: bool = False):
         super().__init__()
         self.per_dim = per_dim
@@ -660,7 +667,6 @@ class Gradient(Transform):
 
 
 class Argmax(Transform):
-
     def __init__(self, dim: int = 0) -> None:
         super().__init__()
         self.dim = dim
@@ -670,7 +676,6 @@ class Argmax(Transform):
 
 
 class Softmax(Transform):
-
     def __init__(self, dim: int = 0) -> None:
         super().__init__()
         self.dim = dim
@@ -680,7 +685,6 @@ class Softmax(Transform):
 
 
 class FlatLabel(Transform):
-
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
         self.labels = labels
@@ -696,7 +700,6 @@ class FlatLabel(Transform):
 
 
 class Save(Transform):
-
     def __init__(self, dataset: str, group: str | None = None) -> None:
         super().__init__()
         self.dataset = dataset
@@ -707,7 +710,6 @@ class Save(Transform):
 
 
 class Flatten(Transform):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -719,7 +721,6 @@ class Flatten(Transform):
 
 
 class Permute(TransformInverse):
-
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
         super().__init__(inverse)
         self.dims = [0] + [int(d) + 1 for d in dims.split("|")]
@@ -735,7 +736,6 @@ class Permute(TransformInverse):
 
 
 class Flip(TransformInverse):
-
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
         super().__init__(inverse)
 
@@ -749,7 +749,6 @@ class Flip(TransformInverse):
 
 
 class Canonical(TransformInverse):
-
     def __init__(self, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
@@ -775,7 +774,7 @@ class Canonical(TransformInverse):
                 data.unsqueeze(0).type(torch.float32),
                 torch.nn.functional.affine_grid(
                     matrix[:, :-1, ...].type(torch.float32),
-                    [1] + list(data.shape),
+                    [1, *list(data.shape)],
                     align_corners=True,
                 ),
                 align_corners=True,
@@ -814,7 +813,6 @@ class Canonical(TransformInverse):
 
 
 class HistogramMatching(Transform):
-
     def __init__(self, reference_group: str) -> None:
         super().__init__()
         self.reference_group = reference_group
@@ -836,7 +834,6 @@ class HistogramMatching(Transform):
 
 
 class SelectLabel(Transform):
-
     def __init__(self, labels: list[str]) -> None:
         super().__init__()
         self.labels = [label[1:-1].split(",") for label in labels]
@@ -849,7 +846,6 @@ class SelectLabel(Transform):
 
 
 class OneHot(TransformInverse):
-
     def __init__(self, num_classes: int, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.num_classes = num_classes
@@ -920,7 +916,6 @@ class KonfAIInference(Transform):
                 "Use 'Dataset.num_workers: 0' for pipelines that include this transform."
             )
         with tempfile.TemporaryDirectory() as tmpdir:
-
             dataset_path = Path(tmpdir) / "Dataset"
             if self.per_channel:
                 for i, channel in enumerate(tensor):
@@ -952,7 +947,6 @@ class KonfAIInference(Transform):
 
 
 class InferenceStack(Transform):
-
     def __init__(self, dataset: str, name: str, mode: str = "mean"):
         self.dataset = None
         if dataset:
@@ -978,7 +972,6 @@ class InferenceStack(Transform):
 
 
 class Variance(Transform):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -987,7 +980,6 @@ class Variance(Transform):
 
 
 class SegmentationDisagreement(Transform):
-
     def __init__(self, ignore_background: bool = False) -> None:
         super().__init__()
         self.ignore_background = ignore_background
@@ -1023,7 +1015,6 @@ class SegmentationDisagreement(Transform):
 
 
 class Percentage(Transform):
-
     def __init__(self, baseline: float) -> None:
         super().__init__()
         self.baseline = baseline
@@ -1033,7 +1024,6 @@ class Percentage(Transform):
 
 
 class StandardDeviation(Transform):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -1042,7 +1032,6 @@ class StandardDeviation(Transform):
 
 
 class Statistics(Transform):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -1055,11 +1044,13 @@ class Statistics(Transform):
 
 
 class Crop(TransformInverse):
-
     def __init__(self, inverse: bool = True) -> None:
         super().__init__(inverse)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        # TODO(perf): reads the full pixel array at DatasetManager __init__ time to compute the crop
+        # bounding box; for large 3-D volumes this forces a complete disk read before any caching.
+        # Fix: persist the box as a sidecar attribute or compute lazily inside _load().  Medium effort.
         data = None
         for dataset in self.datasets:
             if dataset.is_dataset_exist(group_src, name):
@@ -1070,10 +1061,10 @@ class Crop(TransformInverse):
         treshold = np.percentile(data, 5)
         image = data_to_image((data > treshold).astype(np.uint8), cache_attribute)
         box = box_with_mask(image, [1], [0] * (len(data.shape) - 1))
-        for i, ((_, b), s) in enumerate(zip(box, shape[1:])):
+        for i, ((_, b), s) in enumerate(zip(box, shape[1:], strict=False)):
             box[i][1] = s - b
         cache_attribute["box"] = box
-        return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:])]
+        return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:], strict=False)]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "box" not in cache_attribute:
@@ -1081,7 +1072,7 @@ class Crop(TransformInverse):
         box_str = cache_attribute["box"]
         flat = np.fromstring(box_str.replace("[", " ").replace("]", " "), sep=" ", dtype=np.int64)
         box = flat.reshape(-1, 2)
-        for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:])):
+        for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:], strict=False)):
             box[i][1] = s - b
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
             origin = torch.tensor(cache_attribute.get_np_array("Origin"))

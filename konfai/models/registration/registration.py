@@ -15,15 +15,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-import torch.nn.functional as F  # noqa: N812
-from torch.nn.parameter import Parameter
-
+import torch.nn.functional as F
 from konfai.models.segmentation import UNet
 from konfai.network import blocks, network
+from torch.nn.parameter import Parameter
 
 
 class VoxelMorph(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
@@ -93,7 +91,6 @@ class VoxelMorph(network.Network):
 
 
 class Flow(network.ModuleArgsDict):
-
     def __init__(
         self,
         in_channels: int,
@@ -130,7 +127,6 @@ class Flow(network.ModuleArgsDict):
 
 
 class Rigid(network.ModuleArgsDict):
-
     def __init__(self, in_channels: int, dim: int) -> None:
         super().__init__()
         self.add_module("ToFeatures", torch.nn.Flatten(1))
@@ -142,7 +138,6 @@ class Rigid(network.ModuleArgsDict):
 
 
 class MaskFlow(torch.nn.Module):
-
     def __init__(self):
         super().__init__()
 
@@ -154,7 +149,6 @@ class MaskFlow(torch.nn.Module):
 
 
 class SpatialTransformer(torch.nn.Module):
-
     def __init__(self, size: list[int], rigid: bool = False):
         super().__init__()
         self.rigid = rigid
@@ -189,7 +183,6 @@ class SpatialTransformer(torch.nn.Module):
 
 
 class VecInt(torch.nn.Module):
-
     def __init__(self, inshape: list[int], nsteps: int):
         super().__init__()
         if nsteps < 0:
@@ -206,7 +199,6 @@ class VecInt(torch.nn.Module):
 
 
 class ResizeTransform(torch.nn.Module):
-
     def __init__(self, size: float):
         super().__init__()
         self.factor = 1.0 / size

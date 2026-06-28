@@ -14,12 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import itertools
 from functools import partial
 from typing import cast
 
 import numpy as np
 import torch
-
 from konfai.data import augmentation
 from konfai.data.patching import Attribute, ModelPatch
 from konfai.models.generation.ddpm import DDPM
@@ -28,9 +28,7 @@ from konfai.network import blocks, network
 
 
 class Discriminator(network.Network):
-
     class DiscriminatorNLayers(network.ModuleArgsDict):
-
         def __init__(self, channels: list[int], strides: list[int], dim: int) -> None:
             super().__init__()
             block_config = partial(
@@ -41,14 +39,13 @@ class Discriminator(network.Network):
                 activation=partial(torch.nn.LeakyReLU, negative_slope=0.2, inplace=True),
                 norm_mode=blocks.NormMode.SYNCBATCH,
             )
-            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides)):
+            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides, strict=False)):
                 self.add_module(
                     f"Layer_{i}",
                     blocks.ConvBlock(in_channels, out_channels, [block_config(stride=stride)], dim),
                 )
 
     class DiscriminatorHead(network.ModuleArgsDict):
-
         def __init__(self, channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -65,7 +62,6 @@ class Discriminator(network.Network):
             # self.add_module("Flatten", torch.nn.Flatten(1))
 
     class DiscriminatorBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int] = [1, 16, 32, 64, 64],
@@ -104,9 +100,7 @@ class Discriminator(network.Network):
 
 
 class DiscriminatorADA(network.Network):
-
     class DDPMTE(torch.nn.Module):
-
         def __init__(self, in_channels: int, out_channels: int) -> None:
             super().__init__()
             self.linear_0 = torch.nn.Linear(in_channels, out_channels)
@@ -119,7 +113,6 @@ class DiscriminatorADA(network.Network):
             )
 
     class DiscriminatorNLayers(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int],
@@ -136,7 +129,7 @@ class DiscriminatorADA(network.Network):
                 activation=partial(torch.nn.LeakyReLU, negative_slope=0.2, inplace=True),
                 norm_mode=blocks.NormMode.SYNCBATCH,
             )
-            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides)):
+            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides, strict=False)):
                 self.add_module(
                     f"Te_{i}",
                     DiscriminatorADA.DDPMTE(time_embedding_dim, in_channels),
@@ -148,7 +141,6 @@ class DiscriminatorADA(network.Network):
                 )
 
     class DiscriminatorHead(network.ModuleArgsDict):
-
         def __init__(self, channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -165,7 +157,6 @@ class DiscriminatorADA(network.Network):
             # self.add_module("Flatten", torch.nn.Flatten(1))
 
     class UpdateP(torch.nn.Module):
-
         def __init__(self):
             super().__init__()
             self._it = 0
@@ -192,7 +183,6 @@ class DiscriminatorADA(network.Network):
             return torch.tensor(self.p).to(tensor.device)
 
     class DiscriminatorAugmentation(torch.nn.Module):
-
         def __init__(self, dim: int):
             super().__init__()
 
@@ -247,7 +237,6 @@ class DiscriminatorADA(network.Network):
             return torch.cat([data.unsqueeze(0) for data in out], 0)
 
     class DiscriminatorBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int] = [1, 16, 32, 64, 64],
@@ -308,9 +297,7 @@ class DiscriminatorADA(network.Network):
 
 
 class GeneratorV1(network.Network):
-
     class GeneratorStem(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -324,7 +311,6 @@ class GeneratorV1(network.Network):
             )
 
     class GeneratorHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -343,7 +329,6 @@ class GeneratorV1(network.Network):
             self.add_module("Tanh", torch.nn.Tanh())
 
     class GeneratorDownSample(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -364,7 +349,6 @@ class GeneratorV1(network.Network):
             )
 
     class GeneratorUpSample(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -384,14 +368,13 @@ class GeneratorV1(network.Network):
     class GeneratorEncoder(network.ModuleArgsDict):
         def __init__(self, channels: list[int], dim: int) -> None:
             super().__init__()
-            for i, (in_channels, out_channels) in enumerate(zip(channels, channels[1:])):
+            for i, (in_channels, out_channels) in enumerate(itertools.pairwise(channels)):
                 self.add_module(
                     f"DownSample_{i}",
                     GeneratorV1.GeneratorDownSample(in_channels=in_channels, out_channels=out_channels, dim=dim),
                 )
 
     class GeneratorResnetBlock(network.ModuleArgsDict):
-
         def __init__(self, channels: int, dim: int):
             super().__init__()
             self.add_module(
@@ -410,7 +393,6 @@ class GeneratorV1(network.Network):
             self.add_module("Residual", blocks.Add(), in_branch=[0, 1])
 
     class GeneratorNResnetBlock(network.ModuleArgsDict):
-
         def __init__(self, channels: int, nb_conv: int, dim: int) -> None:
             super().__init__()
             for i in range(nb_conv):
@@ -422,14 +404,15 @@ class GeneratorV1(network.Network):
     class GeneratorDecoder(network.ModuleArgsDict):
         def __init__(self, channels: list[int], dim: int) -> None:
             super().__init__()
-            for i, (in_channels, out_channels) in enumerate(zip(reversed(channels), reversed(channels[:-1]))):
+            for i, (in_channels, out_channels) in enumerate(
+                zip(reversed(channels), reversed(channels[:-1]), strict=False)
+            ):
                 self.add_module(
                     f"UpSample_{i}",
                     GeneratorV1.GeneratorUpSample(in_channels=in_channels, out_channels=out_channels, dim=dim),
                 )
 
     class GeneratorAutoEncoder(network.ModuleArgsDict):
-
         def __init__(self, ngf: int, dim: int) -> None:
             super().__init__()
             channels = [ngf, ngf * 2]
@@ -441,7 +424,6 @@ class GeneratorV1(network.Network):
             self.add_module("Decoder", GeneratorV1.GeneratorDecoder(channels, dim))
 
     class GeneratorBlock(network.ModuleArgsDict):
-
         def __init__(self, ngf: int, dim: int) -> None:
             super().__init__()
             self.add_module("Stem", GeneratorV1.GeneratorStem(3, ngf, dim))
@@ -473,9 +455,7 @@ class GeneratorV1(network.Network):
 
 
 class GeneratorV2(network.Network):
-
     class NestedUNetHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: list[int], dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -491,7 +471,6 @@ class GeneratorV2(network.Network):
             self.add_module("Tanh", torch.nn.Tanh())
 
     class GeneratorBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int],
@@ -565,9 +544,7 @@ class GeneratorV2(network.Network):
 
 
 class GeneratorV3(network.Network):
-
     class NestedUNetHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: list[int], dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -583,7 +560,6 @@ class GeneratorV3(network.Network):
             self.add_module("Tanh", torch.nn.Tanh())
 
     class GeneratorBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int],
@@ -659,7 +635,6 @@ class GeneratorV3(network.Network):
 
 
 class DiffusionGan(network.Network):
-
     def __init__(
         self,
         generator: GeneratorV1 = GeneratorV1(),
@@ -691,7 +666,6 @@ class DiffusionGan(network.Network):
 
 
 class DiffusionGanV2(network.Network):
-
     def __init__(
         self,
         generator: GeneratorV2 = GeneratorV2(),
@@ -723,7 +697,6 @@ class DiffusionGanV2(network.Network):
 
 
 class CycleGanDiscriminator(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
@@ -769,7 +742,6 @@ class CycleGanDiscriminator(network.Network):
 
 
 class CycleGanGeneratorV1(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
@@ -803,7 +775,6 @@ class CycleGanGeneratorV1(network.Network):
 
 
 class CycleGanGeneratorV2(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
@@ -862,7 +833,6 @@ class CycleGanGeneratorV2(network.Network):
 
 
 class CycleGanGeneratorV3(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
@@ -921,7 +891,6 @@ class CycleGanGeneratorV3(network.Network):
 
 
 class DiffusionCycleGan(network.Network):
-
     def __init__(
         self,
         generators: CycleGanGeneratorV3 = CycleGanGeneratorV3(),

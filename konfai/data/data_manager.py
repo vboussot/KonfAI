@@ -221,7 +221,7 @@ class DatasetIter(data.Dataset):
         self.groups_src = groups_src
         self.data_augmentations_list = data_augmentations_list
         self.use_cache = use_cache
-        self.nb_dataset = len(data[list(data.keys())[0]])
+        self.nb_dataset = len(data[next(iter(data.keys()))])
         self.buffer_size = buffer_size
         self._index_cache: list[int] = []
         self._index_cache_lookup: set[int] = set()
@@ -386,7 +386,6 @@ class DatasetIter(data.Dataset):
 
 
 class Subset:
-
     def __init__(
         self,
         subset: str | list[int] | list[str] | None = None,
@@ -479,7 +478,6 @@ class Subset:
 
 
 class TrainSubset(Subset):
-
     def __init__(
         self,
         subset: str | list[int] | list[str] | None = None,
@@ -489,7 +487,6 @@ class TrainSubset(Subset):
 
 
 class PredictionSubset(Subset):
-
     def __init__(self, subset: str | list[int] | list[str] | None = None) -> None:
         super().__init__(subset, False)
 
@@ -641,7 +638,7 @@ class Data(ABC):
             )
             append = flag != "i"
 
-            if file_format not in SUPPORTED_EXTENSIONS:
+            if file_format.split("@", 1)[0] not in SUPPORTED_EXTENSIONS:
                 raise DatasetManagerError(
                     f"Unsupported file format '{file_format}'.",
                     f"Supported extensions are: {', '.join(SUPPORTED_EXTENSIONS)}",
@@ -755,7 +752,7 @@ class Data(ABC):
                     f"Received: {self.validation}",
                     "Example: validation = 0.2  # for a 20% validation split",
                 )
-            index = [m[0] for m in mapping[int(math.floor(len(mapping) * (1 - self.validation))) :]]
+            index = [m[0] for m in mapping[math.floor(len(mapping) * (1 - self.validation)) :]]
         elif isinstance(self.validation, str):
             if ":" in self.validation:
                 index = list(range(int(self.validation.split(":")[0]), int(self.validation.split(":")[1])))
@@ -788,7 +785,7 @@ class Data(ABC):
             else:
                 element_types = sorted({type(item).__name__ for item in self.validation})
                 raise DatasetManagerError(
-                    "Invalid list type for 'validation': elements of type " f"{element_types} are not supported.",
+                    f"Invalid list type for 'validation': elements of type {element_types} are not supported.",
                     "Supported list element types are:",
                     "\t• int  → list of indices (e.g., [0, 1, 2])",
                     "\t• str  → list of sample names or file paths",
@@ -933,7 +930,7 @@ class Data(ABC):
         self.mapping = []
         train_mappings = Data._split(self._prepared_mapping, world_size)
         validate_mappings = Data._split(self._prepared_validation_mapping, world_size)
-        for i, (train_mapping, validate_mapping) in enumerate(zip(train_mappings, validate_mappings)):
+        for i, (train_mapping, validate_mapping) in enumerate(zip(train_mappings, validate_mappings, strict=False)):
             mappings = [train_mapping]
             if len(validate_mapping):
                 mappings += [validate_mapping]
@@ -945,9 +942,9 @@ class Data(ABC):
                 self.mapping[i].append(remapped_mapping)
 
         data_loaders: list[list[DataLoader]] = []
-        for i, (datas, mappings) in enumerate(zip(self.data, self.mapping)):
+        for i, (datas, mappings) in enumerate(zip(self.data, self.mapping, strict=False)):
             data_loaders.append([])
-            for dataset_items, mapping in zip(datas, mappings):
+            for dataset_items, mapping in zip(datas, mappings, strict=False):
                 data_loaders[i].append(
                     DataLoader(
                         dataset=self.datasetIter(

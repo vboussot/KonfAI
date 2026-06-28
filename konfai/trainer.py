@@ -23,10 +23,14 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import tqdm
-from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: N817
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.swa_utils import AveragedModel
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard.writer import SummaryWriter
+
+try:
+    from torch.utils.tensorboard.writer import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
 
 from konfai import (
     checkpoints_directory,
@@ -189,6 +193,10 @@ class _Trainer:
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
         self.it = it
+        if SummaryWriter is None:
+            raise ImportError(
+                "TensorBoard is required for training logging. Install it with: pip install konfai[tensorboard]"
+            )
         self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self._best_checkpoint_path: Path | None = None
         self._best_checkpoint_loss: float | None = None
@@ -508,8 +516,8 @@ class _Trainer:
             loss = {}
             for name, network in self.model.module.get_networks().items():
                 if network.measure is not None:
-                    loss.update({k: v[1] for k, v in measures[f"{name}{label}"][0].items()})
-                    loss.update({k: v[1] for k, v in measures[f"{name}{label}"][1].items()})
+                    loss.update({k: v[1] for k, v in measures[name][0].items()})
+                    loss.update({k: v[1] for k, v in measures[name][1].items()})
             return loss
         return None
 
@@ -676,12 +684,10 @@ class Trainer(DistributedObject):
                         url=self.path_to_model.split(":")[0], map_location="cpu", check_hash=True
                     )
                 }
-            except Exception:
-                raise Exception(f"Model : {self.path_to_model} does not exist !")
+            except Exception as exc:
+                raise Exception(f"Model : {self.path_to_model} does not exist !") from exc
         elif Path(self.path_to_model).exists():
-            state_dict = torch.load(
-                str(self.path_to_model), map_location=torch.device("cpu"), weights_only=False
-            )  # nosec B614
+            state_dict = torch.load(str(self.path_to_model), map_location=torch.device("cpu"), weights_only=False)  # nosec B614
         else:
             raise ValueError(f"Invalid model path entry: {self.path_to_model}")
 
