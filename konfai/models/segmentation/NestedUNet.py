@@ -15,15 +15,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
 
 class NestedUNet(network.Network):
-
     class NestedUNetBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             channels: list[int],
@@ -110,7 +107,6 @@ class NestedUNet(network.Network):
                     )
 
     class NestedUNetHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, nb_class: int, activation: str, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -186,9 +182,7 @@ class NestedUNet(network.Network):
 
 
 class UNetpp(network.Network):
-
     class ResNetEncoderLayer(network.ModuleArgsDict):
-
         def __init__(
             self,
             in_channel: int,
@@ -242,7 +236,7 @@ class UNetpp(network.Network):
                 dim=dim,
             )
         )
-        for i, (in_channel, out_channel, layer) in enumerate(zip(channels[1:], channels[2:], layers)):
+        for i, (in_channel, out_channel, layer) in enumerate(zip(channels[1:], channels[2:], layers, strict=False)):
             modules.append(
                 UNetpp.ResNetEncoderLayer(
                     in_channel,
@@ -255,7 +249,6 @@ class UNetpp(network.Network):
         return modules
 
     class UNetPPBlock(network.ModuleArgsDict):
-
         def __init__(
             self,
             encoder_channels: list[int],
@@ -319,7 +312,6 @@ class UNetpp(network.Network):
                     )
 
     class UNetPPHead(network.ModuleArgsDict):
-
         def __init__(self, in_channels: int, out_channels: int, nb_class: int, dim: int) -> None:
             super().__init__()
             self.add_module(

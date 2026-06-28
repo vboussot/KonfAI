@@ -18,6 +18,7 @@
 
 import collections
 import inspect
+import logging
 import os
 import types
 import typing
@@ -33,6 +34,7 @@ from konfai import config_file
 from konfai.utils.errors import ConfigError
 
 yaml = ruamel.yaml.YAML()
+_log = logging.getLogger(__name__)
 
 
 class Config:
@@ -59,12 +61,24 @@ class Config:
                 self.filename.touch()
             else:
                 raise ConfigError(
-                    f"Config file '{self.filename}' does not exist.",
-                    ("Create it first or enable a creation mode with " "KONFAI_CONFIG_MODE=default."),
+                    f"Config file '{self.filename.resolve()}' does not exist.",
+                    f"Active config mode: KONFAI_CONFIG_MODE={mode}.",
+                    "Run `konfai TRAINING -c Config.yml` to generate a default config, "
+                    "or set KONFAI_CONFIG_MODE=default.",
                 )
 
         self.yml = open(self.filename, encoding="utf-8")
-        self.data = yaml.load(self.yml)
+        try:
+            self.data = yaml.load(self.yml)
+        except ruamel.yaml.YAMLError as exc:
+            self.yml.close()
+            location = ""
+            if hasattr(exc, "problem_mark") and exc.problem_mark is not None:
+                location = f" at line {exc.problem_mark.line + 1}"
+            raise ConfigError(
+                f"Invalid YAML syntax in '{self.filename}'{location}.",
+                str(exc),
+            ) from exc
         if self.data is None:
             self.data = {}
 
@@ -402,10 +416,50 @@ def apply_config(konfai_args: str | None = None):
                                 continue
 
                             if annotation in _CONFIG_PRIMITIVE_TYPES or annotation is Any:
-                                kwargs[param.name] = config.get_value(
-                                    param.name,
-                                    param.default,
-                                )
+                                value = config.get_value(param.name, param.default)
+                                if annotation in {int, float, bool, str} and value is not None:
+                                    try:
+                                        if annotation is bool:
+                                            if isinstance(value, bool):
+                                                pass
+                                            elif isinstance(value, int) and value in {0, 1}:
+                                                value = bool(value)
+                                            elif isinstance(value, str):
+                                                normalized = value.strip().lower()
+                                                if normalized in {"true", "1", "yes", "on"}:
+                                                    value = True
+                                                elif normalized in {"false", "0", "no", "off"}:
+                                                    value = False
+                                                else:
+                                                    raise ValueError("unsupported boolean literal")
+                                            else:
+                                                raise TypeError("unsupported boolean value")
+                                        else:
+                                            value = annotation(value)
+                                    except (ValueError, TypeError) as exc:
+                                        raise ConfigError(
+                                            f"Invalid value '{value}' for field '{param.name}' "
+                                            f"(expected {annotation.__name__}, got {type(value).__name__}) "
+                                            f"in config section '{key_tmp}'."
+                                        ) from exc
+                                kwargs[param.name] = value
+                                continue
+
+                            if annotation is Path:
+                                raw = config.get_value(param.name, param.default)
+                                if raw is not None:
+                                    path = Path(str(raw))
+                                    if not path.exists():
+                                        _log.warning(
+                                            "[Config] Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
+                                            raw,
+                                            param.name,
+                                            path.resolve(),
+                                            "absolute" if path.is_absolute() else "relative path",
+                                        )
+                                    kwargs[param.name] = path
+                                else:
+                                    kwargs[param.name] = None
                                 continue
 
                             origin = get_origin(annotation)
@@ -465,7 +519,7 @@ def apply_config(konfai_args: str | None = None):
                                 kwargs[param.name] = apply_config(key_tmp)(annotation)()
                             except Exception as exc:
                                 raise ConfigError(
-                                    "Failed to instantiate " f"{param.name} with type " f"{annotation}, error {exc}"
+                                    f"Failed to instantiate {param.name} with type {annotation}, error {exc}"
                                 ) from exc
                         return function(*args, **kwargs)
                 finally:

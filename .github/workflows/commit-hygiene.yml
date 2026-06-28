@@ -1,0 +1,53 @@
+name: commit-hygiene
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Commitizen
+        run: python -m pip install commitizen==4.13.0
+
+      - name: Validate Conventional Commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: cz check --rev-range "${BASE_SHA}..${HEAD_SHA}"
+
+      - name: Reject agent branding
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+
+          while IFS= read -r commit; do
+            message_file="$(mktemp)"
+            git show --no-patch --format=%B "$commit" > "$message_file"
+            echo "Checking $(git show --no-patch --format='%h %s' "$commit")"
+
+            if ! python scripts/check_commit_message.py "$message_file"; then
+              status=1
+            fi
+
+            rm -f "$message_file"
+          done < <(git rev-list --reverse "${BASE_SHA}..${HEAD_SHA}")
+
+          exit "$status"

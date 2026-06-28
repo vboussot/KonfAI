@@ -25,12 +25,13 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from konfai.utils.dataset import Attribute
 
 try:
-    from typing import Self  # Python ≥ 3.11
+    from typing import Self  # type: ignore[attr-defined]  # Python ≥ 3.11
 except ImportError:
     from typing_extensions import Self  # Python ≤ 3.10
 
@@ -233,7 +234,6 @@ class Measure:
     """Collect, validate, and aggregate losses or metrics across model outputs."""
 
     class Loss:
-
         def __init__(
             self,
             name: str,
@@ -273,7 +273,9 @@ class Measure:
 
         def get_loss(self) -> torch.Tensor:
             return (
-                torch.stack([w * loss_value for w, loss_value in zip(self._weight, self._loss)], dim=0).mean(dim=0)
+                torch.stack(
+                    [w * loss_value for w, loss_value in zip(self._weight, self._loss, strict=False)], dim=0
+                ).mean(dim=0)
                 if len(self._loss)
                 else torch.zeros((1), requires_grad=True)
             )
@@ -475,7 +477,6 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     """Named module graph container supporting KonfAI branch routing metadata."""
 
     class ModuleArgs:
-
         def __init__(
             self,
             in_branch: list[str],
@@ -895,7 +896,6 @@ class Network(ModuleArgsDict, ABC):
                 if child is not None:
                     if not isinstance(child, Network):
                         if isinstance(child, torch.nn.modules.conv._ConvNd) or isinstance(module, torch.nn.Linear):
-
                             current_size = child.weight.shape[0]
                             last_size = state_dict[prefix + name + ".weight"].shape[0]
 
@@ -1408,6 +1408,19 @@ class ModelLoader:
     def __init__(self, classpath: str = "default|segmentation.UNet.UNet") -> None:
         self.classpath = classpath
 
+    def _yaml_path(self) -> Path | None:
+        raw_path = self.classpath.split("|", maxsplit=1)[-1]
+        if Path(raw_path).suffix.lower() not in {".yaml", ".yml"}:
+            return None
+        if self.classpath.startswith("default|"):
+            path = Path(konfai_root()) / "models" / raw_path
+        else:
+            path = Path(raw_path)
+            config_file = os.environ.get("KONFAI_config_file")
+            if not path.is_absolute() and config_file:
+                path = Path(config_file).resolve().parent / path
+        return path.resolve()
+
     def get_model(
         self,
         train: bool = True,
@@ -1420,10 +1433,34 @@ class ModelLoader:
             "init_gain",
         ],
     ) -> Network:
-        module, name = get_module(self.classpath, "konfai.models")
-
         if not konfai_args:
             konfai_args = f"{konfai_root()}.Model"
+        yaml_path = self._yaml_path()
+        if yaml_path is not None:
+            from konfai.utils.model_builder import build_model_from_yaml
+
+            name = yaml_path.stem
+
+            def builder(
+                parameters: dict[str, Any] | None = None,
+                optimizer: OptimizerLoader | None = None,
+                schedulers: dict[str, LRSchedulersLoader] | None = None,
+                outputs_criterions: dict[str, TargetCriterionsLoader] | None = None,
+                patch: ModelPatch | None = None,
+            ) -> Network:
+                return build_model_from_yaml(
+                    yaml_path=yaml_path,
+                    parameters=parameters,
+                    optimizer=optimizer,
+                    schedulers=schedulers,
+                    outputs_criterions=outputs_criterions,
+                    patch=patch,
+                )
+
+            model = apply_config(f"{konfai_args}.{name}")(builder)(konfai_without=konfai_without if not train else [])
+            return model
+
+        module, name = get_module(self.classpath, "konfai.models")
         cls = getattr(module, name)
         if not hasattr(cls, "_key"):
             konfai_args += "." + name
@@ -1431,7 +1468,7 @@ class ModelLoader:
         model = apply_config(konfai_args)(cls)(konfai_without=konfai_without if not train else [])
         if not isinstance(model, Network):
             model = apply_config(konfai_args)(partial(MinimalModel, model))(
-                konfai_without=konfai_without + ["model"] if not train else []
+                konfai_without=[*konfai_without, "model"] if not train else []
             )
             model.set_name(name)
 
@@ -1447,7 +1484,7 @@ class Model:
     def train(self):
         self.module.train()
 
-    def eval(self):  # noqa: A003
+    def eval(self):
         self.module.eval()
 
     def __call__(

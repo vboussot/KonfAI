@@ -16,13 +16,17 @@
 
 """Data augmentation primitives applied by KonfAI datasets."""
 
-import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import numpy as np
-import SimpleITK as sitk  # noqa: N813
 import torch
-import torch.nn.functional as F  # noqa: N812
+import torch.nn.functional as F
+
+try:
+    import SimpleITK as sitk
+except ImportError:
+    sitk = None  # type: ignore[assignment]
 
 from konfai import konfai_root
 from konfai.utils.config import apply_config
@@ -30,6 +34,14 @@ from konfai.utils.dataset import Attribute, Dataset, data_to_image
 from konfai.utils.errors import AugmentationError
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module
+
+
+def _require_simpleitk() -> None:
+    """Raise a clear project error when an augmentation requires SimpleITK."""
+    if sitk is None:
+        raise AugmentationError(
+            "SimpleITK is required for this augmentation. Install it with `pip install konfai[itk]`."
+        )
 
 
 def _translate_2d_matrix(t: torch.Tensor) -> torch.Tensor:
@@ -134,13 +146,11 @@ def _rotation_2d_matrix(rotation: torch.Tensor, center: torch.Tensor | None = No
 
 
 class Prob:
-
     def __init__(self, prob: float = 1.0) -> None:
         self.prob = prob
 
 
 class DataAugmentationsList:
-
     def __init__(
         self,
         nb: int = 10,
@@ -166,7 +176,6 @@ class DataAugmentationsList:
 
 
 class DataAugmentation(NeedDevice, ABC):
-
     def __init__(self, groups: list[str] | None = None) -> None:
         self.who_index: dict[int, list[int]] = {}
         self.shape_index: dict[int, list[list[int]]] = {}
@@ -242,7 +251,6 @@ class DataAugmentation(NeedDevice, ABC):
 
 
 class EulerTransform(DataAugmentation):
-
     def __init__(self) -> None:
         super().__init__()
         self.matrix: dict[int, list[torch.Tensor]] = {}
@@ -254,11 +262,11 @@ class EulerTransform(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, matrix in zip(tensors, self.matrix[index]):
+        for tensor, matrix in zip(tensors, self.matrix[index], strict=False):
             results.append(
                 F.grid_sample(
                     tensor.unsqueeze(0).type(torch.float32),
-                    F.affine_grid(matrix[:, :-1, ...], [1] + list(tensor.shape), align_corners=True).to(tensor.device),
+                    F.affine_grid(matrix[:, :-1, ...], [1, *list(tensor.shape)], align_corners=True).to(tensor.device),
                     align_corners=True,
                     mode="bilinear",
                     padding_mode="reflection",
@@ -274,7 +282,7 @@ class EulerTransform(DataAugmentation):
                 tensor.unsqueeze(0).type(torch.float32),
                 F.affine_grid(
                     self.matrix[index][a].inverse()[:, :-1, ...],
-                    [1] + list(tensor.shape),
+                    [1, *list(tensor.shape)],
                     align_corners=True,
                 ).to(tensor.device),
                 align_corners=True,
@@ -287,7 +295,6 @@ class EulerTransform(DataAugmentation):
 
 
 class Translate(EulerTransform):
-
     def __init__(self, t_min: float = -10, t_max=10, is_int: bool = False):
         super().__init__()
         self.t_min = t_min
@@ -305,7 +312,6 @@ class Translate(EulerTransform):
 
 
 class Rotate(EulerTransform):
-
     def __init__(self, a_min: float = 0, a_max: float = 360, is_quarter: bool = False):
         super().__init__()
         self.a_min = a_min
@@ -318,16 +324,17 @@ class Rotate(EulerTransform):
         angles = []
 
         if self.is_quarter:
-            angles = torch.Tensor.repeat(torch.tensor([90, 180, 270]), 3)
+            angles = torch.deg2rad(torch.Tensor.repeat(torch.tensor([90.0, 180.0, 270.0]), 3))
         else:
-            angles = torch.rand((len(shapes), dim)) * torch.tensor(self.a_max - self.a_min) + torch.tensor(self.a_min)
+            angles = torch.deg2rad(
+                torch.rand((len(shapes), dim)) * torch.tensor(self.a_max - self.a_min) + torch.tensor(self.a_min)
+            )
 
         self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in angles]
         return shapes
 
 
 class Scale(EulerTransform):
-
     def __init__(self, s_std: float = 0.2):
         super().__init__()
         self.s_std = s_std
@@ -343,7 +350,6 @@ class Scale(EulerTransform):
 
 
 class Flip(DataAugmentation):
-
     def __init__(self, f_prob: list[float] = [0.33, 0.33, 0.33]) -> None:
         super().__init__()
         self.f_prob = f_prob
@@ -362,7 +368,7 @@ class Flip(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, flip in zip(tensors, self.flip[index]):
+        for tensor, flip in zip(tensors, self.flip[index], strict=False):
             results.append(torch.flip(tensor, dims=flip))
         return results
 
@@ -371,7 +377,6 @@ class Flip(DataAugmentation):
 
 
 class ColorTransform(DataAugmentation):
-
     def __init__(self, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.matrix: dict[int, list[torch.Tensor]] = {}
@@ -383,7 +388,7 @@ class ColorTransform(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, matrix in zip(tensors, self.matrix[index]):
+        for tensor, matrix in zip(tensors, self.matrix[index], strict=False):
             result = tensor.reshape([*tensor.shape[:1], int(np.prod(tensor.shape[1:]))])
             if tensor.shape[0] == 3:
                 matrix = matrix.to(tensor.device)
@@ -401,7 +406,6 @@ class ColorTransform(DataAugmentation):
 
 
 class Brightness(ColorTransform):
-
     def __init__(self, b_std: float, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.b_std = b_std
@@ -413,7 +417,6 @@ class Brightness(ColorTransform):
 
 
 class Contrast(ColorTransform):
-
     def __init__(self, c_std: float, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.c_std = c_std
@@ -425,7 +428,6 @@ class Contrast(ColorTransform):
 
 
 class LumaFlip(ColorTransform):
-
     def __init__(self, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.v = torch.tensor([1, 1, 1, 0]) / torch.sqrt(torch.tensor(3))
@@ -437,7 +439,6 @@ class LumaFlip(ColorTransform):
 
 
 class HUE(ColorTransform):
-
     def __init__(self, hue_max: float, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.hue_max = hue_max
@@ -450,7 +451,6 @@ class HUE(ColorTransform):
 
 
 class Saturation(ColorTransform):
-
     def __init__(self, s_std: float, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.s_std = s_std
@@ -465,7 +465,6 @@ class Saturation(ColorTransform):
 
 
 class Noise(DataAugmentation):
-
     def __init__(
         self,
         n_std: float,
@@ -522,7 +521,7 @@ class Noise(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, t in zip(tensors, self.ts[index]):
+        for tensor, t in zip(tensors, self.ts[index], strict=False):
             alpha_hat_t = self.alpha_hat[t].to(tensor.device).reshape(*[1 for _ in range(len(tensor.shape))])
             results.append(
                 alpha_hat_t.sqrt() * tensor
@@ -535,7 +534,6 @@ class Noise(DataAugmentation):
 
 
 class CutOUT(DataAugmentation):
-
     def __init__(
         self,
         c_prob: float,
@@ -560,7 +558,7 @@ class CutOUT(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, center in zip(tensors, self.centers[index]):
+        for tensor, center in zip(tensors, self.centers[index], strict=False):
             masks = []
             for i, w in enumerate(tensor.shape[1:]):
                 re = [1] * i + [-1] + [1] * (len(tensor.shape[1:]) - i - 1)
@@ -586,8 +584,8 @@ class CutOUT(DataAugmentation):
 
 
 class Elastix(DataAugmentation):
-
     def __init__(self, grid_spacing: int = 16, max_displacement: int = 16) -> None:
+        _require_simpleitk()
         super().__init__()
         self.grid_spacing = grid_spacing
         self.max_displacement = max_displacement
@@ -605,7 +603,7 @@ class Elastix(DataAugmentation):
         print(f"[KonfAI] Compute Displacement Field for index {index}")
         self.displacement_fields[index] = []
         self.displacement_fields_true[index] = []
-        for i, (shape, cache_attribute) in enumerate(zip(shapes, caches_attribute)):
+        for i, (shape, cache_attribute) in enumerate(zip(shapes, caches_attribute, strict=False)):
             shape = shape
             dim = len(shape)
             if "Spacing" not in cache_attribute:
@@ -614,10 +612,10 @@ class Elastix(DataAugmentation):
                 spacing = cache_attribute.get_np_array("Spacing")
 
             grid_physical_spacing = [self.grid_spacing] * dim
-            image_physical_size = [size * spacing for size, spacing in zip(shape, spacing)]
+            image_physical_size = [size * spacing for size, spacing in zip(shape, spacing, strict=False)]
             mesh_size = [
                 int(image_size / grid_spacing + 0.5)
-                for image_size, grid_spacing in zip(image_physical_size, grid_physical_spacing)
+                for image_size, grid_spacing in zip(image_physical_size, grid_physical_spacing, strict=False)
             ]
             if "Spacing" not in cache_attribute:
                 cache_attribute["Spacing"] = np.array([1.0 for _ in range(dim)])
@@ -658,7 +656,7 @@ class Elastix(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, displacement_field in zip(tensors, self.displacement_fields[index]):
+        for tensor, displacement_field in zip(tensors, self.displacement_fields[index], strict=False):
             results.append(
                 F.grid_sample(
                     tensor.type(torch.float32).unsqueeze(0),
@@ -677,7 +675,6 @@ class Elastix(DataAugmentation):
 
 
 class Permute(DataAugmentation):
-
     def __init__(self, prob_permute: list[float] | None = [0.5, 0.5]) -> None:
         super().__init__()
         self._permute_dims = torch.tensor([[0, 2, 1, 3], [0, 3, 1, 2]])
@@ -711,7 +708,7 @@ class Permute(DataAugmentation):
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         results = []
-        for tensor, prob in zip(tensors, self.permute[index]):
+        for tensor, prob in zip(tensors, self.permute[index], strict=False):
             res = tensor
             for permute in self._permute_dims[prob]:
                 res = res.permute(tuple(permute))
@@ -725,24 +722,32 @@ class Permute(DataAugmentation):
 
 
 class Mask(DataAugmentation):
-
     def __init__(self, mask: str, value: float, groups: list[str] | None = None) -> None:
+        _require_simpleitk()
         super().__init__(groups)
-        if mask is not None:
-            if os.path.exists(mask):
-                self.mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(mask)))
-            else:
-                raise NameError("Mask file not found")
+        self.mask_path = Path(mask)
+        if not self.mask_path.is_file():
+            raise AugmentationError(f"Mask file '{self.mask_path}' does not exist.")
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(str(self.mask_path))
+        reader.ReadImageInformation()
+        self.mask_shape = tuple(reversed(reader.GetSize()))
+        self._mask: torch.Tensor | None = None
         self.positions: dict[int, list[torch.Tensor]] = {}
         self.value = value
+
+    def _load_mask(self) -> torch.Tensor:
+        if self._mask is None:
+            self._mask = torch.from_numpy(sitk.GetArrayFromImage(sitk.ReadImage(str(self.mask_path))))
+        return self._mask
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         self.positions[index] = [
             torch.rand((3) if len(shape) == 3 else (2))
-            * (torch.tensor([max(s1 - s2, 0) for s1, s2 in zip(torch.tensor(shape), torch.tensor(self.mask.shape))]))
+            * (torch.tensor([max(s1 - s2, 0) for s1, s2 in zip(torch.tensor(shape), self.mask_shape, strict=False)]))
             for shape in shapes
         ]
-        return [self.mask.shape for _ in shapes]
+        return [list(self.mask_shape) for _ in shapes]
 
     def _compute(
         self,
@@ -750,11 +755,14 @@ class Mask(DataAugmentation):
         index: int,
         tensors: list[torch.Tensor],
     ) -> list[torch.Tensor]:
+        mask = self._load_mask()
         results = []
-        for tensor, position in zip(tensors, self.positions[index]):
-            slices = [slice(None, None)] + [slice(int(s1), int(s1) + s2) for s1, s2 in zip(position, self.mask.shape)]
+        for tensor, position in zip(tensors, self.positions[index], strict=False):
+            slices = [slice(None, None)] + [
+                slice(int(s1), int(s1) + s2) for s1, s2 in zip(position, mask.shape, strict=False)
+            ]
             padding = []
-            for s1, s2 in zip(reversed(tensor.shape), reversed(self.mask.shape)):
+            for s1, s2 in zip(reversed(tensor.shape), reversed(mask.shape), strict=False):
                 if s1 < s2:
                     pad = s2 - s1
                 else:
@@ -768,7 +776,7 @@ class Mask(DataAugmentation):
             )
             results.append(
                 torch.where(
-                    self.mask.to(tensor.device) == 1,
+                    mask.to(tensor.device) == 1,
                     torch.nn.functional.pad(tensor, tuple(padding), mode="constant", value=value)[tuple(slices)],
                     value,
                 )

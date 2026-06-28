@@ -16,15 +16,52 @@
 
 """SimpleITK-based helpers for geometric transforms, resampling, and masking."""
 
+from __future__ import annotations
+
 import numpy as np
-import SimpleITK as sitk  # noqa: N813
 import torch
-import torch.nn.functional as F  # noqa: N812
+
+try:
+    import SimpleITK as sitk
+except ImportError:
+    sitk = None  # type: ignore[assignment]
+import torch.nn.functional as F
+
+from konfai.utils.errors import TransformError
+
+
+def _require_simpleitk() -> None:
+    """Raise a clear project error when an ITK-only path is used without SimpleITK."""
+    if sitk is None:
+        raise TransformError("SimpleITK is required for this operation. Install it with `pip install konfai[itk]`.")
+
+
+def _invert_via_displacement_field(transform: sitk.Transform, image: sitk.Image) -> sitk.DisplacementFieldTransform:
+    displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
+    displacement_field_filter.SetReferenceImage(image)
+    displacement_field = displacement_field_filter.Execute(transform)
+    iterative_inverse = sitk.IterativeInverseDisplacementFieldImageFilter()
+    iterative_inverse.SetNumberOfIterations(20)
+    return sitk.DisplacementFieldTransform(iterative_inverse.Execute(displacement_field))
+
+
+def _copy_transform(transform_cls: type[sitk.Transform], transform: sitk.Transform, invert: bool) -> sitk.Transform:
+    transform = transform_cls(transform)
+    if invert:
+        transform = transform_cls(transform.GetInverse())
+    return transform
+
+
+def _image_like(array: np.ndarray, reference: sitk.Image) -> sitk.Image:
+    result = sitk.GetImageFromArray(array)
+    result.CopyInformation(reference)
+    return result
 
 
 def _open_transform(
     transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
 ) -> list[sitk.Transform]:
+    _require_simpleitk()
     transforms: list[sitk.Transform] = []
 
     for transform_file, invert in transform_files.items():
@@ -33,45 +70,20 @@ def _open_transform(
         else:
             transform = transform_file
         if transform.GetName() == "TranslationTransform":
-            transform = sitk.TranslationTransform(transform)
-            if invert:
-                transform = sitk.TranslationTransform(transform.GetInverse())
+            transform = _copy_transform(sitk.TranslationTransform, transform, invert)
         elif transform.GetName() == "Euler3DTransform":
-            transform = sitk.Euler3DTransform(transform)
-            if invert:
-                transform = sitk.Euler3DTransform(transform.GetInverse())
+            transform = _copy_transform(sitk.Euler3DTransform, transform, invert)
         elif transform.GetName() == "VersorRigid3DTransform":
-            transform = sitk.VersorRigid3DTransform(transform)
-            if invert:
-                transform = sitk.VersorRigid3DTransform(transform.GetInverse())
+            transform = _copy_transform(sitk.VersorRigid3DTransform, transform, invert)
         elif transform.GetName() == "AffineTransform":
-            transform = sitk.AffineTransform(transform)
-            if invert:
-                transform = sitk.AffineTransform(transform.GetInverse())
+            transform = _copy_transform(sitk.AffineTransform, transform, invert)
         elif transform.GetName() == "DisplacementFieldTransform":
             if invert:
-                transform_to_displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
-                transform_to_displacement_field_filter.SetReferenceImage(image)
-                displacement_field = transform_to_displacement_field_filter.Execute(transform)
-                iterative_inverse_displacement_field_image_filter = sitk.IterativeInverseDisplacementFieldImageFilter()
-                iterative_inverse_displacement_field_image_filter.SetNumberOfIterations(20)
-                inverse_displacement_field = iterative_inverse_displacement_field_image_filter.Execute(
-                    displacement_field
-                )
-                transform = sitk.DisplacementFieldTransform(inverse_displacement_field)
-            transforms.append(transform)
+                transform = _invert_via_displacement_field(transform, image)
         else:
             transform = sitk.BSplineTransform(transform)
             if invert:
-                transform_to_displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
-                transform_to_displacement_field_filter.SetReferenceImage(image)
-                displacement_field = transform_to_displacement_field_filter.Execute(transform)
-                iterative_inverse_displacement_field_image_filter = sitk.IterativeInverseDisplacementFieldImageFilter()
-                iterative_inverse_displacement_field_image_filter.SetNumberOfIterations(20)
-                inverse_displacement_field = iterative_inverse_displacement_field_image_filter.Execute(
-                    displacement_field
-                )
-                transform = sitk.DisplacementFieldTransform(inverse_displacement_field)
+                transform = _invert_via_displacement_field(transform, image)
         transforms.append(transform)
     if len(transforms) == 0:
         transforms.append(sitk.Euler3DTransform())
@@ -144,6 +156,7 @@ def resample_itk(
     default_pixel_value: float | None = None,
     torch_resample: bool = False,
 ) -> sitk.Image:
+    _require_simpleitk()
     if torch_resample:
         input_tensor = torch.tensor(sitk.GetArrayFromImage(image)).unsqueeze(0)
         vectors = [torch.arange(0, s) for s in input_tensor.shape[1:]]
@@ -191,6 +204,7 @@ def resample_itk(
 def parametermap_to_transform(
     path_src: str,
 ) -> sitk.Transform | list[sitk.Transform]:
+    _require_simpleitk()
     transform = sitk.ReadParameterFile(path_src)
 
     def array_format(x):
@@ -204,7 +218,7 @@ def parametermap_to_transform(
         else:
             result = sitk.Euler3DTransform()
         parameters = array_format(transform["TransformParameters"])
-        fixed_parameters = array_format(transform["CenterOfRotationPoint"]) + [0]
+        fixed_parameters = [*array_format(transform["CenterOfRotationPoint"]), 0]
     elif transform["Transform"][0] == "TranslationTransform":
         result = sitk.TranslationTransform(dimension)
         parameters = array_format(transform["TransformParameters"])
@@ -212,7 +226,7 @@ def parametermap_to_transform(
     elif transform["Transform"][0] == "AffineTransform":
         result = sitk.AffineTransform(dimension)
         parameters = array_format(transform["TransformParameters"])
-        fixed_parameters = array_format(transform["CenterOfRotationPoint"]) + [0]
+        fixed_parameters = [*array_format(transform["CenterOfRotationPoint"]), 0]
     elif transform["Transform"][0] == "BSplineStackTransform":
         parameters = array_format(transform["TransformParameters"])
         grid_size = array_format(transform["GridSize"])
@@ -235,7 +249,7 @@ def parametermap_to_transform(
         return results
     elif transform["Transform"][0] == "AffineLogStackTransform":
         parameters = array_format(transform["TransformParameters"])
-        fixed_parameters = array_format(transform["CenterOfRotationPoint"]) + [0]
+        fixed_parameters = [*array_format(transform["CenterOfRotationPoint"]), 0]
 
         nb = int(transform["NumberOfSubTransforms"][0])
         sub = dimension * 4
@@ -289,12 +303,13 @@ def _resample(data: torch.Tensor, size: list[int]) -> torch.Tensor:
 
 
 def resample_isotropic(image: sitk.Image, spacing: list[float] | None = None) -> sitk.Image:
+    _require_simpleitk()
     spacing = spacing or [1.0, 1.0, 1.0]
-    resize_factor = [y / x for x, y in zip(spacing, image.GetSpacing())]
+    resize_factor = [y / x for x, y in zip(spacing, image.GetSpacing(), strict=False)]
     result = sitk.GetImageFromArray(
         _resample(
             torch.tensor(sitk.GetArrayFromImage(image)).unsqueeze(0),
-            [int(size * factor) for size, factor in zip(image.GetSize(), resize_factor)],
+            [int(size * factor) for size, factor in zip(image.GetSize(), resize_factor, strict=False)],
         )
         .squeeze(0)
         .numpy()
@@ -306,30 +321,33 @@ def resample_isotropic(image: sitk.Image, spacing: list[float] | None = None) ->
 
 
 def resample_resize(image: sitk.Image, size: list[int] | None = None):
+    _require_simpleitk()
     size = size or [100, 512, 512]
     result = sitk.GetImageFromArray(
         _resample(torch.tensor(sitk.GetArrayFromImage(image)).unsqueeze(0), size).squeeze(0).numpy()
     )
     result.SetDirection(image.GetDirection())
     result.SetOrigin(image.GetOrigin())
-    result.SetSpacing([x / y * z for x, y, z in zip(image.GetSize(), size, image.GetSpacing())])
+    result.SetSpacing([x / y * z for x, y, z in zip(image.GetSize(), size, image.GetSpacing(), strict=False)])
     return result
 
 
 def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) -> np.ndarray:
+    _require_simpleitk()
 
-    dilatations = [int(np.ceil(d / s)) for d, s in zip(dilatations, reversed(mask.GetSpacing()))]
+    dilatations = [int(np.ceil(d / s)) for d, s in zip(dilatations, reversed(mask.GetSpacing()), strict=False)]
 
     data = sitk.GetArrayFromImage(mask)
     border = np.where(np.isin(sitk.GetArrayFromImage(mask), label))
     box = []
-    for w, dilatation, s in zip(border, dilatations, data.shape):
+    for w, dilatation, s in zip(border, dilatations, data.shape, strict=False):
         box.append([max(np.min(w) - dilatation, 0), min(np.max(w) + dilatation, s)])
     box = np.asarray(box)
     return box
 
 
 def crop_with_mask(image: sitk.Image, box: np.ndarray) -> sitk.Image:
+    _require_simpleitk()
     data = sitk.GetArrayFromImage(image)
 
     for i, w in enumerate(box):
@@ -351,6 +369,7 @@ def crop_with_mask(image: sitk.Image, box: np.ndarray) -> sitk.Image:
 
 
 def format_mask_label(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.Image:
+    _require_simpleitk()
     data = sitk.GetArrayFromImage(mask)
     result_data = np.zeros_like(data, np.uint8)
 
@@ -363,6 +382,7 @@ def format_mask_label(mask: sitk.Image, labels: list[tuple[int, int]]) -> sitk.I
 
 
 def get_flat_label(mask: sitk.Image, labels: None | list[int] = None) -> sitk.Image:
+    _require_simpleitk()
     data = sitk.GetArrayFromImage(mask)
     result_data = np.zeros_like(data, np.uint8)
     if labels is not None:
@@ -376,6 +396,7 @@ def get_flat_label(mask: sitk.Image, labels: None | list[int] = None) -> sitk.Im
 
 
 def clip_and_cast(image: sitk.Image, min_value: float, max_value: float, dtype: np.dtype) -> sitk.Image:
+    _require_simpleitk()
     data = sitk.GetArrayFromImage(image)
     data[np.where(data > max_value)] = max_value
     data[np.where(data < min_value)] = min_value

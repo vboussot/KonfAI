@@ -25,7 +25,7 @@ from typing import cast
 
 import numpy as np
 import torch
-import torch.nn.functional as F  # noqa: N812
+import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
@@ -36,11 +36,10 @@ from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
 from konfai.utils.utils import get_module
 
-models_register = {}
+models_register: dict[str, Network] = {}
 
 
 class Criterion(torch.nn.Module, ABC):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -64,7 +63,6 @@ class CriterionWithInit(Criterion):
 
 
 class CriterionWithAttribute(Criterion):
-
     accepts_attributes = True
 
     def __init__(self) -> None:
@@ -78,7 +76,6 @@ class CriterionWithAttribute(Criterion):
 
 
 class MaskedLoss(Criterion):
-
     def __init__(
         self,
         loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
@@ -158,7 +155,6 @@ class MaskedLoss(Criterion):
 
 
 class MSE(MaskedLoss):
-
     @staticmethod
     def _loss(reduction: str, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return torch.nn.MSELoss(reduction=reduction)(x, y)
@@ -168,7 +164,6 @@ class MSE(MaskedLoss):
 
 
 class MAE(MaskedLoss):
-
     @staticmethod
     def _loss(reduction: str, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return torch.nn.L1Loss(reduction=reduction)(x, y)
@@ -178,7 +173,6 @@ class MAE(MaskedLoss):
 
 
 class ME(MaskedLoss):
-
     @staticmethod
     def _loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return (x - y).mean()
@@ -188,7 +182,6 @@ class ME(MaskedLoss):
 
 
 class MAESaveMap(MAE):
-
     def __init__(self, reduction: str = "mean", dataset: str | None = None, group: str | None = None) -> None:
         super().__init__(reduction)
         self.dataset = dataset
@@ -214,7 +207,6 @@ class MAESaveMap(MAE):
 
 
 class PSNR(MaskedLoss):
-
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         mse = torch.mean((x - y).pow(2))
@@ -227,7 +219,6 @@ class PSNR(MaskedLoss):
 
 
 class SSIM(MaskedLoss):
-
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         from skimage.metrics import structural_similarity
@@ -246,7 +237,6 @@ class SSIM(MaskedLoss):
 
 
 class LPIPS(MaskedLoss):
-
     @staticmethod
     def normalize(tensor: torch.Tensor) -> torch.Tensor:
         return (tensor - torch.min(tensor)) / (torch.max(tensor) - torch.min(tensor)) * 2 - 1
@@ -279,7 +269,6 @@ class LPIPS(MaskedLoss):
 
 
 class TRE(Criterion):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -289,10 +278,9 @@ class TRE(Criterion):
 
 
 class Dice(Criterion):
-
     @staticmethod
     def flatten(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.permute((1, 0) + tuple(range(2, tensor.dim()))).contiguous().view(tensor.size(1), -1)
+        return tensor.permute((1, 0, *tuple(range(2, tensor.dim())))).contiguous().view(tensor.size(1), -1)
 
     @staticmethod
     def dice_per_channel(tensor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -336,7 +324,6 @@ class Dice(Criterion):
 
 
 class DiceSaveMap(Dice):
-
     def __init__(self, labels: list[int] | None = None, dataset: str | None = None, group: str | None = None) -> None:
         super().__init__(labels)
         self.dataset = dataset
@@ -361,7 +348,6 @@ class DiceSaveMap(Dice):
 
 
 class GradientImages(Criterion):
-
     def __init__(self):
         super().__init__()
 
@@ -400,7 +386,6 @@ class GradientImages(Criterion):
 
 
 class BCE(Criterion):
-
     def __init__(self, target: float = 0) -> None:
         super().__init__()
         self.loss = torch.nn.BCEWithLogitsLoss()
@@ -412,7 +397,6 @@ class BCE(Criterion):
 
 
 class PatchGanLoss(Criterion):
-
     def __init__(self, target: float = 0) -> None:
         super().__init__()
         self.loss = torch.nn.MSELoss()
@@ -424,7 +408,6 @@ class PatchGanLoss(Criterion):
 
 
 class WGP(Criterion):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -433,10 +416,9 @@ class WGP(Criterion):
 
 
 class Gram(Criterion):
-
     @staticmethod
     def compute_gram(tensor: torch.Tensor):
-        (b, ch, w) = tensor.size()
+        (_b, ch, w) = tensor.size()
         with torch.amp.autocast("cuda", enabled=False):
             return tensor.bmm(tensor.transpose(1, 2)).div(ch * w)
 
@@ -454,9 +436,7 @@ class Gram(Criterion):
 
 
 class PerceptualLoss(Criterion):
-
     class Module:
-
         def __init__(self, losses: dict[str, float] = {"Gram": 1, "torch:nn:L1Loss": 1}) -> None:
             self.losses = losses
             self.konfai_args = os.environ["KONFAI_CONFIG_PATH"] if "KONFAI_CONFIG_PATH" in os.environ else ""
@@ -527,7 +507,7 @@ class PerceptualLoss(Criterion):
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         output_preprocessing = self.preprocessing(output)
         targets_preprocessing = [self.preprocessing(target) for target in targets]
-        for zipped_output in zip([output_preprocessing], *[[target] for target in targets_preprocessing]):
+        for zipped_output in zip([output_preprocessing], *[[target] for target in targets_preprocessing], strict=False):
             output = zipped_output[0]
             targets = zipped_output[1:]
 
@@ -538,6 +518,7 @@ class PerceptualLoss(Criterion):
                         self.models[output.device.index].get_layers([target], set(self.modules_loss.keys()).copy())
                         for target in targets
                     ],
+                    strict=False,
                 )
             ):
                 output_layer = zipped_layers[0][1].view(
@@ -546,7 +527,7 @@ class PerceptualLoss(Criterion):
                     int(np.prod(zipped_layers[0][1].shape[2:])),
                 )
                 for (loss_function, loss_value), target_layer in zip(
-                    self.modules_loss[zipped_layers[0][0]].items(), zipped_layers[1:]
+                    self.modules_loss[zipped_layers[0][0]].items(), zipped_layers[1:], strict=False
                 ):
                     target_layer = target_layer[1].view(
                         target_layer[1].shape[0],
@@ -573,7 +554,6 @@ class PerceptualLoss(Criterion):
 
 
 class KLDivergence(CriterionWithInit):
-
     def __init__(self, shape: list[int], dim: int = 100, mu: float = 0, std: float = 1) -> None:
         super().__init__()
         self.latent_dim = dim
@@ -609,7 +589,6 @@ class KLDivergence(CriterionWithInit):
 
 
 class Accuracy(Criterion):
-
     def __init__(self) -> None:
         super().__init__()
         self.n: int = 0
@@ -623,7 +602,6 @@ class Accuracy(Criterion):
 
 
 class TripletLoss(Criterion):
-
     def __init__(self) -> None:
         super().__init__()
         self.triplet_loss = torch.nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-7)
@@ -633,7 +611,6 @@ class TripletLoss(Criterion):
 
 
 class L1LossRepresentation(Criterion):
-
     def __init__(self) -> None:
         super().__init__()
         self.loss = torch.nn.L1Loss()
@@ -646,7 +623,6 @@ class L1LossRepresentation(Criterion):
 
 
 class FocalLoss(Criterion):
-
     def __init__(
         self,
         gamma: float = 2.0,
@@ -679,9 +655,7 @@ class FocalLoss(Criterion):
 
 
 class FID(Criterion):
-
     class InceptionV3(torch.nn.Module):
-
         def __init__(self) -> None:
             super().__init__()
 
@@ -784,7 +758,6 @@ class MutualInformationLoss(torch.nn.Module):
 
 
 class CrossEntropyLoss(Criterion):
-
     def __init__(self, weight: list[float] | None = None, reduction: str = "mean") -> None:
         super().__init__()
         self.loss = torch.nn.CrossEntropyLoss(weight=torch.tensor(weight) if weight else None, reduction=reduction)
@@ -794,9 +767,7 @@ class CrossEntropyLoss(Criterion):
 
 
 class IMPACTReg(CriterionWithAttribute):
-
     class Weights:
-
         def __init__(self, weights: list[float] = [0, 1]) -> None:
             self.weights = weights
 
@@ -896,6 +867,7 @@ class IMPACTReg(CriterionWithAttribute):
                         zip(
                             self.model(model_patch.get_data(output[0], index, 0, True), output[1], output[2]),
                             self.model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
+                            strict=False,
                         )
                     ):
                         if self.weights[i] == 0:
@@ -930,7 +902,7 @@ class IMPACTReg(CriterionWithAttribute):
                     true_nb += 1
         else:
             if mask is None or torch.any(mask == 1):
-                for i, zipped_output in enumerate(zip(self.model(*output), self.model(*target))):
+                for i, zipped_output in enumerate(zip(self.model(*output), self.model(*target), strict=False)):
                     if self.weights[i] == 0:
                         continue
                     output_feature = zipped_output[0]
@@ -983,9 +955,7 @@ class IMPACTReg(CriterionWithAttribute):
 
 
 class IMPACTSynth(CriterionWithAttribute):
-
     class Weights:
-
         def __init__(self, weights: list[float] = [0, 1]) -> None:
             self.weights = weights
 
@@ -1122,6 +1092,7 @@ class IMPACTSynth(CriterionWithAttribute):
                         model(model_patch.get_data(tensor[0], index, 0, True), tensor[1], tensor[2]),
                         model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
                         weights,
+                        strict=False,
                     ):
                         if weight == 0:
                             continue
@@ -1147,7 +1118,9 @@ class IMPACTSynth(CriterionWithAttribute):
                     true_nb += 1
         else:
             if mask is None or torch.any(mask == 1):
-                for output_feature, target_feature, weight in zip(model(*tensor), model(*target), weights):
+                for output_feature, target_feature, weight in zip(
+                    model(*tensor), model(*target), weights, strict=False
+                ):
                     if weight == 0:
                         continue
                     if mask is not None:
@@ -1268,8 +1241,7 @@ class IMPACTSynth(CriterionWithAttribute):
         return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
 
 
-class SAM_Perceptual(CriterionWithAttribute):  # noqa: N801
-
+class SAM_Perceptual(CriterionWithAttribute):
     def __init__(self) -> None:
         super().__init__()
         self.model: torch.nn.Module | None = None
@@ -1316,6 +1288,7 @@ class SAM_Perceptual(CriterionWithAttribute):  # noqa: N801
                 for zipped_output in zip(
                     model(model_patch.get_data(output[0], index, 0, True), output[1], output[2]),
                     model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
+                    strict=False,
                 ):
                     output_feature = zipped_output[0]
                     target_feature = zipped_output[1]
@@ -1370,7 +1343,6 @@ class SAM_Perceptual(CriterionWithAttribute):  # noqa: N801
 
 
 class Variance(Criterion):
-
     def __init__(self, name: str = "Variance") -> None:
         super().__init__()
         self.name = name
@@ -1383,7 +1355,6 @@ class Variance(Criterion):
 
 
 class Mean(Criterion):
-
     def __init__(self, name: str = "Mean") -> None:
         super().__init__()
         self.name = name

@@ -29,7 +29,11 @@ import numpy as np
 import torch
 import tqdm
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard.writer import SummaryWriter
+
+try:
+    from torch.utils.tensorboard.writer import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
 from konfai.data.data_manager import BatchSample, DataPrediction, DatasetIter
@@ -149,7 +153,6 @@ class OutputDataset(Dataset, NeedDevice, ABC):
         for name, _transform_type, transform_type in [
             (k, getattr(self, f"_{k}"), getattr(self, k)) for k in transforms_type
         ]:
-
             if _transform_type is not None:
                 for classpath, transform in _transform_type.items():
                     transform = transform.get_transform(
@@ -174,11 +177,11 @@ class OutputDataset(Dataset, NeedDevice, ABC):
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         for transform in self.before_reduction_transforms:
-            transform.set_datasets(datasets + [self])
+            transform.set_datasets([*datasets, self])
         for transform in self.after_reduction_transforms:
-            transform.set_datasets(datasets + [self])
+            transform.set_datasets([*datasets, self])
         for transform in self.final_transforms:
-            transform.set_datasets(datasets + [self])
+            transform.set_datasets([*datasets, self])
 
     @abstractmethod
     def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
@@ -392,27 +395,27 @@ class OutSameAsGroupDataset(OutputDataset):
         #   T = number of TTA samples
         #   C = number of output channels
         #
-        # Case 1 – combine = Mean / Median, reduce = Mean / Median:
+        # Case 1 - combine = Mean / Median, reduce = Mean / Median:
         #   Models are aggregated first:
-        #     [M, C, ...] → combine → [C, ...]
+        #     [M, C, ...] -> combine -> [C, ...]
         #   TTA samples are then reduced:
-        #     [T, C, ...] → reduce → [C, ...]
+        #     [T, C, ...] -> reduce -> [C, ...]
         #
-        # Case 2 – combine = Mean / Median, reduce = Concat:
+        # Case 2 - combine = Mean / Median, reduce = Concat:
         #   Models are aggregated first:
-        #     [M, C, ...] → combine → [C, ...]
+        #     [M, C, ...] -> combine -> [C, ...]
         #   TTA samples are concatenated:
-        #     [T, C, ...] → concat → [T, C, ...]
+        #     [T, C, ...] -> concat -> [T, C, ...]
         #
-        # Case 3 – combine = Concat, reduce = Mean / Median:
+        # Case 3 - combine = Concat, reduce = Mean / Median:
         #   Model outputs are concatenated:
-        #     [M, C, ...] → concat → [M, C, ...]
+        #     [M, C, ...] -> concat -> [M, C, ...]
         #   TTA samples are then reduced:
-        #     [T, M, C, ...] → reduce → [M, C, ...]
+        #     [T, M, C, ...] -> reduce -> [M, C, ...]
         #
-        # Case 4 – combine = Concat, reduce = Concat:
+        # Case 4 - combine = Concat, reduce = Concat:
         #   No reduction is applied at either level:
-        #     [M, C, ...] × T → concat → [M * T, C, ...]
+        #     [M, C, ...] x T -> concat -> [M * T, C, ...]
         #
         # Important:
         #   If combine = Concat or reduce = Concat,
@@ -514,9 +517,14 @@ class _Predictor:
         self._has_runtime_measures = any(
             network.measure is not None for network in self.model_composite.module.get_networks().values()
         )
-        self.tb = (
-            SummaryWriter(log_dir=predict_path / "Metric") if self._has_runtime_measures or len(self.data_log) else None
-        )
+        if self._has_runtime_measures or len(self.data_log):
+            if SummaryWriter is None:
+                raise ImportError(
+                    "TensorBoard is required for prediction logging. Install it with: pip install konfai[tensorboard]"
+                )
+            self.tb = SummaryWriter(log_dir=predict_path / "Metric")
+        else:
+            self.tb = None
 
     def __enter__(self):
         """
@@ -569,6 +577,7 @@ class _Predictor:
                                         batch_sample[group].x,
                                         batch_sample[group].a,
                                         batch_sample[group].p,
+                                        strict=False,
                                     )
                                 ]
                             ):
@@ -960,8 +969,8 @@ class Predictor(DistributedObject):
                     state_dicts.append(
                         torch.hub.load_state_dict_from_url(url=path_to_model, map_location="cpu", check_hash=True)
                     )
-                except Exception:
-                    raise Exception(f"Model : {path_to_model} does not exist !")
+                except Exception as exc:
+                    raise Exception(f"Model : {path_to_model} does not exist !") from exc
             elif Path(path_to_model).exists():
                 state_dicts.append(Path(path_to_model))
             else:
@@ -1063,7 +1072,7 @@ def predict(
     gpu: list[int] | None = cuda_visible_devices(),
     cpu: int = 1,
     quiet: bool = False,
-    tb: bool = False,
+    tensorboard: bool = False,
     prediction_file: Path | str = Path("./Prediction.yml").resolve(),
     predictions_dir: Path | str = Path("./Predictions").resolve(),
 ) -> DistributedObject:
@@ -1073,7 +1082,7 @@ def predict(
     This compatibility wrapper preserves the historical CLI-facing API while
     delegating the pure build step to :func:`build_predict`.
     """
-    del overwrite, gpu, cpu, quiet, tb
+    del overwrite, gpu, cpu, quiet, tensorboard
     return build_predict(
         models=models,
         prediction_file=prediction_file,
