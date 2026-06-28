@@ -1048,9 +1048,13 @@ class Crop(TransformInverse):
         super().__init__(inverse)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        # TODO(perf): reads the full pixel array at DatasetManager __init__ time to compute the crop
-        # bounding box; for large 3-D volumes this forces a complete disk read before any caching.
-        # Fix: persist the box as a sidecar attribute or compute lazily inside _load().  Medium effort.
+        # The crop box is content-dependent (foreground bounding box), so the output shape
+        # cannot be known without the pixel data. If the box was already computed and persisted
+        # as a sidecar attribute, reuse it and skip the read; otherwise compute it once from the
+        # volume. (A fully-lazy variant would require deferring patch planning past _load().)
+        if "box" in cache_attribute:
+            box = self._parse_box(cache_attribute["box"])
+            return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:], strict=False)]
         data = None
         for dataset in self.datasets:
             if dataset.is_dataset_exist(group_src, name):
@@ -1066,12 +1070,15 @@ class Crop(TransformInverse):
         cache_attribute["box"] = box
         return [shape[0]] + [int(s - a - b) for (a, b), s in zip(box, shape[1:], strict=False)]
 
+    @staticmethod
+    def _parse_box(box_str: str) -> np.ndarray:
+        flat = np.fromstring(box_str.replace("[", " ").replace("]", " "), sep=" ", dtype=np.int64)
+        return flat.reshape(-1, 2)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "box" not in cache_attribute:
             return tensor
-        box_str = cache_attribute["box"]
-        flat = np.fromstring(box_str.replace("[", " ").replace("]", " "), sep=" ", dtype=np.int64)
-        box = flat.reshape(-1, 2)
+        box = self._parse_box(cache_attribute["box"])
         for i, ((_, b), s) in enumerate(zip(box, tensor.shape[1:], strict=False)):
             box[i][1] = s - b
         if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
@@ -1090,9 +1097,7 @@ class Crop(TransformInverse):
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "box" not in cache_attribute:
             return tensor
-        box_str = cache_attribute.pop("box")
-        flat = np.fromstring(box_str.replace("[", " ").replace("]", " "), sep=" ", dtype=np.int64)
-        box = flat.reshape(-1, 2)
+        box = self._parse_box(cache_attribute.pop("box"))
         cache_attribute.pop_np_array("Origin")
         padding = []
         for b in reversed(box):

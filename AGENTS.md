@@ -161,6 +161,14 @@ Both are first-class dataset backends, dispatched by `file_format` and reachable
 
 So: **the YAML builder complements `models/` today and can replace the feed-forward subset after the registry is expanded.** See AUDIT.md for the migration plan.
 
+**Model → YAML migration matrix** (how much of each zoo model the builder can express today):
+
+| Model | Migratable now? | Blocker |
+|---|---|---|
+| UNet, NestedUNet/UNet++, ResNet | ✅ Yes | Pure `add_module` wiring; registry already covers it. |
+| GAN/CycleGAN, VAE, VoxelMorph | ⚠️ Partial | Needs registry growth (`Linear`/`Add`/`LatentDistribution`/…) + channel-math/factory constructs. |
+| ConvNeXt, DDPM, DiffusionGAN, cStyleGAN, Representation | ⛔ No | Custom Python `forward`/sampling/training logic the builder has no construct for. |
+
 ## 7b. How a run actually works (mental model)
 
 Tracing one config key end-to-end makes the reflection engine concrete. Given `Config.yml`:
@@ -192,6 +200,20 @@ Every extension point is "subclass a base, reference it by class path in YAML" �
 
 **Routing rules to respect** (`add_module`): branch `'0'` is the implicit input; an `in_branch` must be produced by an earlier module (execution = insertion order, no topo-sort); `out_branch: [-1]` marks a terminal/deep-supervision head; module names must contain no `.`; `alias` lists are positional and load-bearing for pretrained weight remapping.
 
+## 7d. Apps & packaged models (`konfai-apps`, `apps/*`)
+
+`konfai-apps` is a **separate package** layering remote/app/packaged-model functionality on top of the core public API (it never reaches into core internals; core never imports it). An "app" bundles `app.json` metadata + a KonfAI config (`Prediction.yml`, …) + custom `.py` + `.pt` weight checkpoints. Apps are resolved from a **Local** directory, a **HuggingFace** repo, or a **Remote** server. The `apps/*` bundles (`totalsegmentator`, `mrsegmentator`, `impact_synth`) are thin CLI wrappers that resolve an HF app and call `KonfAIApp.pipeline()`. Pretrained models are distributed as `.pt` checkpoints downloaded on demand. There is also a FastAPI server (`app_server.py`) with job lifecycle, GPU-semaphore scheduling, SSE log streaming, and TTL'd results.
+
+> ⚠️ **Trust model (read before resolving any app).** Resolving an app **copies the app's `.py` files into the working directory and imports them**, and installs the app's `requirements.txt` via a `pip install` subprocess. A downloaded app therefore runs **arbitrary code and arbitrary dependency installs** on your machine. This is inherent to "packaged model = code + weights + config". **Only resolve apps from sources you trust** (your own repos, vetted HF orgs). Do not point the loader at untrusted HuggingFace IDs or remote servers. See AUDIT.md §4b.
+
+## 7e. Metrics & criteria
+
+Criteria live in `konfai/metric/measure.py` (`Criterion` hierarchy, loaded by class path from `outputs_criterions`/`metrics`, weight-scheduled via `konfai/metric/schedulers.py`). Notes for agents:
+
+- **Optional-dependency criteria** import heavy packages lazily through `_require_optional(module, criterion=…, extra=…)`, which raises an actionable `MeasureError` (with the `pip install konfai[<extra>]` hint) at construction. `SSIM` needs `konfai[ssim]` (`scikit-image`); `FID` needs `konfai[fid]` (`scipy`+`torchvision`); `LPIPS` needs `konfai[lpips]`. Add new optional-dep criteria the same way — never a bare `import` that fails mid-run.
+- **`Criterion.forward` is typed `-> Tensor` but several subclasses return a `(loss, dict)` tuple** (metrics); consumers `isinstance`-branch. Follow the existing pattern of the criterion you extend.
+- **`update_scheduler`** selects the active weight scheduler for the current iteration; an empty schedule raises `ConfigError`, and iterations past the last window clamp to the last scheduler.
+
 ## 8. Running things
 
 ### Tests
@@ -204,7 +226,7 @@ pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (NO
 pixi run test-cov             # with coverage
 ```
 
-Baseline (this revision): `tests/unit` 156 passed, `tests/integration` green, `konfai-apps/tests/unit` 25 passed.
+Baseline: `tests/unit` green, `tests/integration` green, `konfai-apps/tests/unit` 25 passed.
 
 > **Caveat:** root `pytest testpaths=['tests']` excludes `konfai-apps/tests`, so `pixi run test` does **not** run the apps suite. Run it explicitly (the apps CI workflow does).
 
@@ -233,6 +255,7 @@ Install via `pip install konfai[<extra>]` or Pixi (the `dev` env bundles the run
 | `monitoring` | `nvidia-ml-py` (imports as `pynvml`) | GPU VRAM monitoring |
 | `tensorboard` | `tensorboard` | Training visualisation |
 | `vtk` / `lpips` / `cluster` | `vtk` / `lpips` / `submitit` | Mesh I/O / perceptual loss / SLURM |
+| `ssim` / `fid` | `scikit-image` / `scipy`+`torchvision` | SSIM criterion / FID criterion |
 | `all` | every runtime extra | Full install |
 | `dev` | pytest, ruff, build, Sphinx, … | Development |
 

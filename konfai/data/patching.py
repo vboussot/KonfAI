@@ -32,6 +32,7 @@ from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.transform import Clip, Normalize, Save, Standardize, TensorCast, Transform
 from konfai.utils.config import apply_config, config
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import PatchError
 from konfai.utils.utils import SUPPORTED_EXTENSIONS, get_module, get_patch_slices_from_shape, split_path_spec
 
 
@@ -181,14 +182,17 @@ class Accumulator:
 
     def assemble(self) -> torch.Tensor:
         n = 2 if self.batch else 1
-        if self._layer_accumulator[0] is not None:
-            result = torch.zeros(
-                (
-                    list(self._layer_accumulator[0].shape[:n])
-                    + list(max([[v.stop for v in patch] for patch in self.patch_slices]))
-                ),
-                dtype=self._layer_accumulator[0].dtype,
-            ).to(self._layer_accumulator[0].device)
+        reference = next((layer for layer in self._layer_accumulator if layer is not None), None)
+        if reference is None:
+            raise PatchError(
+                "Accumulator.assemble() was called before any patch was added.",
+                f"Expected up to {len(self.patch_slices)} patch(es) via add_layer() before assembling.",
+                "Add at least one patch (and check is_full()) before calling assemble().",
+            )
+        result = torch.zeros(
+            (list(reference.shape[:n]) + list(max([[v.stop for v in patch] for patch in self.patch_slices]))),
+            dtype=reference.dtype,
+        ).to(reference.device)
         for patch_slice, data in zip(self.patch_slices, self._layer_accumulator, strict=False):
             if data is not None:
                 slices_dest = tuple([slice(result.shape[i]) for i in range(n)] + list(patch_slice))
@@ -437,6 +441,7 @@ class DatasetManager:
                 caches_attribute.append(copy.deepcopy(self.cache_attributes[0]))
 
             for data_augmentation in data_augmentations.data_augmentations:
+                data_augmentation.reset_state(self.index)
                 shape = data_augmentation.state_init(self.index, shape, caches_attribute)
             for it, s in enumerate(shape):
                 self.cache_attributes.append(caches_attribute[it])

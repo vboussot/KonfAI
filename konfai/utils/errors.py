@@ -60,6 +60,10 @@ class DatasetManagerError(NamedKonfAIError):
     TYPE = "DatasetManager"
 
 
+class PatchError(NamedKonfAIError):
+    TYPE = "Patch"
+
+
 class MeasureError(NamedKonfAIError):
     TYPE = "Measure"
 

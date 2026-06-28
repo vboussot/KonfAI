@@ -19,6 +19,14 @@ from konfai.network import blocks, network
 
 
 class VAE(network.Network):
+    """Convolutional encoder-decoder (deterministic autoencoder).
+
+    Note: this network has no latent sampling — it is a plain autoencoder, not a
+    variational one. For a reparameterised latent (mu/log_std/z + KL-ready named
+    outputs) use ``blocks.LatentDistribution`` as a bottleneck, as ``LinearVAE``
+    demonstrates.
+    """
+
     class AutoEncoderBlock(network.ModuleArgsDict):
         def __init__(
             self,
@@ -143,11 +151,18 @@ class VAE(network.Network):
 
 
 class LinearVAE(network.Network):
+    """Fully-connected variational autoencoder for flat feature vectors.
+
+    Encoder → variational bottleneck (``LatentDistribution``: reparameterised
+    sampling with addressable ``Latent.mu`` / ``Latent.log_std`` outputs for the
+    KL term) → decoder. Dimensions are parameterised; the variational sampling
+    (previously absent) is provided by ``LatentDistribution``.
+    """
+
     class LinearVAEDenseLayer(network.ModuleArgsDict):
         def __init__(self, in_features: int, out_features: int) -> None:
             super().__init__()
             self.add_module("Linear", torch.nn.Linear(in_features, out_features))
-            # self.add_module("Norm", torch.nn.BatchNorm1d(out_features))
             self.add_module("Activation", torch.nn.LeakyReLU())
 
     class LinearVAEHead(network.ModuleArgsDict):
@@ -163,6 +178,9 @@ class LinearVAE(network.Network):
             "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
+        in_features: int = 784,
+        hidden_features: int = 256,
+        latent_dim: int = 32,
     ) -> None:
         super().__init__(
             in_channels=1,
@@ -173,7 +191,6 @@ class LinearVAE(network.Network):
             dim=1,
             nb_batch_per_step=1,
         )
-        self.add_module("DenseLayer_0", LinearVAE.LinearVAEDenseLayer(23343, 5))
-        # self.add_module("Head", LinearVAE.DenseLayer(100, 28590))
-        self.add_module("Head", LinearVAE.LinearVAEHead(5, 23343))
-        # self.add_module("DenseLayer_5", LinearVAE.DenseLayer(5000, 28590))
+        self.add_module("Encoder", LinearVAE.LinearVAEDenseLayer(in_features, hidden_features))
+        self.add_module("Latent", blocks.LatentDistribution(shape=[hidden_features], latent_dim=latent_dim))
+        self.add_module("Head", LinearVAE.LinearVAEHead(hidden_features, in_features))

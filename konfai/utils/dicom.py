@@ -47,6 +47,7 @@ Optional dependency: ``pydicom`` (``pip install konfai[dicom]``).
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from konfai.utils.errors import DatasetManagerError
+
+# Zero-padded slice filenames produced by :func:`write_dicom_series` (e.g. ``000001.dcm``).
+_SLICE_FILENAME_RE = re.compile(r"^\d{6}\.dcm$")
 
 if TYPE_CHECKING:
     pass
@@ -226,6 +230,19 @@ def extract_geometry(
 
     first = datasets[0]
 
+    # Multi-frame / enhanced DICOM (many frames in one file) would be mis-stacked as a
+    # single slice, so reject it explicitly rather than produce a wrong volume.
+    try:
+        number_of_frames = int(getattr(first, "NumberOfFrames", 1) or 1)
+    except (TypeError, ValueError):
+        number_of_frames = 1
+    if number_of_frames > 1:
+        raise DatasetManagerError(
+            "Multi-frame / enhanced DICOM is not supported.",
+            f"The series declares NumberOfFrames={number_of_frames}.",
+            "KonfAI expects one frame per file (classic single-frame DICOM).",
+        )
+
     # Origin = ImagePositionPatient of first slice
     try:
         origin = np.array([float(x) for x in first.ImagePositionPatient], dtype=np.float64)
@@ -246,11 +263,20 @@ def extract_geometry(
             "This tag is required to determine voxel dimensions.",
         ) from exc
 
-    # Slice spacing: prefer computed inter-slice distance over SliceThickness
+    # Slice spacing: prefer computed inter-slice distance over SliceThickness.
+    # Use the first gap (matches SimpleITK's geometry), but verify the whole series is
+    # uniformly spaced so irregular series (localizers, missing/duplicate slices, mixed
+    # series) fail loudly instead of silently producing a wrong z-spacing.
     if len(datasets) > 1:
-        pos_first = _slice_position(datasets[0])
-        pos_second = _slice_position(datasets[1])
-        slice_spacing_mm = abs(pos_second - pos_first)
+        gaps = np.abs(np.diff([_slice_position(ds) for ds in datasets]))
+        slice_spacing_mm = float(gaps[0])
+        tolerance = max(1e-2, 1e-2 * slice_spacing_mm)
+        if float(np.ptp(gaps)) > tolerance:
+            raise DatasetManagerError(
+                "DICOM slices are not uniformly spaced.",
+                f"Inter-slice gaps range from {float(gaps.min()):.4f} to {float(gaps.max()):.4f} mm.",
+                "KonfAI assumes a regular z-spacing; irregular series are not supported.",
+            )
     else:
         try:
             slice_spacing_mm = float(first.SliceThickness)
@@ -451,8 +477,11 @@ def write_dicom_series(
 
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
+    # Remove only slices previously written by this function (its zero-padded NNNNNN.dcm
+    # naming), never unrelated DICOM files that may share the directory.
     for existing in root.glob("*.dcm"):
-        existing.unlink()
+        if _SLICE_FILENAME_RE.match(existing.name):
+            existing.unlink()
 
     metadata = dict(metadata or {})
     study_uid = str(metadata.get("StudyInstanceUID", generate_uid()))
