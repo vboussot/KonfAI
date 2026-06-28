@@ -9,8 +9,8 @@
 # 🧠 KonfAI
 <img src="https://raw.githubusercontent.com/vboussot/KonfAI/main/logo.png" alt="KonfAI Logo" width="250" align="right"/>
 
-**KonfAI** is a modular deep learning framework for medical imaging built
-around **YAML-driven workflows**.
+**KonfAI** is a modular, **YAML-driven** deep learning framework for medical
+imaging, built on **PyTorch**.
 
 It lets you define complete pipelines, from data loading to prediction and
 evaluation, through configuration instead of orchestration scripts.
@@ -41,6 +41,33 @@ Most frameworks focus on models.
 - 🔁 Iterate without rewriting Python scripts
 - 📦 Turn experiments into reusable **KonfAI Apps**
 - 🤖 Use KonfAI as a backend for LLM-driven experimentation through **KonfAI-MCP**
+
+---
+
+## 📥 Install
+
+```bash
+pip install konfai                # core framework
+pip install "konfai[imaging]"     # + SimpleITK & h5py imaging readers
+```
+
+Or use [Pixi](https://pixi.sh) for a fully reproducible environment:
+
+```bash
+pixi install                      # resolve and install all environments
+pixi run test                     # verify
+```
+
+KonfAI exposes three YAML-driven CLI workflows:
+
+| Command | Purpose |
+| --- | --- |
+| `konfai TRAIN` | train a model from a YAML config |
+| `konfai PREDICTION` | run inference and export predictions |
+| `konfai EVALUATION` | compute metrics on saved predictions |
+
+For all optional extras (`itk`, `hdf5`, `dicom`, `omezarr`, `all`, `dev`, …) see
+[`docs/source/getting-started/installation.md`](docs/source/getting-started/installation.md).
 
 ---
 
@@ -184,6 +211,35 @@ docker run --rm -it \
   -w /workspace \
   vboussot/konfai TRAIN --gpu 0 -c examples/Synthesis/Config.yml
 ```
+
+---
+
+## 🛠️ Development
+
+Clone the repo and set up the environment with [Pixi](https://pixi.sh):
+
+```bash
+git clone https://github.com/vboussot/KonfAI.git
+cd KonfAI
+pixi install
+pixi run test      # run the test suite
+pixi run check     # lint + format-check + test (run before pushing)
+```
+
+pip users:
+
+```bash
+pip install -e ".[dev]"
+pytest -q tests/
+ruff check konfai
+```
+
+See [`docs/source/development.md`](docs/source/development.md) for the full
+developer guide, including available Pixi tasks, pre-commit setup, and how to
+build the documentation.
+
+**AI coding agents:** start with [`AGENTS.md`](AGENTS.md) — the canonical
+reference for conventions, commands, and repository rules.
 
 ---
 
