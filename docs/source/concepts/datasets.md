@@ -33,6 +33,64 @@ Dataset/
 The concrete file extension is not restricted to `.mha`. KonfAI supports the
 extensions listed in `konfai.utils.utils.SUPPORTED_EXTENSIONS`.
 
+Directory-backed formats use the same case/group model:
+
+```text
+DicomDataset/CASE_001/CT/*.dcm
+OmeDataset/CASE_001/CT.ome.zarr/
+```
+
+## Two layers: format readers and dataset loaders
+
+Data handling is split across two packages with distinct responsibilities.
+
+**`konfai/utils/` — format readers.** These modules turn an on-disk file into a
+channel-first array plus its physical geometry. They are the only place that
+knows about file formats:
+
+| Module | Reads |
+| --- | --- |
+| `konfai/utils/ITK.py` | SimpleITK formats (`.mha`, `.nii.gz`, `.nrrd`, …) |
+| `konfai/utils/dataset.py` | the dataset abstraction over the readers (including HDF5) and the `Attribute` geometry container |
+| `konfai/utils/dicom.py` | DICOM series — see {doc}`imaging-formats` |
+| `konfai/utils/ome_zarr.py` | OME-Zarr / OME-NGFF stores — see {doc}`imaging-formats` |
+
+**`konfai/data/` — PyTorch datasets and dataloaders.** These modules build the
+`torch.utils.data.Dataset` / `DataLoader` machinery on top of the readers:
+
+| Module | Role |
+| --- | --- |
+| `konfai/data/data_manager.py` | grouped `Data*` datasets, `GroupTransform`, subset/validation splitting |
+| `konfai/data/augmentation.py` | `DataAugmentationsList` — on-the-fly augmentation |
+| `konfai/data/patching.py` | `DatasetPatch` — patch extraction and reassembly |
+
+### Never load a full volume into RAM
+
+The central rule of the data layer is that a full volume is **never** loaded into
+memory just to feed the model. The DICOM and OME-Zarr readers expose
+slice-/patch-level entry points (an OME-Zarr array is already chunked and lazy),
+and `DatasetPatch` crops large volumes before they reach the network. Always
+reach for lazy or patch-based access; see **When to use dataset patching** below.
+
+### The `Attribute` class
+
+Reading a medical image is not just reading pixels — the physical geometry must
+travel with the array so predictions can be written back into the same space.
+`konfai.utils.dataset.Attribute` is the container that carries it.
+
+`Attribute` is a `dict[str, Any]` subclass that stores, among other metadata, the
+three values that define an image in physical space:
+
+- **`Origin`** — physical position of the first voxel
+- **`Spacing`** — voxel size along each axis
+- **`Direction`** — the flattened direction-cosine matrix
+
+Numeric values are stored as strings and recovered with `get_np_array(key)` or
+`get_tensor(key)`. Keys use a stack-like naming scheme (`Origin_0`, `Origin_1`,
+…) so a chain of transforms can push successive geometries and pop them to invert
+the chain — which is how KonfAI restores the original geometry when exporting a
+prediction.
+
 ## `groups_src` and `groups_dest`
 
 Each workflow describes how on-disk groups should be loaded through the
@@ -84,6 +142,8 @@ Examples:
 
 - `./Dataset:a:mha`
 - `./Predictions/TRAIN_01/Dataset:i:mha`
+- `./DicomDataset:a:dicom`
+- `./OmeDataset:a:omezarr`
 
 ## Training subsets and validation
 
@@ -142,5 +202,6 @@ network itself. See {doc}`model-graph`.
 
 - {doc}`configuration`
 - {doc}`model-graph`
+- {doc}`imaging-formats`
 - {doc}`../config_guide/training`
 - {doc}`../config_guide/prediction`

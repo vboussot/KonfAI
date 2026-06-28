@@ -13,7 +13,9 @@ KonfAI is easiest to understand when you keep four ideas in mind:
 
 configuration
 datasets
+imaging-formats
 model-graph
+yaml-model-builder
 execution-flow
 apps
 ```

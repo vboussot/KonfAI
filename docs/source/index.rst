@@ -84,4 +84,5 @@ Quick links
    examples/index
    troubleshooting
    contributing
+   development
    architecture
