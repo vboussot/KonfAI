@@ -9,12 +9,14 @@ use as a first project template.
 ```text
 examples/Segmentation/
 ├── Config.yml
+├── UNet.yml
 ├── Prediction.yml
 ├── Evaluation.yml
 └── Segmentation_demo.ipynb
 ```
 
 - `Config.yml` defines the training workflow.
+- `UNet.yml` defines the routed KonfAI UNet graph through `add_module` metadata.
 - `Prediction.yml` defines inference and export.
 - `Evaluation.yml` computes Dice on the saved predictions.
 - `Segmentation_demo.ipynb` bootstraps the example in a fresh environment.
@@ -43,7 +45,7 @@ The shipped demo assumes:
 
 The baseline uses:
 
-- the built-in `segmentation.UNet.UNet`
+- the declarative `examples/Segmentation/UNet.yml` model graph
 - 2D patch-based training
 - `CrossEntropyLoss` during training
 - Dice during evaluation

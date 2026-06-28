@@ -5,7 +5,7 @@ Training configuration lives under the `Trainer` root object.
 ```yaml
 Trainer:
   Model:
-    classpath: segmentation.UNet.UNet
+    classpath: UNet.yml
     UNet:
       ...
   Dataset:
@@ -39,7 +39,7 @@ selected class.
 
 ```yaml
 Model:
-  classpath: segmentation.UNet.UNet
+  classpath: UNet.yml
   UNet:
     optimizer:
       name: AdamW

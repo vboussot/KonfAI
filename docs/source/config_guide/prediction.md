@@ -5,7 +5,7 @@ Prediction configuration lives under the `Predictor` root object.
 ```yaml
 Predictor:
   Model:
-    classpath: segmentation.UNet.UNet
+    classpath: UNet.yml
     UNet:
       ...
   Dataset:

@@ -1,15 +1,16 @@
 Trainer:
   Model:
-    classpath: segmentation.UNet.UNet
+    classpath: UNet.yml
     UNet:
-      dim: 2
-      channels:
-      - 1
-      - 32
-      - 64
-      - 128
-      - 256
-      nb_class: 41
+      parameters:
+        dim: 2
+        channels:
+        - 1
+        - 32
+        - 64
+        - 128
+        - 256
+        nb_class: 41
       outputs_criterions:
         UNetBlock_0:Head:Conv:
           targets_criterions:
@@ -48,19 +49,8 @@ Trainer:
           last_epoch: -1
           verbose: deprecated
           nb_step: 0
-      BlockConfig:
-        kernel_size: 3
-        stride: 1
-        padding: 1
-        bias: true
-        activation: ReLU
-        norm_mode: NONE
-      nb_conv_per_stage: 2
-      downsample_mode: MAXPOOL
-      upsample_mode: CONV_TRANSPOSE
-      attention: false
-      block_type: Conv
       ModelPatch: None
+      yaml_str: None
   Dataset:
     groups_src:
       CT:
