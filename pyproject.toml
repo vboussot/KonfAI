@@ -64,6 +64,7 @@ fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
 omezarr = ["zarr", "ngff-zarr"]
+export = ["onnx", "onnxruntime", "onnxscript"]
 all = [
   "konfai[itk]",
   "konfai[hdf5]",
@@ -75,7 +76,8 @@ all = [
   "konfai[fid]",
   "konfai[cluster]",
   "konfai[dicom]",
-  "konfai[omezarr]"
+  "konfai[omezarr]",
+  "konfai[export]"
 ]
 dev = [
   "SimpleITK",
@@ -84,6 +86,9 @@ dev = [
   "zarr",
   "ngff-zarr",
   "scikit-image",
+  "onnx",
+  "onnxruntime",
+  "onnxscript",
   "nvidia-ml-py",
   "tensorboard",
   "pytest",
