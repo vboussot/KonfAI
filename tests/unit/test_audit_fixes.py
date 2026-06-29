@@ -22,11 +22,13 @@ import os
 os.environ.setdefault("KONFAI_config_file", "/tmp/konfai-none.yml")
 os.environ.setdefault("KONFAI_CONFIG_MODE", "Done")
 
+import pytest  # noqa: E402
 import torch  # noqa: E402
-from konfai.data.augmentation import Rotate  # noqa: E402
+from konfai.data.augmentation import Flip, Rotate  # noqa: E402
 from konfai.data.transform import ResampleToShape, Standardize  # noqa: E402
 from konfai.network.blocks import Select, Unsqueeze  # noqa: E402
 from konfai.utils.dataset import Attribute  # noqa: E402
+from konfai.utils.errors import ConfigError, MeasureError  # noqa: E402
 
 
 def test_vae_latent_uses_gaussian_noise():
@@ -99,3 +101,116 @@ def test_select_squeezes_size_one_dims_by_size():
     # a tensor with no size-1 dims is unchanged
     out2 = Select([slice(None), slice(None)])(torch.randn(4, 5))
     assert out2.shape == (4, 5)
+
+
+def test_augmentation_resamples_after_reset_state():
+    """#1 Augmentation parameters must be re-sampled each epoch via reset_state.
+
+    Within an epoch ``state_init`` caches the per-case draw so every patch shares
+    one transform; ``reset_state`` must clear that cache so the next epoch draws
+    fresh parameters (previously ``who_index`` was never cleared → frozen forever).
+    """
+    aug = Flip([1.0, 1.0, 1.0])
+    aug.load(1.0)
+
+    aug.state_init(0, [[4, 4, 4]], [Attribute()])
+    first = aug.flip[0]
+    # Re-running state_init without a reset returns the cached draw unchanged.
+    aug.state_init(0, [[4, 4, 4]], [Attribute()])
+    assert aug.flip[0] is first
+
+    aug.reset_state(0)
+    assert 0 not in aug.who_index
+    aug.state_init(0, [[4, 4, 4]], [Attribute()])
+    assert 0 in aug.who_index
+    assert aug.flip[0] is not first  # a fresh draw replaced the cached one
+
+
+def test_update_scheduler_empty_raises_config_error():
+    """update_scheduler on an empty schedule must raise a clear ConfigError."""
+    from konfai.network.network import Measure
+
+    with pytest.raises(ConfigError):
+        Measure.update_scheduler(None, {}, 0)  # type: ignore[arg-type]
+
+
+def test_update_scheduler_past_last_window_clamps_to_last():
+    """Past every configured window, the last scheduler is selected (no crash)."""
+    from konfai.metric.schedulers import Constant
+    from konfai.network.network import Measure
+
+    s0, s1 = Constant(1.0), Constant(2.0)
+    schedulers = {s0: 3, s1: 3}  # active windows [0,3) and [3,6)
+    assert Measure.update_scheduler(None, schedulers, 4) is s1  # type: ignore[arg-type]
+    assert Measure.update_scheduler(None, schedulers, 100) is s1  # type: ignore[arg-type]
+
+
+def test_missing_metric_dependency_raises_actionable_error():
+    """Optional criterion deps must surface an actionable MeasureError, not ImportError."""
+    from konfai.metric.measure import _require_optional
+
+    with pytest.raises(MeasureError) as excinfo:
+        _require_optional("konfai_definitely_missing_pkg_zzz", criterion="SSIM", extra="ssim")
+    message = str(excinfo.value)
+    assert "SSIM" in message
+    assert "konfai[ssim]" in message
+
+
+def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings():
+    """#2 A resized layer must warm-start, and sibling layers must still load.
+
+    The bug checked ``isinstance(module, Linear)`` (the parent) instead of the
+    child, and used an early ``return`` that aborted loading the remaining
+    siblings of a resized layer.
+    """
+    from konfai.network.network import Network
+
+    class _Net(Network):
+        def __init__(self, fc_out: int) -> None:
+            super().__init__(in_channels=1)
+            self.add_module("fc", torch.nn.Linear(4, fc_out))
+            self.add_module("head", torch.nn.Linear(4, 2))
+
+    old = _Net(fc_out=4)
+    # Network.state_dict() wraps the flat params under the network name; load_state_dict
+    # consumes that inner flat dict ("fc.weight", ...).
+    inner = next(iter(old.state_dict().values()))
+    checkpoint = {key: value.clone() for key, value in inner.items()}
+
+    new = _Net(fc_out=6)  # fc output grows 4 -> 6 (resized); head is unchanged
+    new.load_state_dict(checkpoint)  # must not raise
+
+    fc = new["fc"]
+    head = new["head"]
+    assert fc.weight.shape == (6, 4)
+    assert torch.equal(fc.weight[:4], checkpoint["fc.weight"])  # warm-started rows
+    # The sibling after the resized layer must still be loaded (old `return` skipped it).
+    assert torch.equal(head.weight, checkpoint["head.weight"])
+    assert torch.equal(head.bias, checkpoint["head.bias"])
+
+
+def test_adaptation_sets_requires_grad_at_construction():
+    """#18 Adaptation must configure requires_grad in __init__, not on every forward."""
+    from konfai.models.representation.representation import Adaptation
+
+    adaptation = Adaptation()
+    # State is correct immediately after construction, before any forward pass.
+    assert all(not p.requires_grad for p in adaptation.Encoder_1.parameters())
+    assert all(p.requires_grad for p in adaptation.FCT_1.parameters())
+
+
+def test_linear_vae_is_parameterized_and_variational():
+    """#17 LinearVAE must be parameterized (no hardcoded dims) and sample a latent."""
+    from konfai.models.generation.vae import LinearVAE
+
+    model = LinearVAE(in_features=32, hidden_features=16, latent_dim=4)
+    x = torch.randn(2, 32)
+    outputs = dict(model.named_forward(x))
+    assert outputs["Head.Tanh"].shape == (2, 32)  # reconstruction matches input size
+    assert "Latent.mu" in outputs and "Latent.log_std" in outputs  # KL-ready outputs
+    # The latent is sampled: the reconstruction differs across RNG draws.
+    torch.manual_seed(0)
+    first = dict(model.named_forward(x))["Head.Tanh"]
+    torch.manual_seed(1)
+    second = dict(model.named_forward(x))["Head.Tanh"]
+    assert not torch.allclose(first, second)

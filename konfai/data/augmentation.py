@@ -189,6 +189,27 @@ class DataAugmentation(NeedDevice, ABC):
     def set_datasets(self, datasets: list[Dataset]):
         self.datasets = datasets
 
+    def reset_state(self, index: int | None = None) -> None:
+        """Drop the cached sampling for *index* so the next ``state_init`` re-samples.
+
+        Augmentation parameters are drawn once per case index and cached so that
+        every patch of that case shares a consistent transform within an epoch
+        (see ``state_init``). They must, however, be re-drawn at the start of each
+        epoch; otherwise a case keeps identical augmentation parameters for the
+        whole run. ``DatasetManager.reset_augmentation`` calls this before
+        ``state_init`` on every epoch reset. Subclass-specific caches (e.g.
+        ``matrix``/``flip``) are keyed by the same index and are overwritten by
+        the subsequent ``_state_init``; when the re-draw selects nothing they are
+        left untouched but never read (``__call__``/``inverse`` gate on
+        ``who_index``). Passing ``None`` clears every cached index.
+        """
+        if index is None:
+            self.who_index.clear()
+            self.shape_index.clear()
+        else:
+            self.who_index.pop(index, None)
+            self.shape_index.pop(index, None)
+
     def state_init(
         self,
         index: None | int,

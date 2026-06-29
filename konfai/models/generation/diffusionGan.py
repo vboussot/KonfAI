@@ -157,6 +157,16 @@ class DiscriminatorADA(network.Network):
             # self.add_module("Flatten", torch.nn.Flatten(1))
 
     class UpdateP(torch.nn.Module):
+        """Adaptive-augmentation (ADA) probability controller.
+
+        `p` and `_it` are intentional running training state: every `n` calls the
+        augmentation probability `p` is nudged toward `ada_target` based on the
+        discriminator measure. They are deliberately kept as plain Python scalars
+        (not registered buffers) so the checkpoint format stays compatible with
+        existing pretrained weights. `_it` only matters modulo `n`, so it is never
+        reset; `p` accumulates by design.
+        """
+
         def __init__(self):
             super().__init__()
             self._it = 0

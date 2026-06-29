@@ -17,10 +17,12 @@
 """Criterion and metric implementations used by KonfAI workflows."""
 
 import copy
+import importlib
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import partial
+from types import ModuleType
 from typing import cast
 
 import numpy as np
@@ -34,9 +36,28 @@ from konfai.network.blocks import LatentDistribution
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import MeasureError
 from konfai.utils.utils import get_module
 
 models_register: dict[str, Network] = {}
+
+
+def _require_optional(module: str, *, criterion: str, extra: str) -> ModuleType:
+    """Import an optional criterion dependency or raise an actionable error.
+
+    Several criteria (SSIM, LPIPS, FID) rely on heavyweight optional packages
+    that are not part of the base install. Importing them through this helper
+    turns a missing dependency into a clear, install-ready message raised at
+    criterion construction, instead of a raw ``ImportError`` surfacing mid-run.
+    """
+    package = module.split(".")[0]
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:
+        raise MeasureError(
+            f"The '{criterion}' criterion requires the optional dependency '{package}'.",
+            f"Install it with `pip install konfai[{extra}]` (or `pip install {package}`).",
+        ) from exc
 
 
 class Criterion(torch.nn.Module, ABC):
@@ -221,8 +242,9 @@ class PSNR(MaskedLoss):
 class SSIM(MaskedLoss):
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        from skimage.metrics import structural_similarity
-
+        structural_similarity = _require_optional(
+            "skimage.metrics", criterion="SSIM", extra="ssim"
+        ).structural_similarity
         return structural_similarity(
             x[0][0].detach().cpu().numpy(),
             y[0][0].cpu().numpy(),
@@ -232,6 +254,7 @@ class SSIM(MaskedLoss):
         )
 
     def __init__(self, dynamic_range: float | None = None) -> None:
+        _require_optional("skimage.metrics", criterion="SSIM", extra="ssim")
         dynamic_range = dynamic_range if dynamic_range else 1024 + 3000
         super().__init__(partial(SSIM._loss, dynamic_range), True)
 
@@ -263,7 +286,7 @@ class LPIPS(MaskedLoss):
         return loss / dataset_patch.get_size(0)
 
     def __init__(self, model: str = "alex") -> None:
-        import lpips
+        lpips = _require_optional("lpips", criterion="LPIPS", extra="lpips")
 
         super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model).to(0)), True)
 
@@ -542,7 +565,8 @@ class PerceptualLoss(Criterion):
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         if output.device.index not in self.models:
-            del os.environ["device"]
+            # `Network.to` now resets its GPU-index counter per call, so the perceptual
+            # model is placed starting at this device without the old os.environ reset.
             self.models[output.device.index] = Network.to(copy.deepcopy(self.model).eval(), output.device.index).eval()
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and len(self.shape) == 2:
@@ -659,7 +683,9 @@ class FID(Criterion):
         def __init__(self) -> None:
             super().__init__()
 
-            from torchvision.models import Inception_V3_Weights, inception_v3
+            torchvision_models = _require_optional("torchvision.models", criterion="FID", extra="fid")
+            inception_v3 = torchvision_models.inception_v3
+            Inception_V3_Weights = torchvision_models.Inception_V3_Weights
 
             self.model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
             self.model.fc = torch.nn.Identity()
@@ -670,6 +696,7 @@ class FID(Criterion):
 
     def __init__(self) -> None:
         super().__init__()
+        _require_optional("scipy.linalg", criterion="FID", extra="fid")
         self.inception_model = FID.InceptionV3().cuda()
 
     @staticmethod
@@ -694,7 +721,7 @@ class FID(Criterion):
         sigma2 = np.cov(generated_features, rowvar=False)
 
         diff = mu1 - mu2
-        from scipy import linalg
+        linalg = _require_optional("scipy.linalg", criterion="FID", extra="fid")
 
         covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
         if np.iscomplexobj(covmean):

@@ -104,6 +104,7 @@ Common fields:
 | `prefetch_factor` | int or null | `None` | Number of prefetched batches per worker when workers are enabled. |
 | `persistent_workers` | bool or null | `None` | Keep workers alive across epochs when workers are enabled. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
+| `validation_augmentations` | bool | `true` | Whether validation also iterates over augmented variants. Set `false` to validate only on base (non-augmented) samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
 
 When `use_cache: false`, KonfAI now tries to stream patches directly from disk instead of materializing full volumes in RAM. This path is used automatically when the configured preprocessing chain is compatible with patch-wise loading; otherwise KonfAI falls back to the existing full-volume loading path.

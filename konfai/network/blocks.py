@@ -18,6 +18,7 @@
 
 import ast
 import importlib
+import warnings
 from collections.abc import Callable
 from enum import Enum
 
@@ -304,7 +305,17 @@ class Concat(torch.nn.Module):
         return torch.cat(tensor, dim=1)
 
 
+# ---------------------------------------------------------------------------
+# Debug-only blocks
+#
+# These pass the tensor through unchanged (or stop the graph) and exist only to
+# inspect intermediate activations while developing a model. They are inert
+# unless explicitly wired into a graph via `add_module`, have side effects
+# (stdout / disk / raising), and must NOT be left in a production model.
+# ---------------------------------------------------------------------------
 class Print(torch.nn.Module):
+    """Debug block: print the tensor shape and pass it through unchanged."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -314,16 +325,30 @@ class Print(torch.nn.Module):
 
 
 class Write(torch.nn.Module):
-    def __init__(self) -> None:
+    """Debug block: write the first channel of the first sample to disk as a volume.
+
+    The destination path is explicit (no silent hardcoded location) and each
+    call warns, since writing to disk inside a forward pass is a development-only
+    side effect.
+    """
+
+    def __init__(self, path: str = "./Data.mha") -> None:
         super().__init__()
+        self.path = path
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-
-        sitk.WriteImage(sitk.GetImageFromArray(tensor.clone()[0][0].cpu().numpy()), "./Data.mha")
+        warnings.warn(
+            f"Debug `Write` block is writing a volume to '{self.path}' during forward; "
+            "remove it from production models.",
+            stacklevel=2,
+        )
+        sitk.WriteImage(sitk.GetImageFromArray(tensor.clone()[0][0].cpu().numpy()), self.path)
         return tensor
 
 
 class Exit(torch.nn.Module):
+    """Debug block: stop the forward pass by raising, to halt at a chosen point."""
+
     def __init__(self) -> None:
         super().__init__()
 

@@ -138,6 +138,29 @@ class TestDicomExtractGeometry:
         with pytest.raises(DatasetManagerError, match="ImagePositionPatient"):
             dicom.extract_geometry([ds])
 
+    def test_rejects_multi_frame_dicom(self) -> None:
+        from konfai.utils import dicom
+
+        ds = self._make_ds([0.0, 0.0, 0.0])
+        ds.NumberOfFrames = 3
+        with pytest.raises(DatasetManagerError, match="Multi-frame"):
+            dicom.extract_geometry([ds])
+
+    def test_rejects_irregular_slice_spacing(self) -> None:
+        from konfai.utils import dicom
+
+        # Gaps of 3 mm then 4 mm -> not uniformly spaced.
+        slices = [self._make_ds([0.0, 0.0, z]) for z in (0.0, 3.0, 7.0)]
+        with pytest.raises(DatasetManagerError, match="not uniformly spaced"):
+            dicom.extract_geometry(slices)
+
+    def test_accepts_uniform_multi_slice_spacing(self) -> None:
+        from konfai.utils import dicom
+
+        slices = [self._make_ds([0.0, 0.0, z]) for z in (0.0, 3.0, 6.0)]
+        _, spacing, _ = dicom.extract_geometry(slices)
+        assert spacing[2] == pytest.approx(3.0)
+
 
 class TestDicomReadVolume:
     def _make_ds(self, value: float = 0.0) -> MagicMock:
@@ -284,6 +307,22 @@ class TestDatasetImagingBackends:
         _, result_attributes = dataset.read_data("CT", "CASE_001")
 
         np.testing.assert_allclose(result_attributes.get_np_array("Direction"), direction.flatten())
+
+    def test_dicom_write_preserves_unrelated_files(self, tmp_path: Path) -> None:
+        pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+
+        root = tmp_path / "DICOM"
+        root.mkdir()
+        unrelated = root / "keep-me.dcm"
+        unrelated.write_bytes(b"not a konfai slice")
+
+        volume = np.zeros((1, 3, 4, 4), dtype=np.int16)
+        dicom.write_dicom_series(root, volume, origin=(0.0, 0.0, 0.0), spacing=(1.0, 1.0, 1.0))
+
+        # The series was written, but the unrelated DICOM file was not deleted.
+        assert unrelated.exists()
+        assert sorted(p.name for p in root.glob("[0-9]*.dcm")) == ["000001.dcm", "000002.dcm", "000003.dcm"]
 
     @pytest.mark.parametrize("file_format", ["omezarr", "ome-zarr", "ome_zarr", "zarr"])
     def test_ome_zarr_format_aliases(self, tmp_path: Path, file_format: str) -> None:

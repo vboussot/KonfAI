@@ -45,7 +45,7 @@ from konfai.data.data_manager import BatchSample
 from konfai.data.patching import Accumulator, ModelPatch
 from konfai.metric.schedulers import Scheduler
 from konfai.utils.config import apply_config, config
-from konfai.utils.errors import MeasureError, TrainerError
+from konfai.utils.errors import ConfigError, MeasureError, TrainerError
 from konfai.utils.runtime import State, get_device, get_gpu_memory
 from konfai.utils.utils import get_module
 
@@ -456,20 +456,22 @@ class Measure:
         return result
 
     def update_scheduler(self, schedulers: dict[Scheduler, int], it: int) -> Scheduler:
+        if not schedulers:
+            raise ConfigError(
+                f"No scheduler is configured, cannot select one for iteration {it}.",
+                "Declare at least one scheduler window in the optimizer configuration.",
+            )
+        # Pick the window covering `it`; if `it` is past every window, the loop falls
+        # through and clamps to the last scheduler (stepped past its last window start).
         step = 0
-        _scheduler = None
+        _scheduler: Scheduler | None = None
         for _scheduler, value in schedulers.items():
             if value is None or (it >= step and it < step + value):
                 break
             step += value
-        if _scheduler:
-            _scheduler.step(it - step)
-        if _scheduler is None:
-            raise NameError(
-                f"No scheduler found for iteration {it}. "
-                f"Available steps were: {list(schedulers.values())}. "
-                f"Check your configuration."
-            )
+        if _scheduler is None:  # unreachable (schedulers is non-empty); kept for type-narrowing
+            raise ConfigError(f"No scheduler matched iteration {it}.")
+        _scheduler.step(it - step)
         return _scheduler
 
 
@@ -895,9 +897,13 @@ class Network(ModuleArgsDict, ABC):
             for name, child in module._modules.items():
                 if child is not None:
                     if not isinstance(child, Network):
-                        if isinstance(child, torch.nn.modules.conv._ConvNd) or isinstance(module, torch.nn.Linear):
+                        weight_key = prefix + name + ".weight"
+                        if (
+                            isinstance(child, (torch.nn.modules.conv._ConvNd, torch.nn.Linear))
+                            and weight_key in state_dict
+                        ):
                             current_size = child.weight.shape[0]
-                            last_size = state_dict[prefix + name + ".weight"].shape[0]
+                            last_size = state_dict[weight_key].shape[0]
 
                             if current_size != last_size:
                                 print(
@@ -906,11 +912,14 @@ class Network(ModuleArgsDict, ABC):
                                 )
                                 ModuleArgsDict.init_func(child, self.init_type, self.init_gain)
 
+                                bias_key = prefix + name + ".bias"
                                 with torch.no_grad():
-                                    child.weight[:last_size] = state_dict[prefix + name + ".weight"]
-                                    if child.bias is not None:
-                                        child.bias[:last_size] = state_dict[prefix + name + ".bias"]
-                                return
+                                    child.weight[:last_size] = state_dict[weight_key]
+                                    if child.bias is not None and bias_key in state_dict:
+                                        child.bias[:last_size] = state_dict[bias_key]
+                                # Skip the normal load for this resized leaf, but keep
+                                # loading its siblings (was an early `return` that aborted them).
+                                continue
                         load(child, prefix + name + ".")
 
         load(self)
@@ -1339,24 +1348,28 @@ class Network(ModuleArgsDict, ABC):
         return self
 
     @staticmethod
-    def to(module: ModuleArgsDict, device: int):
-        if "device" not in os.environ:
-            os.environ["device"] = str(device)
+    def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):
+        # `_counter` is a single-element box holding the next GPU index, shared by
+        # reference through the recursion so model-parallel `isGPU_Checkpoint` splits
+        # advance it. Each top-level call starts fresh at `device` (replacing a previous
+        # `os.environ["device"]` counter that leaked across independent placements).
+        if _counter is None:
+            _counter = [device]
         for k, v in module.items():
             if module._modulesArgs[k].gpu == "cpu":
                 if module._modulesArgs[k].isGPU_Checkpoint:
-                    os.environ["device"] = str(int(os.environ["device"]) + 1)
-                module._modulesArgs[k].gpu = str(get_device(int(os.environ["device"])))
+                    _counter[0] += 1
+                module._modulesArgs[k].gpu = str(get_device(_counter[0]))
                 if isinstance(v, ModuleArgsDict):
-                    v = Network.to(v, int(os.environ["device"]))
+                    v = Network.to(v, _counter[0], _counter)
                 else:
-                    v = v.to(get_device(int(os.environ["device"])))
+                    v = v.to(get_device(_counter[0]))
         if isinstance(module, Network):
             if module.optimizer is not None:
                 for state in module.optimizer.state.values():
                     for k, v in state.items():
                         if isinstance(v, torch.Tensor):
-                            state[k] = v.to(get_device(int(os.environ["device"])))
+                            state[k] = v.to(get_device(_counter[0]))
         return module
 
     def get_name(self) -> str:

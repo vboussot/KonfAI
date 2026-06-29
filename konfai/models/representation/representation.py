@@ -67,12 +67,14 @@ class Adaptation(torch.nn.Module):
         self.Encoder_1 = UnetCPP1Layers()
         self.ToFeatures = blocks.ToFeatures(3)
         self.FCT_1 = torch.nn.Linear(32, 32, bias=True)
+        # Static configuration: freeze the encoder, train the projection head.
+        # Set once here rather than on every forward (a per-call side effect).
+        self.Encoder_1.requires_grad_(False)
+        self.FCT_1.requires_grad_(True)
 
     def forward(
         self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        self.Encoder_1.requires_grad_(False)
-        self.FCT_1.requires_grad_(True)
         return (
             self.FCT_1(self.ToFeatures(self.Encoder_1(a))),
             self.FCT_1(self.ToFeatures(self.Encoder_1(b))),

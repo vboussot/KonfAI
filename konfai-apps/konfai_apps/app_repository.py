@@ -568,6 +568,9 @@ class LocalAppRepository(AppRepositoryInfo):
         )
         shutil.copy2(inference_file_path, prediction_file)
         self._set_number_of_augmentation(prediction_file, number_of_augmentation)
+        # NOTE: `number_of_mc_dropout` is reserved for an upcoming MC-dropout feature
+        # (stochastic forward passes for models with dropout layers); it is plumbed
+        # through but not yet applied to the prediction config.
         if not uncertainty:
             self._disable_uncertainty(prediction_file)
         if self._vram_plan is not None and available_vram is not None:

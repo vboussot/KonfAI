@@ -59,6 +59,8 @@ tensorboard = ["tensorboard"]
 imaging = ["SimpleITK", "h5py", "pydicom", "zarr", "ngff-zarr"]
 vtk = ["vtk"]
 lpips = ["lpips"]
+ssim = ["scikit-image"]
+fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
 omezarr = ["zarr", "ngff-zarr"]
@@ -69,6 +71,8 @@ all = [
   "konfai[tensorboard]",
   "konfai[vtk]",
   "konfai[lpips]",
+  "konfai[ssim]",
+  "konfai[fid]",
   "konfai[cluster]",
   "konfai[dicom]",
   "konfai[omezarr]"
@@ -79,11 +83,9 @@ dev = [
   "pydicom",
   "zarr",
   "ngff-zarr",
+  "scikit-image",
   "nvidia-ml-py",
   "tensorboard",
-  "fastapi",
-  "uvicorn",
-  "python-multipart",
   "pytest",
   "pytest-cov",
   "pre-commit",
@@ -139,9 +141,6 @@ build = "*"
 twine = "*"
 mypy = "*"
 types-requests = "*"
-fastapi = "*"
-uvicorn = "*"
-python-multipart = "*"
 submitit = "*"
 SimpleITK = "*"
 h5py = "*"
@@ -150,6 +149,7 @@ nvidia-ml-py = "*"
 pydicom = "*"
 zarr = "*"
 ngff-zarr = "*"
+scikit-image = "*"
 
 [tool.pixi.feature.dev.tasks]
 test = { cmd = "pytest -q tests/", description = "Run the test suite" }

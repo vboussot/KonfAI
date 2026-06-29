@@ -102,6 +102,7 @@ Trainer:
     use_cache: true
     batch_size: 8
     validation: 0.2
+    validation_augmentations: true
   train_name: SEG_BASELINE
   manual_seed: 32
   epochs: 100
