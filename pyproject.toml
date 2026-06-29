@@ -86,9 +86,6 @@ dev = [
   "scikit-image",
   "nvidia-ml-py",
   "tensorboard",
-  "fastapi",
-  "uvicorn",
-  "python-multipart",
   "pytest",
   "pytest-cov",
   "pre-commit",
@@ -144,9 +141,6 @@ build = "*"
 twine = "*"
 mypy = "*"
 types-requests = "*"
-fastapi = "*"
-uvicorn = "*"
-python-multipart = "*"
 submitit = "*"
 SimpleITK = "*"
 h5py = "*"

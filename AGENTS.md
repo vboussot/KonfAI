@@ -222,13 +222,13 @@ The dev environment must have the imaging extras installed to exercise the real 
 ```bash
 pixi run test                 # core unit + integration (tests/) — pytest -q
 pixi run --environment dev python -m pytest tests/unit -q       # core unit only
-pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (NOT run by `pixi run test`)
+pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite
 pixi run test-cov             # with coverage
 ```
 
 Baseline: `tests/unit` green, `tests/integration` green, `konfai-apps/tests/unit` 25 passed.
 
-> **Caveat:** root `pytest testpaths=['tests']` excludes `konfai-apps/tests`, so `pixi run test` does **not** run the apps suite. Run it explicitly (the apps CI workflow does).
+> **Caveat:** root `pytest testpaths=['tests']` excludes `konfai-apps/tests`, so `pixi run test` does **not** run the apps suite. Run it explicitly. `konfai-apps` is an **independent package**: the core dev env no longer carries its runtime deps (fastapi/uvicorn/python-multipart) — install the package itself with `pip install -e ./konfai-apps` (which pulls them) before running its suite, exactly as its CI does.
 
 ### Lint / format / types / build / docs
 ```bash
