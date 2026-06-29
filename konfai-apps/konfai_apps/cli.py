@@ -308,9 +308,42 @@ def main_apps() -> None:
         help="Number of training iterations between validation runs.",
     )
 
+    bundle_p = subparsers.add_parser(
+        "bundle", help="Assemble an app bundle (HF layout), optionally with a portable ONNX model."
+    )
+    bundle_p.add_argument("name", type=str, help="Bundle/app variant name (the folder name).")
+    bundle_p.add_argument("--out", required=True, help="Output directory; the bundle is written to <out>/<name>/.")
+    bundle_p.add_argument("--app-json", required=True, help="Path to the app.json metadata file.")
+    bundle_p.add_argument(
+        "--config",
+        nargs="+",
+        required=True,
+        help="Config file(s), space-separated: Prediction.yml Evaluation.yml …",
+    )
+    bundle_p.add_argument("--checkpoint", nargs="+", required=True, help="Checkpoint .pt file(s): CV_0.pt CV_1.pt …")
+    bundle_p.add_argument("--model-py", help="Optional custom Model.py to include.")
+    bundle_p.add_argument(
+        "--requirements", help="Optional requirements.txt; if omitted, a draft is derived from Model.py imports."
+    )
+    bundle_p.add_argument(
+        "--onnx", action="store_true", help="Also export model.onnx + manifest.json (portable runtime)."
+    )
+    bundle_p.add_argument(
+        "--patch-size", type=int, nargs="+", help="Override --onnx patch size (else read from config)."
+    )
+    bundle_p.add_argument("--in-channels", type=int, help="Override --onnx input channels (else read from config).")
+    bundle_p.add_argument("--output-module", help="Named head to export for --onnx (default: last graph output).")
+
     parser.add_argument("--version", action="version", version=_package_version())
 
     kwargs = vars(parser.parse_args())
+
+    if kwargs.get("command") == "bundle":
+        from konfai_apps.bundle import run_bundle_cli
+
+        run_bundle_cli(kwargs)
+        return
+
     host = kwargs.pop("host")
     port = kwargs.pop("port")
     token = kwargs.pop("token")
