@@ -51,7 +51,7 @@ import re
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
@@ -59,9 +59,6 @@ from konfai.utils.errors import DatasetManagerError
 
 # Zero-padded slice filenames produced by :func:`write_dicom_series` (e.g. ``000001.dcm``).
 _SLICE_FILENAME_RE = re.compile(r"^\d{6}\.dcm$")
-
-if TYPE_CHECKING:
-    pass
 
 try:
     import pydicom

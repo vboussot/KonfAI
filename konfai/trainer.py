@@ -600,9 +600,6 @@ class Trainer(DistributedObject):
         self.model_ema: torch.optim.swa_utils.AveragedModel | None = None
         self.data_log = data_log
 
-        modules = []
-        for i, _ in self.model.named_modules():
-            modules.append(i)
         self.gradient_checkpoints = gradient_checkpoints
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode

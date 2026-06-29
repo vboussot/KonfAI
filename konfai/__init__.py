@@ -241,30 +241,6 @@ def _get_env(var: str) -> str:
     return value
 
 
-_KONFAI_DEPS: dict[str, str] = {
-    "torch": "torch",
-    "tqdm": "tqdm",
-    "numpy": "numpy",
-    "ruamel.yaml": "ruamel.yaml",
-    "psutil": "psutil",
-    "tensorboard": "tensorboard",
-    "SimpleITK": "SimpleITK",
-    "lxml": "lxml",  # often used as lxml.etree
-    "h5py": "h5py",
-    "nvidia-ml-py": "pynvml",  # IMPORTANT: pip != import
-    "requests": "requests",
-    "huggingface_hub": "huggingface_hub",
-}
-
-
-def _try_import(import_name: str) -> str | None:
-    try:
-        __import__(import_name)
-        return None
-    except Exception as e:
-        return f"{type(e).__name__}: {e}"
-
-
 def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[bool, str]:
     """
     Check whether a remote KonfAI Apps server is reachable and healthy.
@@ -307,67 +283,3 @@ def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[b
         return False, "Timeout"
     except Exception as e:
         return False, str(e)
-
-
-def check_konfai_install() -> tuple[bool, dict]:
-    """
-    Checks that KonfAI dependencies are importable.
-
-    Returns
-    -------
-    tuple[bool, dict]
-        A pair containing a global success flag and a report dictionary with the
-        keys ``missing``, ``errors``, and ``versions``.
-    """
-    missing: list[str] = []
-    errors: dict[str, str] = {}
-    versions: dict[str, str] = {}
-
-    deps = dict(_KONFAI_DEPS)
-    for pip_name, import_name in deps.items():
-        # best effort version lookup
-        try:
-            versions[pip_name] = metadata.version(pip_name)
-        except metadata.PackageNotFoundError:
-            versions[pip_name] = "not installed"
-        except Exception:
-            versions[pip_name] = "unknown"
-
-        err = _try_import(import_name)
-        if err is None:
-            continue
-
-        if versions[pip_name] == "not installed":
-            missing.append(pip_name)
-        else:
-            errors[pip_name] = err
-
-    return len(missing) == 0 and len(errors) == 0, {
-        "missing": missing,
-        "errors": errors,
-        "versions": versions,
-    }
-
-
-class KonfAIPackagesError(RuntimeError):
-    """Raised when required Python packages for KonfAI are missing/broken."""
-
-
-def assert_konfai_install() -> None:
-    """
-    Raise :class:`KonfAIPackagesError` if the KonfAI dependency check fails.
-    """
-    is_konfai_install, report = check_konfai_install()
-    if not is_konfai_install:
-        lines = ["KonfAI dependency check failed."]
-
-        if report["missing"]:
-            lines.append("\nMissing packages:")
-            lines.extend(f"  - {p}" for p in report["missing"])
-
-        if report["errors"]:
-            lines.append("\nImport/runtime errors:")
-            for p, e in report["errors"].items():
-                lines.append(f"  - {p}: {e}")
-
-        raise KonfAIPackagesError("\n".join(lines))

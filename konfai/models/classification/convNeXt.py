@@ -95,10 +95,10 @@ class DropPath(torch.nn.Module):
 
 
 class LayerScaler(torch.nn.Module):
-    def __init__(self, init_value: float, dimensions: int):
+    def __init__(self, init_value: float, dimensions: int, dim: int):
         super().__init__()
         self.init_value = init_value
-        self.gamma = torch.nn.Parameter(torch.ones(dimensions, 1, 1) * init_value)
+        self.gamma = torch.nn.Parameter(torch.ones(dimensions, *([1] * dim)) * init_value)
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         return self.gamma * tensor
@@ -123,7 +123,7 @@ class BottleNeckBlock(network.ModuleArgsDict):
         self.add_module("ToChannels", blocks.ToChannels(dim))
         self.add_module(
             "LayerScaler",
-            LayerScaler(init_value=layer_scaler_init_value, dimensions=features),
+            LayerScaler(init_value=layer_scaler_init_value, dimensions=features, dim=dim),
             alias=[""],
         )
         self.add_module("StochasticDepth", DropPath(drop_p))

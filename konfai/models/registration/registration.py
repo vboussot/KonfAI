@@ -137,17 +137,6 @@ class Rigid(network.ModuleArgsDict):
         self["Head"].bias.data.copy_(torch.tensor([0, 0], dtype=torch.float))
 
 
-class MaskFlow(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, mask: torch.Tensor, *flows: torch.Tensor):
-        result = torch.zeros_like(flows[0])
-        for i, flow in enumerate(flows):
-            result = result + torch.where(mask == i + 1, flow, torch.tensor(0))
-        return result
-
-
 class SpatialTransformer(torch.nn.Module):
     def __init__(self, size: list[int], rigid: bool = False):
         super().__init__()

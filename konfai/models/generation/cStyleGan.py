@@ -14,10 +14,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
 import itertools
 
 import torch
+import torch.nn.functional as F
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 
@@ -99,10 +99,7 @@ class ModulatedConv(torch.nn.Module):
 
             _, _, *ws = weights.shape
             if not self.isConv:
-                out = getattr(
-                    importlib.import_module("torch.nn.functional"),
-                    f"conv_transpose{self.dim}d",
-                )(
+                out = getattr(F, f"conv_transpose{self.dim}d")(
                     tensor,
                     weights.reshape(b * self.in_channels, *ws),
                     stride=self.stride,
@@ -110,10 +107,7 @@ class ModulatedConv(torch.nn.Module):
                     groups=b,
                 )
             else:
-                out = getattr(
-                    importlib.import_module("torch.nn.functional"),
-                    f"conv{self.dim}d",
-                )(
+                out = getattr(F, f"conv{self.dim}d")(
                     tensor,
                     weights.reshape(b * self.out_channels, *ws),
                     padding=self.padding,

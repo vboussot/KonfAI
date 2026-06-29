@@ -211,11 +211,9 @@ class MAESaveMap(MAE):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
         loss, true_loss = super().forward(output, *targets)
         if len(targets) == 2:
+            mask = torch.where(targets[1] == 1, 1, 0)
             error_map = (
-                torch.nn.L1Loss(reduction="none")(
-                    output.float() * torch.where(targets[1] == 1, 1, 0),
-                    targets[0].float() * torch.where(targets[1] == 1, 1, 0),
-                )
+                torch.nn.L1Loss(reduction="none")(output.float() * mask, targets[0].float() * mask)
                 .to(output.dtype)
                 .cpu()
             )
@@ -338,9 +336,10 @@ class Dice(Criterion):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is not None:
+            binary_mask = torch.where(targets[1] == 1, 1, 0)
             return self.loss(
-                (output * torch.where(targets[1] == 1, 1, 0)).to(torch.uint8),
-                (targets[0] * torch.where(targets[1] == 1, 1, 0)).to(torch.uint8),
+                (output * binary_mask).to(torch.uint8),
+                (targets[0] * binary_mask).to(torch.uint8),
             )
         else:
             return self.loss(output, targets[0])
@@ -355,12 +354,9 @@ class DiceSaveMap(Dice):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
         loss, true_loss = super().forward(output, *targets)
         if len(targets) == 2:
+            binary_mask = torch.where(targets[1] == 1, 1, 0)
             error_map = (
-                torch.nn.L1Loss(reduction="none")(
-                    output * torch.where(targets[1] == 1, 1, 0), targets[0] * torch.where(targets[1] == 1, 1, 0)
-                )
-                .to(torch.uint8)
-                .cpu()
+                torch.nn.L1Loss(reduction="none")(output * binary_mask, targets[0] * binary_mask).to(torch.uint8).cpu()
             )
         else:
             error_map = torch.nn.L1Loss(reduction="none")(output, targets[0]).to(torch.uint8).cpu()
@@ -517,13 +513,7 @@ class PerceptualLoss(Criterion):
         self.models: dict[int, torch.nn.Module] = {}
 
     def preprocessing(self, tensor: torch.Tensor) -> torch.Tensor:
-        # if not all([tensor.shape[-i-1] == size for i, size in enumerate(reversed(self.shape[2:]))]):
-        #    tensor = F.interpolate(tensor, mode=self.mode,
-        # size=tuple(self.shape), align_corners=False).type(torch.float32)
-        # if tensor.shape[1] != self.model.in_channels:
-        #    tensor = tensor.repeat(tuple([1,self.model.in_channels] + [1 for _ in range(len(self.shape))]))
-        # tensor = (tensor - torch.min(tensor))/(torch.max(tensor)-torch.min(tensor))
-        # tensor = torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(tensor)
+        """Identity hook applied to output/targets before the perceptual feature passes."""
         return tensor
 
     def _compute(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:

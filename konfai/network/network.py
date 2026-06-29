@@ -1163,9 +1163,11 @@ class Network(ModuleArgsDict, ABC):
             name = name_tmp.replace(";accu;", "")
             if debug:
                 if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
-                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = f"{os.environ['KONFAI_DEBUG_LAST_LAYER']}|{name}:"
-                    f"{get_gpu_memory(output_layer.device)}:"
-                    f"{str(output_layer.device).replace('cuda:', '')}"
+                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
+                        f"{os.environ['KONFAI_DEBUG_LAST_LAYER']}|{name}:"
+                        f"{get_gpu_memory(output_layer.device)}:"
+                        f"{str(output_layer.device).replace('cuda:', '')}"
+                    )
                 else:
                     os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
                         f"{name}:{get_gpu_memory(output_layer.device)}:{str(output_layer.device).replace('cuda:', '')}"

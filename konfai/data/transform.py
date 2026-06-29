@@ -420,12 +420,12 @@ class ResampleToResolution(Resample):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         if "Spacing" not in cache_attribute:
-            TransformError(
+            raise TransformError(
                 "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
                 "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.",
             )
         if len(shape) != len(self.spacing):
-            TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
+            raise TransformError(f"Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
         image_spacing = cache_attribute.get_tensor("Spacing")
         resize_factor = torch.tensor(
             [s / i_s if s > 0 else 1.0 for s, i_s in zip(self.spacing, image_spacing, strict=False)]
@@ -456,13 +456,8 @@ class ResampleToShape(Resample):
         self.shape = torch.tensor([0 if s < 0 else s for s in shape])
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        if "Spacing" not in cache_attribute:
-            TransformError(
-                "Missing 'Spacing' in cache attributes, the data is likely not a valid image.",
-                "Make sure your input is a image (e.g., .nii, .mha) with proper metadata.",
-            )
         if len(shape) != len(self.shape):
-            TransformError("Shape and spacing dimensions do not match: shape={shape}, spacing={self.spacing}")
+            raise TransformError(f"Shape and target-shape dimensions do not match: shape={shape}, target={self.shape}")
         new_shape = self.shape.clone()
         for i, s in enumerate(self.shape):
             if s == 0:

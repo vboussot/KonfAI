@@ -245,7 +245,7 @@ class OutputDataset(Dataset, NeedDevice, ABC):
             "after_reduction_transforms": self.after_reduction_transforms,
             "final_transforms": self.final_transforms,
             "patch_combine": self.patch_combine,
-            "reduction": self.patch_combine,
+            "reduction": self.reduction_classpath,
         }
         return str(params)
 

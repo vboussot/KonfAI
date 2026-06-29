@@ -128,7 +128,7 @@ class Mean(PathCombine):
         super().__init__()
 
     def _set_function(self, data: torch.Tensor, overlap: int) -> torch.Tensor:
-        return torch.ones_like(self.data)
+        return torch.ones_like(data)
 
 
 class Cosinus(PathCombine):
