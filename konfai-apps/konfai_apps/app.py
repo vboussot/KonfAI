@@ -34,9 +34,10 @@ import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
-from konfai.utils.errors import KonfAIAppClientError
+from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State
 from konfai.utils.utils import SUPPORTED_EXTENSIONS
+from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
 
@@ -493,6 +494,11 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             data["ensemble_models"] = ",".join(data["ensemble_models"])
                         else:
                             del data["ensemble_models"]
+                    if "models" in data:
+                        if len(data["models"]) > 0:
+                            data["models"] = ",".join(data["models"])
+                        else:
+                            del data["models"]
                     connect_timeout = 60
                     read_timeout: int = 600
 
@@ -604,6 +610,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         output: Path = Path("./Output/"),
         epochs: int = 10,
         it_validation: int = 1000,
+        models: list[str] = [],
         gpu: list[int] = [],
         cpu: int | None = None,
         quiet: bool = False,
@@ -1034,6 +1041,24 @@ class KonfAIApp(AbstractKonfAIApp):
         if uncertainty:
             self.uncertainty([inference_stacks], output / "Uncertainties", uncertainty_file, gpu, cpu, quiet, tmp_dir)
 
+    @staticmethod
+    def _weights_only_checkpoint(checkpoint_path: Path) -> dict[str, Any]:
+        """
+        Load a checkpoint and keep only its model weights.
+
+        Fine-tuning must start from the pretrained weights but with fresh training counters,
+        optimizer and LR schedule. Returning only the ``Model`` key (dropping ``epoch``/``it``/
+        ``loss``, ``Model_EMA`` and the optimizer/scheduler state) makes a subsequent RESUME leave
+        ``epoch``/``it`` at 0, so ``range(0, epochs)`` runs all fine-tuning epochs with a fresh LR
+        schedule.
+        """
+        import torch
+
+        state_dict = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)  # nosec B614
+        if "Model" not in state_dict:
+            raise AppRepositoryError(f"Checkpoint '{checkpoint_path}' has no 'Model' weights to fine-tune from.")
+        return {"Model": state_dict["Model"]}
+
     @run_distributed_app
     def fine_tune(
         self,
@@ -1042,6 +1067,7 @@ class KonfAIApp(AbstractKonfAIApp):
         output: Path = Path("./Output/"),
         epochs: int = 10,
         it_validation: int = 1000,
+        models: list[str] = [],
         gpu: list[int] = cuda_visible_devices(),
         cpu: int | None = None,
         quiet: bool = False,
@@ -1049,23 +1075,80 @@ class KonfAIApp(AbstractKonfAIApp):
         tmp_dir: Path | None = None,
     ) -> None:
         """
-        Run fine-tuning (training) locally.
+        Fine-tune one or several checkpoints of the app locally.
 
         Steps:
-        1. Install training assets/config via `self.app_repository.install_fine_tune`
-        2. Link the user dataset into ./Dataset
-        3. Call `konfai.trainer.train(...)` in resume mode
+        1. Install training assets/config and resolve the selected checkpoint(s) via
+           `self.app_repository.install_fine_tune`.
+        2. Link the user dataset into ./Dataset.
+        3. For each selected checkpoint: sanitize it to weights-only, write a per-model config with a
+           distinct ``train_name``, run `konfai.trainer.train(...)` in resume mode, then copy the
+           produced checkpoint back into the output app.
+
+        The output directory is left as a clean, resolvable app bundle (app.json + config + code +
+        fine-tuned checkpoint(s)); training artifacts (Checkpoints/Statistics) are kept out of it.
 
         Notes
         -----
-        - Runs inside an isolated workspace (run_distributed_app).
-        - GPU defaults to `cuda_visible_devices()`.
+        - Runs inside an isolated workspace (run_distributed_app); the workspace is the output dir.
+        - Fine-tuning requires a CUDA GPU when the loss relies on GPU-only components.
+        - `models` selects which checkpoint(s) to fine-tune (default: the first available).
         """
-        models_path = self.app_repository.install_fine_tune(config_file, Path("./"), name, epochs, it_validation)
+        import torch
+
+        selected_models = self.app_repository.install_fine_tune(
+            config_file, Path("./"), name, epochs, it_validation, models
+        )
         KonfAIApp.symlink(dataset, Path("./Dataset").absolute())
+
         from konfai.trainer import train
 
-        train(State.RESUME, True, models_path[0], gpu, cpu, quiet, False, config_file)
+        # Keep training artifacts (Checkpoints/Statistics) outside the output so it stays a clean app.
+        work_dir = Path(tempfile.mkdtemp(prefix="konfai_finetune_")).resolve()
+        config_path = Path(config_file)
+        try:
+            for checkpoint_name, checkpoint_src in selected_models:
+                stem = Path(checkpoint_name).stem
+                train_name = f"{name}_{stem}"
+
+                sanitized_ckpt = work_dir / f"{stem}_init.pt"
+                torch.save(KonfAIApp._weights_only_checkpoint(checkpoint_src), sanitized_ckpt)  # nosec B614
+
+                model_config = work_dir / f"{config_path.stem}_{stem}{config_path.suffix}"
+                yaml = YAML()
+                with open(config_path) as file:
+                    data = yaml.load(file)
+                data["Trainer"]["train_name"] = train_name
+                with open(model_config, "w") as file:
+                    yaml.dump(data, file)
+
+                train(
+                    State.RESUME,
+                    True,
+                    sanitized_ckpt,
+                    gpu,
+                    cpu,
+                    quiet,
+                    False,
+                    model_config,
+                    work_dir / "Checkpoints",
+                    work_dir / "Statistics",
+                )
+
+                produced_dir = work_dir / "Checkpoints" / train_name
+                produced = sorted(produced_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+                if not produced:
+                    raise AppRepositoryError(
+                        f"Fine-tuning of '{checkpoint_name}' produced no checkpoint in '{produced_dir}'."
+                    )
+                shutil.copy2(produced[-1], Path(checkpoint_name).name)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            dataset_link = Path("./Dataset")
+            if dataset_link.is_symlink() or dataset_link.is_file():
+                dataset_link.unlink()
+            elif dataset_link.is_dir():
+                shutil.rmtree(dataset_link, ignore_errors=True)
 
     def __str__(self) -> str:
         return str(self.app_repository)

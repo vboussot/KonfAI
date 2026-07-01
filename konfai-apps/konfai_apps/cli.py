@@ -299,6 +299,13 @@ def main_apps() -> None:
     ft_p = subparsers.add_parser("fine-tune", help="Fine-tune a KonfAI App on a dataset.")
     add_common_args(ft_p, True)
     ft_p.add_argument("name", type=str, help="New KonfAI App display name")
+    ft_p.add_argument(
+        "--models",
+        nargs="+",
+        default=[],
+        help="Checkpoint name(s) to fine-tune, e.g. 'CV_0 CV_1'. If omitted, the first available "
+        "checkpoint is fine-tuned. Each selected checkpoint is fine-tuned independently.",
+    )
     ft_p.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs")
     ft_p.add_argument(
         "--it-validation",
@@ -306,6 +313,15 @@ def main_apps() -> None:
         type=int,
         default=1000,
         help="Number of training iterations between validation runs.",
+    )
+    ft_p.add_argument(
+        "--config",
+        "--config-file",
+        "--config_file",
+        dest="config_file",
+        type=str,
+        default="Config.yml",
+        help="Training configuration filename inside the app.",
     )
 
     bundle_p = subparsers.add_parser(

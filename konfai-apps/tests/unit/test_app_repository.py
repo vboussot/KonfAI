@@ -411,3 +411,98 @@ def test_local_directory_nested_uncertainty_file_is_detected(tmp_path: Path) -> 
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
     assert repo.has_capabilities() == (False, False, True)
+
+
+def _write_two_checkpoint_app(app_root: Path) -> None:
+    app_root.mkdir(parents=True, exist_ok=True)
+    (app_root / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Demo App",
+                "description": "Local app with two checkpoints",
+                "short_description": "Demo",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["CV_0.pt", "CV_1.pt"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (app_root / "Config.yml").write_text(
+        "Trainer:\n  epochs: 100\n  it_validation: 2500\n  train_name: FT_0\n",
+        encoding="utf-8",
+    )
+    (app_root / "CV_0.pt").write_text("weights-0", encoding="utf-8")
+    (app_root / "CV_1.pt").write_text("weights-1", encoding="utf-8")
+
+
+def _install_fine_tune(app_root: Path, workspace: Path, name_of_models: list[str]) -> list[tuple[str, Path]]:
+    workspace.mkdir(parents=True, exist_ok=True)
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    return repo.install_fine_tune(
+        config_file="Config.yml",
+        path=workspace,
+        display_name="Fine Tuned",
+        epochs=3,
+        it_validation=5,
+        name_of_models=name_of_models,
+    )
+
+
+def test_install_fine_tune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
+    from ruamel.yaml import YAML
+
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    workspace = tmp_path / "workspace"
+
+    models = _install_fine_tune(app_root, workspace, [])
+
+    assert [name for name, _ in models] == ["CV_0.pt"]
+    assert models[0][1] == app_root / "CV_0.pt"
+    # Shared assets are installed but checkpoints are not copied into the workspace by install.
+    assert (workspace / "app.json").exists()
+    assert (workspace / "Config.yml").exists()
+    assert not (workspace / "CV_0.pt").exists()
+
+    metadata = json.loads((workspace / "app.json").read_text(encoding="utf-8"))
+    assert metadata["display_name"] == "Fine Tuned"
+    assert metadata["models"] == ["CV_0.pt"]
+
+    with open(workspace / "Config.yml") as file:
+        config = YAML().load(file)
+    assert config["Trainer"]["epochs"] == 3
+    assert config["Trainer"]["it_validation"] == 5
+
+
+def test_install_fine_tune_selects_requested_checkpoint(tmp_path: Path) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    workspace = tmp_path / "workspace"
+
+    models = _install_fine_tune(app_root, workspace, ["CV_1"])
+
+    assert [name for name, _ in models] == ["CV_1.pt"]
+    metadata = json.loads((workspace / "app.json").read_text(encoding="utf-8"))
+    assert metadata["models"] == ["CV_1.pt"]
+
+
+def test_install_fine_tune_selects_multiple_checkpoints(tmp_path: Path) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    workspace = tmp_path / "workspace"
+
+    models = _install_fine_tune(app_root, workspace, ["CV_0", "CV_1"])
+
+    assert [name for name, _ in models] == ["CV_0.pt", "CV_1.pt"]
+    metadata = json.loads((workspace / "app.json").read_text(encoding="utf-8"))
+    assert metadata["models"] == ["CV_0.pt", "CV_1.pt"]
+
+
+def test_install_fine_tune_rejects_unknown_checkpoint(tmp_path: Path) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    workspace = tmp_path / "workspace"
+
+    with pytest.raises(app_repository_module.AppRepositoryError):
+        _install_fine_tune(app_root, workspace, ["CV_9"])

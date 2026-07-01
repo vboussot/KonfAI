@@ -311,8 +311,8 @@ def _unwrap_optional(annotation):
     args = [arg for arg in get_args(annotation) if arg not in {type(None), types.NoneType}]
     if len(args) == 1:
         return args[0]
-    if len(args) > 1:
-        return args[0]
+    # Genuine unions (e.g. ``float | str``) are kept intact so the binding can try each
+    # member type; only ``Optional[X]`` (``X | None``) collapses to ``X``.
     return annotation
 
 
@@ -412,6 +412,16 @@ def apply_config(konfai_args: str | None = None):
                                     kwargs[param.name] = config.get_value(
                                         param.name,
                                         param.default,
+                                    )
+                                continue
+
+                            if get_origin(annotation) in {Union, types.UnionType}:
+                                value = config.get_value(param.name, param.default)
+                                if value is None:
+                                    kwargs[param.name] = None
+                                else:
+                                    kwargs[param.name] = _convert_union_sequence_value(
+                                        value, get_args(annotation), param.name
                                     )
                                 continue
 

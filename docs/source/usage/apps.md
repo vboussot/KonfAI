@@ -75,9 +75,13 @@ Fine-tuning is available through:
 .. code-block:: bash
 
    konfai-apps fine-tune <app> <name> -d ./Dataset --epochs 10 --gpu 0
+   konfai-apps fine-tune <app> <name> -d ./Dataset --models CV_0 CV_1 --epochs 10 --gpu 0
 
-Under the hood, the app installs training assets, links the dataset, then calls
-the low-level training flow in resume mode.
+Under the hood, the app installs training assets, links the dataset, then, for each selected
+checkpoint, restarts training from its pretrained weights (fresh optimizer, learning-rate schedule
+and epoch counter) so that `--epochs` fine-tuning epochs actually run. Use `--models` to choose which
+checkpoint(s) to fine-tune (default: the first available); each is fine-tuned independently and
+written back into the output app, which is left as a ready-to-use app bundle.
 
 ## Local vs remote
 

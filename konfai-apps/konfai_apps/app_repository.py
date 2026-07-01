@@ -496,33 +496,38 @@ class LocalAppRepository(AppRepositoryInfo):
             if filename.endswith(".py"):
                 codes_path.append((filename, self._download(filename)))
 
-        requirements_filename = self._find_repo_filename("requirements.txt", filenames)
-        if requirements_filename is not None:
-            with open(self._download(requirements_filename), encoding="utf-8") as file:
-                required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
-                installed = {
-                    dist.metadata["Name"].lower(): dist.version
-                    for dist in importlib.metadata.distributions()
-                    if dist.metadata.get("Name")
-                }
-                missing_or_outdated = []
-                for line in required_lines:
-                    req = Requirement(line)
-                    name = req.name.lower()
-                    installed_version_str = installed.get(name)
-                    if installed_version_str is None:
-                        missing_or_outdated.append(line)
-                        continue
-                    if req.specifier and not req.specifier.contains(installed_version_str, prereleases=True):
-                        missing_or_outdated.append(line)
-
-                if missing_or_outdated:
-                    try:
-                        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_or_outdated])  # nosec B603
-                    except subprocess.CalledProcessError as exc:
-                        raise AppRepositoryError(f"Failed to install packages: {exc}") from exc
+        self._install_requirements(filenames)
 
         return models_path, inference_file_path, codes_path
+
+    def _install_requirements(self, filenames: list[str]) -> None:
+        """Install any missing/outdated packages listed in the app's requirements.txt."""
+        requirements_filename = self._find_repo_filename("requirements.txt", filenames)
+        if requirements_filename is None:
+            return
+        with open(self._download(requirements_filename), encoding="utf-8") as file:
+            required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
+        installed = {
+            dist.metadata["Name"].lower(): dist.version
+            for dist in importlib.metadata.distributions()
+            if dist.metadata.get("Name")
+        }
+        missing_or_outdated = []
+        for line in required_lines:
+            req = Requirement(line)
+            name = req.name.lower()
+            installed_version_str = installed.get(name)
+            if installed_version_str is None:
+                missing_or_outdated.append(line)
+                continue
+            if req.specifier and not req.specifier.contains(installed_version_str, prereleases=True):
+                missing_or_outdated.append(line)
+
+        if missing_or_outdated:
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_or_outdated])  # nosec B603
+            except subprocess.CalledProcessError as exc:
+                raise AppRepositoryError(f"Failed to install packages: {exc}") from exc
 
     def download_app(self) -> list[tuple[str, Path]]:
         filenames = self._get_filenames()
@@ -609,6 +614,42 @@ class LocalAppRepository(AppRepositoryInfo):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(code_path, dest)
 
+    def _resolve_fine_tune_models(self, filenames: list[str], name_of_models: list[str]) -> list[tuple[str, Path]]:
+        """
+        Resolve the checkpoint(s) to fine-tune into ``(basename, source_path)`` pairs.
+
+        If ``name_of_models`` is provided, each requested name is resolved to a ``.pt`` file.
+        Otherwise the first checkpoint advertised in ``app.json`` (falling back to the first
+        available ``.pt``) is selected. Missing files trigger a Hugging Face refresh, mirroring
+        :meth:`download_inference`.
+        """
+        selected: list[str] = []
+        if name_of_models:
+            if isinstance(self, LocalAppRepositoryFromHF):
+                for name in name_of_models:
+                    if self._find_repo_filename(name, filenames, suffix=".pt") is None:
+                        filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+                        break
+            selected = [self._require_repo_filename(name, filenames, suffix=".pt") for name in name_of_models]
+        else:
+            default_name: str | None = None
+            for candidate in self._checkpoints_name:
+                resolved = self._find_repo_filename(candidate, filenames, suffix=".pt")
+                if resolved is not None:
+                    default_name = resolved
+                    break
+            if default_name is None:
+                available = sorted(name for name in filenames if name.endswith(".pt"))
+                if not available and isinstance(self, LocalAppRepositoryFromHF):
+                    filenames = LocalAppRepositoryFromHF.get_filenames(self._repo_id, self._app_name, True)
+                    available = sorted(name for name in filenames if name.endswith(".pt"))
+                if not available:
+                    raise AppRepositoryError(f"No checkpoint (.pt) found to fine-tune in app '{self._app_name}'.")
+                default_name = available[0]
+            selected = [default_name]
+
+        return [(PurePosixPath(repo_name).name, self._download(repo_name)) for repo_name in selected]
+
     def install_fine_tune(
         self,
         config_file: str,
@@ -616,40 +657,28 @@ class LocalAppRepository(AppRepositoryInfo):
         display_name: str,
         epochs: int,
         it_validation: int | None,
-    ) -> list[Path]:
-        src_paths = self.download_app()
-        models_path = []
+        name_of_models: list[str],
+    ) -> list[tuple[str, Path]]:
+        """
+        Install the app assets needed for fine-tuning and resolve the selected checkpoint(s).
 
-        overwrite_all = None
+        Shared assets (config, code, ``app.json``, ``requirements.txt``) are installed into
+        ``path``; ``app.json`` is rewritten with the new ``display_name`` and a ``models`` list
+        limited to the selected checkpoints, and the training config's ``epochs``/``it_validation``
+        are updated. Only the selected ``.pt`` checkpoints are downloaded. Returns ``(basename,
+        source_path)`` pairs for the checkpoints to fine-tune.
+        """
+        filenames = self._get_filenames()
+        models = self._resolve_fine_tune_models(filenames, name_of_models)
 
-        def ask_overwrite_cli(dest_path: Path) -> bool:
-            nonlocal overwrite_all
-            if overwrite_all is not None:
-                return overwrite_all
-
-            while True:
-                print(f"KonfAI-Apps] File already exists: {dest_path}")
-                choice = input("Overwrite? [y]es / [n]o / [a]ll / [s]kip_all: ").strip().lower()
-                if choice == "y":
-                    return True
-                if choice == "n":
-                    return False
-                if choice == "a":
-                    overwrite_all = True
-                    return True
-                if choice == "s":
-                    overwrite_all = False
-                    return False
-                print("[KonfAI-Apps] Invalid input. Please choose y / n / a / s.")
-
-        for repo_filename, src in src_paths:
-            dest = path / repo_filename
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if str(src).endswith(".pt"):
-                models_path.append(src)
-            if dest.exists() and not ask_overwrite_cli(dest):
+        for filename in filenames:
+            if filename.endswith(".pt"):
                 continue
-            shutil.copy2(src, dest)
+            dest = path / filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self._download(filename), dest)
+
+        self._install_requirements(filenames)
 
         metadata_file = path / "app.json"
         config_file_path = path / config_file
@@ -663,6 +692,7 @@ class LocalAppRepository(AppRepositoryInfo):
             app_repository_metadata = json.load(file)
 
         app_repository_metadata["display_name"] = display_name
+        app_repository_metadata["models"] = [basename for basename, _ in models]
 
         with open(metadata_file, "w", encoding="utf-8") as file:
             json.dump(app_repository_metadata, file, indent=2, ensure_ascii=False)
@@ -682,7 +712,7 @@ class LocalAppRepository(AppRepositoryInfo):
         with open(config_file_path, "w") as file:
             yaml.dump(data, file)
 
-        return models_path
+        return models
 
 
 class LocalAppRepositoryFromDirectory(LocalAppRepository):

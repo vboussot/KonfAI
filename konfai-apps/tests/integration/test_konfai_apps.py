@@ -304,3 +304,167 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
 
     assert _single_case_metric(evaluation_path, expected_metric_suffix="MAE") == pytest.approx(0.0, abs=3e-4)
     assert _single_case_metric(uncertainty_path, expected_metric_suffix="Uncertainty") == pytest.approx(0.0, abs=1e-6)
+
+
+# Counters baked into the fixture checkpoints. They mimic a released model whose `epoch` already
+# reaches the fine-tuning target: without the weights-only sanitize step, `range(epoch, epochs)` is
+# empty and fine-tuning silently trains for zero steps.
+_PRETRAINED_EPOCH = 10
+_PRETRAINED_IT = 125134
+
+
+def _write_local_finetune_app(app_dir: Path) -> None:
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Tiny Synth",
+                "description": "Tiny local synthesis app for fine-tuning integration testing",
+                "short_description": "Tiny synth",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["tiny_0.pt", "tiny_1.pt"],
+                "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
+                "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Reuse the core training-config template (TinySynthNet + MR/CT/MASK groups). The dataset is linked
+    # into ./Dataset by fine_tune, and train_name is overridden per-model, so only the placeholders
+    # need substituting here.
+    config = (WORKFLOW_ASSETS_DIR / "Config.yml").read_text(encoding="utf-8")
+    config = config.replace("__DATASET_DIR__", "./Dataset").replace("__TRAIN_NAME__", "FT")
+    (app_dir / "Config.yml").write_text(config, encoding="utf-8")
+    (app_dir / "TinySynth.py").write_text(
+        (WORKFLOW_ASSETS_DIR / "TinySynth.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    spec = importlib.util.spec_from_file_location("TinySynth", app_dir / "TinySynth.py")
+    if spec is None or spec.loader is None:
+        raise AssertionError("Failed to load TinySynth test module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    model = module.TinySynthNet()
+    checkpoint = {
+        "epoch": _PRETRAINED_EPOCH,
+        "it": _PRETRAINED_IT,
+        "loss": 0.0,
+        "Model": model.state_dict(),
+    }
+    torch.save(checkpoint, app_dir / "tiny_0.pt")
+    torch.save(checkpoint, app_dir / "tiny_1.pt")
+
+
+def _build_finetune_dataset(dataset_dir: Path) -> None:
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(4):
+        case_dir = dataset_dir / f"CASE_{idx:03d}"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        zz, yy, xx = np.meshgrid(
+            np.linspace(-0.2, 0.2, 3, dtype=np.float32),
+            np.linspace(-1.0, 1.0, 16, dtype=np.float32),
+            np.linspace(-1.0, 1.0, 16, dtype=np.float32),
+            indexing="ij",
+        )
+        mr = np.clip(0.45 * yy + 0.35 * xx + zz + (idx - 1.5) * 0.05, -0.9, 0.9).astype(np.float32)
+        ct = np.tanh(1.25 * mr - 0.15).astype(np.float32)
+        mask = np.ones_like(mr, dtype=np.uint8)
+        _write_image(case_dir / "MR.mha", mr, SimpleITK.sitkFloat32)
+        _write_image(case_dir / "CT.mha", ct, SimpleITK.sitkFloat32)
+        _write_image(case_dir / "MASK.mha", mask, SimpleITK.sitkUInt8)
+
+
+def _run_finetune(
+    app_dir: Path,
+    dataset_dir: Path,
+    output_dir: Path,
+    *,
+    models: list[str] | None = None,
+    epochs: int = 2,
+) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        sys.executable,
+        "-c",
+        (
+            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
+            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
+            "from konfai_apps.cli import main_apps; main_apps()"
+        ),
+        "fine-tune",
+        str(app_dir),
+        "FT",
+        "-d",
+        str(dataset_dir),
+        "--epochs",
+        str(epochs),
+        "--cpu",
+        "1",
+        "-o",
+        str(output_dir),
+    ]
+    if models:
+        cmd += ["--models", *models]
+    return run(cmd)
+
+
+def _assert_finetuned_from_checkpoint(checkpoint_path: Path) -> None:
+    """A fine-tuned checkpoint must start fresh (counters reset) yet have actually trained."""
+    assert checkpoint_path.exists(), checkpoint_path
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert state["epoch"] < _PRETRAINED_EPOCH, f"epoch not reset: {state['epoch']}"
+    assert 0 < state["it"] < _PRETRAINED_IT, f"training did not run from a fresh counter: it={state['it']}"
+
+
+def test_finetune_single_model_resumes_from_checkpoint_and_trains(tmp_path: Path) -> None:
+    app_dir = tmp_path / "TinySynthApp"
+    dataset_dir = tmp_path / "Dataset"
+    output_dir = tmp_path / "Output"
+    _write_local_finetune_app(app_dir)
+    _build_finetune_dataset(dataset_dir)
+
+    result = _run_finetune(app_dir, dataset_dir, output_dir, models=["tiny_0"])
+    assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+
+    meta = _read_json(output_dir / "app.json")
+    assert meta["display_name"] == "FT"
+    assert meta["models"] == ["tiny_0.pt"]
+
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.pt")
+    # Only the selected checkpoint is packaged, and the bundle is clean (no training artifacts).
+    assert not (output_dir / "tiny_1.pt").exists()
+    for artifact in ("Checkpoints", "Statistics", "Dataset"):
+        assert not (output_dir / artifact).exists(), artifact
+
+
+def test_finetune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
+    app_dir = tmp_path / "TinySynthApp"
+    dataset_dir = tmp_path / "Dataset"
+    output_dir = tmp_path / "Output"
+    _write_local_finetune_app(app_dir)
+    _build_finetune_dataset(dataset_dir)
+
+    result = _run_finetune(app_dir, dataset_dir, output_dir)  # no --models
+    assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+
+    meta = _read_json(output_dir / "app.json")
+    assert meta["models"] == ["tiny_0.pt"]
+    assert (output_dir / "tiny_0.pt").exists()
+    assert not (output_dir / "tiny_1.pt").exists()
+
+
+def test_finetune_multiple_models_produces_one_checkpoint_each(tmp_path: Path) -> None:
+    app_dir = tmp_path / "TinySynthApp"
+    dataset_dir = tmp_path / "Dataset"
+    output_dir = tmp_path / "Output"
+    _write_local_finetune_app(app_dir)
+    _build_finetune_dataset(dataset_dir)
+
+    result = _run_finetune(app_dir, dataset_dir, output_dir, models=["tiny_0", "tiny_1"])
+    assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+
+    meta = _read_json(output_dir / "app.json")
+    assert meta["models"] == ["tiny_0.pt", "tiny_1.pt"]
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.pt")
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_1.pt")
