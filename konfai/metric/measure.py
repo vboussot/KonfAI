@@ -1275,19 +1275,36 @@ class IMPACTSynth(CriterionWithAttribute):
 
 
 class SAM_Perceptual(CriterionWithAttribute):
-    def __init__(self) -> None:
+    """SAM-feature perceptual criterion usable both as a metric and as a training loss.
+
+    With ``train=False`` (a **metric**) it uses the metric-tuned model
+    ``VBoussot/ImpactSynth/<model_name>`` over all feature layers. With ``train=True`` (a **loss**) it
+    uses the raw feature extractor ``VBoussot/impact-torchscript-models`` / ``SAM2.1/<model_name>`` and
+    applies per-layer ``weights`` (e.g. ``[0, 1, 1, 0]``); a weight of ``0`` skips that layer.
+    """
+
+    def __init__(
+        self,
+        train: bool = False,
+        model_name: str = "SAM2.1_Small.pt",
+        weights: list[float] | None = None,
+    ) -> None:
         super().__init__()
         self.model: torch.nn.Module | None = None
         self.loss = torch.nn.L1Loss()
-        self.model_path = hf_hub_download(
-            repo_id="VBoussot/ImpactSynth", filename="SAM2.1_Small.pt", repo_type="model", revision=None
-        )  # nosec B615
+        self.weights = weights
+        self.nb_layer = len(weights) if weights is not None else 4
+        if train:
+            repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
+        else:
+            repo_id, filename = "VBoussot/ImpactSynth", model_name
+        self.model_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
 
     def preprocessing(self, tensor: torch.Tensor, attribute: list[Attribute]) -> list[torch.Tensor]:
         tensor = tensor.repeat(1, 3, 1, 1)
         return [
             tensor,
-            torch.tensor([4]),
+            torch.tensor([self.nb_layer]),
             torch.tensor(
                 [
                     [
@@ -1318,11 +1335,16 @@ class SAM_Perceptual(CriterionWithAttribute):
             mask_patch = model_patch.get_data(mask, index, 0, True) if mask is not None else None
 
             if mask is None or (mask_patch is not None and torch.any(mask_patch == 1)):
-                for zipped_output in zip(
-                    model(model_patch.get_data(output[0], index, 0, True), output[1], output[2]),
-                    model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
-                    strict=False,
+                for i, zipped_output in enumerate(
+                    zip(
+                        model(model_patch.get_data(output[0], index, 0, True), output[1], output[2]),
+                        model(model_patch.get_data(target[0], index, 0, True), target[1], target[2]),
+                        strict=False,
+                    )
                 ):
+                    weight = self.weights[i] if self.weights is not None else 1.0
+                    if weight == 0:
+                        continue
                     output_feature = zipped_output[0]
                     target_feature = zipped_output[1]
                     if mask_patch is not None:
@@ -1334,14 +1356,14 @@ class SAM_Perceptual(CriterionWithAttribute):
                             == 1
                         )
                         if torch.any(mask_index_resampled):
-                            loss += self.loss(
+                            loss += weight * self.loss(
                                 torch.masked_select(output_feature, mask_index_resampled).float(),
                                 torch.masked_select(target_feature, mask_index_resampled).float(),
                             )
                         else:
                             continue
                     else:
-                        loss += self.loss(output_feature.float(), target_feature.float())
+                        loss += weight * self.loss(output_feature.float(), target_feature.float())
                 true_nb += 1
         return loss, true_nb
 
@@ -1349,6 +1371,9 @@ class SAM_Perceptual(CriterionWithAttribute):
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> tuple[torch.Tensor, float]:
         mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
+        # ``targets[0]`` is the reference (e.g. CT), normalized with its own stats; the same stats
+        # normalize the prediction since both live in the same intensity space.
+        target_attributes = attributes[0]
 
         if self.model is None:
             self.model = torch.jit.load(self.model_path, map_location=torch.device("cpu"))  # nosec B614
@@ -1365,13 +1390,13 @@ class SAM_Perceptual(CriterionWithAttribute):
                 loss_tmp, true_nb_tmp = self._compute(
                     output[:, :, i, ...],
                     targets[0][:, :, i, ...],
-                    attributes[1],
+                    target_attributes,
                     mask[:, :, i, ...] if mask is not None else None,
                 )
                 loss += loss_tmp
                 true_nb += true_nb_tmp
         else:
-            loss, true_nb = self._compute(output, targets[0], attributes[1], mask)
+            loss, true_nb = self._compute(output, targets[0], target_attributes, mask)
         return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
 
 
