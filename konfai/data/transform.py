@@ -157,6 +157,12 @@ class Clip(Transform):
         else:
             max_value = self.max_value
 
+        # Resolved bounds may be a torch 0-d tensor ("min"/"max") or a numpy scalar
+        # ("percentile:<p>"); coerce to a Python float so the in-place assignments below are valid
+        # for a torch tensor across numpy/torch versions.
+        min_value = float(min_value)
+        max_value = float(max_value)
+
         tensor[torch.where(tensor.float() < min_value)] = min_value
         tensor[torch.where(tensor.float() > max_value)] = max_value
         if self.save_clip_min:

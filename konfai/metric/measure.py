@@ -958,6 +958,12 @@ class IMPACTReg(CriterionWithAttribute):
     ) -> tuple[torch.Tensor, float]:
         mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
 
+        # The prediction and the target share the same intensity space, so a single target attribute
+        # (single-group target such as ``CT``) is reused to normalize both output and target; a second
+        # attribute set is honored when the target is multi-group.
+        output_attributes = attributes[0]
+        target_attributes = attributes[1] if len(attributes) > 1 else attributes[0]
+
         if self.model is None:
             self.model = torch.jit.load(self.model_path)  # nosec B614
         self.model.to(output.device)
@@ -969,15 +975,15 @@ class IMPACTReg(CriterionWithAttribute):
             for i in range(output.shape[2]):
                 loss_tmp, true_nb_tmp = self._compute(
                     output[:, :, i, ...],
-                    attributes[0],
+                    output_attributes,
                     targets[0][:, :, i, ...],
-                    attributes[1],
+                    target_attributes,
                     mask[:, :, i, ...] if mask is not None else None,
                 )
                 loss += loss_tmp
                 true_nb += true_nb_tmp
         else:
-            loss, true_nb = self._compute(output, attributes[0], targets[0], attributes[1], mask)
+            loss, true_nb = self._compute(output, output_attributes, targets[0], target_attributes, mask)
         return loss / true_nb, np.nan if true_nb == 0 else loss.item() / true_nb
 
 

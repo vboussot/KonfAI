@@ -1015,6 +1015,7 @@ async def fine_tune(
     name: Annotated[str, Form()] = "Finetune",
     epochs: Annotated[int, Form()] = 10,
     it_validation: Annotated[int, Form()] = 1000,
+    models: Annotated[str, Form()] = "",  # CSV
     config_file: Annotated[str, Form()] = "Config.yml",
     gpu: Annotated[str | None, Form()] = "",
     cpu: Annotated[int, Form()] = 1,
@@ -1038,6 +1039,8 @@ async def fine_tune(
         Number of training epochs.
     it_validation : int
         Validation interval.
+    models : str
+        Comma-separated checkpoint name(s) to fine-tune (empty = first available).
     config_file : str
         Training configuration file.
     gpu : str | None
@@ -1064,6 +1067,9 @@ async def fine_tune(
         "--it_validation",
         str(it_validation),
     ]
+    models_list = [x.strip() for x in models.split(",") if x.strip()]
+    if models_list:
+        cmd += ["--models", *models_list]
     return cmd
 
 

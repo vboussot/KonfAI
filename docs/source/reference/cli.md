@@ -119,8 +119,10 @@ This command is provided by the standalone `konfai-apps` package.
 
 - positional `name`
 - `-d`, `--dataset`
+- `--models` — checkpoint name(s) to fine-tune, e.g. `CV_0 CV_1` (default: first available)
 - `--epochs`
 - `--it-validation`
+- `--config` (aliases: `--config-file`, `--config_file`)
 
 ## `konfai-apps-server`
 

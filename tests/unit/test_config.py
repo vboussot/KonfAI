@@ -181,6 +181,37 @@ def test_apply_config_converts_sequence_of_union_scalars(
     assert all(isinstance(value, int) for value in root.values)
 
 
+def test_apply_config_binds_scalar_float_or_str_union(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mirrors the Clip transform (``min_value``/``max_value: float | str``) which accepts numeric
+    # bounds as well as string sentinels such as ``min`` / ``percentile:99.5``.
+    _configure_env(
+        tmp_path,
+        monkeypatch,
+        "Root:\n  low: min\n  high: 'percentile:99.5'\n  fixed: 1024\n",
+    )
+
+    class Root:
+        def __init__(
+            self,
+            low: float | str = 0.0,
+            high: float | str = 0.0,
+            fixed: float | str = 0.0,
+        ) -> None:
+            self.low = low
+            self.high = high
+            self.fixed = fixed
+
+    root = apply_config("Root")(Root)()
+
+    assert root.low == "min"
+    assert root.high == "percentile:99.5"
+    assert root.fixed == 1024.0
+    assert isinstance(root.fixed, float)
+
+
 def test_apply_config_honors_konfai_without_for_skipped_parameters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
